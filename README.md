@@ -306,4 +306,4 @@ Setup instructions, supported platforms, architecture details, and test commands
 
 ## License
 
-No license has been selected yet. Until one is added, all rights are reserved.
+Browsphere is released under the [MIT License](LICENSE). You are free to use, modify, and distribute the project under the terms of that license.
