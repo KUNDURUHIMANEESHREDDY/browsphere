@@ -69,6 +69,63 @@ For this to count as a successful task, Browsphere should:
 
 We would rather make one workflow dependable than claim that Browsphere can automate every website from day one.
 
+## How the agent gets work done
+
+A browser task involves more than sending a prompt to a model and hoping for the best. Browsphere needs to keep track of what the user asked for, what it has tried, what happened on the page, and what remains to be done.
+
+The intended execution flow looks like this:
+
+1. **Understand the request** — Work out the user's goal and identify anything that needs clarification.
+2. **Make a plan** — Break the goal into smaller steps that can be carried out and checked.
+3. **Observe the page** — Inspect the current browser state before deciding what to do.
+4. **Choose and perform an action** — Navigate, click, type, or collect information within the permissions granted.
+5. **Check the result** — Confirm what changed instead of assuming the action worked.
+6. **Continue or recover** — Move to the next step, retry safely, ask for help, or stop if the task cannot continue.
+7. **Verify the outcome** — Compare the final state with what the user originally asked for.
+
+The model can help decide what to do next, but the browser runtime is responsible for carrying out the action and reporting what actually happened. Keeping those responsibilities separate makes it easier to test and debug the system.
+
+## See what the agent is doing
+
+Some people want to watch an agent work; others just want the result. Browsphere should support both.
+
+The transparency view is intended to show useful activity, such as:
+
+- The current task and step.
+- The website or page being inspected.
+- Browser actions the agent attempted.
+- What the page showed in response.
+- Sources and evidence collected.
+- Approval requests, errors, and blockers.
+- Whether the task has passed its final checks.
+
+This is an execution record, not a display of private hidden reasoning. Users should be able to understand what happened without needing access to the model's internal chain of thought.
+
+The view can be hidden to keep the interface uncluttered. Hiding it should only change what is displayed; it should not stop task tracking or weaken the underlying safety checks.
+
+## A record of every task: the Task Passport
+
+We want every task to leave behind a useful record of what happened. We're calling this the **Task Passport**.
+
+Think of it as a flight recorder for a browser agent. If a task succeeds, it helps explain why the result can be trusted. If something goes wrong, it gives us a way to understand where and why it happened.
+
+A Task Passport is intended to capture:
+
+| Record | What it tells us |
+|---|---|
+| User request | What the user asked Browsphere to do |
+| Plan | The steps the agent intended to follow |
+| Actions | Browser actions attempted during the task |
+| Sources | Pages and websites used |
+| Observations | Relevant information the browser actually encountered |
+| Approvals | Actions the user reviewed and approved |
+| Errors and recovery | What went wrong and what the agent tried next |
+| Final result | What was completed, left incomplete, or blocked |
+| Verification | How the final outcome was checked |
+| Timestamps | When important task events happened |
+
+The Task Passport should make task history useful, support debugging, and help us measure reliability. It should not become a reason to store unnecessary personal information: sensitive data needs appropriate protection and retention limits.
+
 ## Keeping the user in control
 
 A browser agent can encounter private information and actions that have real-world consequences. Trust cannot be an afterthought.
@@ -86,6 +143,21 @@ Browsphere is designed around a few important safeguards:
 
 A webpage should never be able to persuade the agent to reveal secrets or ignore the user's instructions.
 
+### Handling failures and unexpected pages
+
+Websites are not predictable interfaces. A button can move, a page can load slowly, a session can expire, or a site can change while the agent is working. Browsphere needs to handle those situations without pretending everything went to plan.
+
+The intended approach is to:
+
+- Check the page state before taking an action.
+- Use bounded retries for temporary failures rather than repeating actions indefinitely.
+- Avoid repeating actions that could create duplicates, such as submitting a form twice.
+- Detect when login, approval, or additional information is needed.
+- Save enough task progress to understand what has already happened.
+- Stop and explain the problem when continuing would be unsafe or unreliable.
+
+A retry should not be treated as automatically safe. Before repeating an action, the agent needs to consider whether the first attempt may already have changed something.
+
 ## How the system fits together
 
 Browsphere is made up of a few parts that work together:
@@ -102,6 +174,8 @@ A task might move through:
 `CREATED → PLANNING → RUNNING → VERIFYING → COMPLETED`
 
 Some tasks may pause for approval or user input. Others may be blocked, fail, or be cancelled. A click succeeding does not automatically mean the user's goal has been achieved, so verification is a separate step.
+
+At a high level, the browser client communicates with the task orchestrator. The orchestrator coordinates the model and browser runtime, while evidence and verification services check the work. Cloud services can support storage and background processing, and the voice service can handle spoken input and output. The exact deployment choices will depend on what the MVP needs.
 
 ## Why AWS?
 
@@ -161,6 +235,19 @@ For a spoken research request, the flow would look like this:
 
 AWS and ElevenLabs support the experience; they do not replace Browsphere's own orchestration, browser agent, or verification logic.
 
+## How Browsphere is different
+
+There are AI tools that answer questions about the web, and there are agents that can interact with websites. Browsphere's goal is to bring the useful parts of those experiences together while making the work easier to inspect and control.
+
+The distinction we're aiming for comes down to four things:
+
+- **Get the task done:** Focus on the outcome, not just a response that tells the user what to do.
+- **Show the work:** Let users inspect meaningful browser activity when they want to.
+- **Prove the result:** Keep evidence and check whether the requested outcome was actually reached.
+- **Keep the user in control:** Ask before consequential actions and make it possible to stop the agent.
+
+These are the principles we want the product to earn through implementation and testing, not claims that every other browser or agent lacks these features.
+
 ## How we'll know it's working
 
 We want to measure whether Browsphere actually helps people finish tasks, not just whether it can produce an impressive-looking demo.
@@ -182,8 +269,9 @@ We'll report the test conditions, number of runs, failures, and limitations alon
 1. **Get the foundations in place:** Build the browser experience, chat, task model, and backend connection.
 2. **Make the agent useful:** Add task planning, page observation, supported browser actions, and reliable error handling.
 3. **Make results trustworthy:** Add evidence capture, verification, approval gates, and protection against malicious webpage instructions.
-4. **Connect the services:** Integrate the AWS infrastructure and the specific ElevenLabs voice capabilities the product needs.
-5. **Test real tasks:** Run repeatable workflows, measure what works, fix the weak points, and prepare a reliable demo.
+4. **Make work inspectable:** Build the execution trace and Task Passport so users and developers can understand what happened.
+5. **Connect the services:** Integrate the AWS infrastructure and the specific ElevenLabs voice capabilities the product needs.
+6. **Test real tasks:** Run repeatable workflows, measure what works, fix the weak points, and prepare a reliable demo.
 
 ## Project status
 
@@ -208,6 +296,7 @@ A short demo should follow one task from beginning to end:
 4. The transparency view shows what it is doing, and can be hidden to show the simpler experience.
 5. The final comparison includes source links and clearly marked unknowns.
 6. Browsphere verifies the requested information and shows any step that could not be completed.
+7. The Task Passport provides a record of the plan, actions, evidence, and final checks.
 
 The demo should use real, repeatable execution. If a recording is used as a fallback, it should be clearly presented as a recording.
 
