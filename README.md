@@ -2,187 +2,219 @@
 
 **The browser that works for you.**
 
-Browsphere is an AI-native browser concept built around a simple shift: instead of manually navigating the web one step at a time, users describe an outcome and delegate supported multi-step web tasks to an AI agent.
+Browsphere is an AI-native browser built around a simple idea: you should be able to tell your browser what you want to get done, instead of having to do every step yourself.
 
-Browsphere aims to combine a chat-first browser experience with browser automation, task planning, evidence-backed results, and user-controlled autonomy.
+Rather than stopping at an answer, Browsphere aims to plan and carry out useful web tasks. It brings together a chat-first experience, browser automation, evidence-backed results, and controls that keep the user in charge.
 
-> **Turn the browser from a place where users do the work into a place where users can delegate the work.**
+> **Less time navigating the web. More time getting things done.**
 
-## The problem
+## Why Browsphere?
 
-Browsers are excellent at displaying websites, but people still do the work of searching, opening pages, comparing information, moving between tabs, filling forms, and checking whether a task was completed. General-purpose chat assistants can explain how to do these things, but an explanation is not the same as carrying out a browser workflow.
+A lot of everyday work happens in a browser: researching a topic, comparing products, checking information across different websites, or completing a sequence of online steps.
 
-Browsphere explores a browser that can understand a requested outcome, plan the steps, interact with supported websites, collect evidence, and report what it actually accomplished.
+Today, we still do most of that work manually. We open tabs, search, copy information, compare details, and double-check whether we missed something. A chatbot can make this easier by explaining or summarizing, but that does not necessarily mean the task gets completed.
 
-## Product experience
+Browsphere is being built to close that gap. You describe the outcome you want, and the browser agent works through the steps on supported websites, keeps track of what it does, and brings the result back to you.
 
-The primary interface is a conversation. A user assigns a task in natural language; Browsphere plans and executes it through the browser.
+## How it should feel to use
 
-An optional transparency view lets users inspect meaningful execution activity. Users can hide this view when they prefer a simpler chat experience. Hiding the activity view must not disable the agent.
+The main way to interact with Browsphere is through chat. You give it a task in plain language, it makes a plan, and then it gets to work in the browser.
 
-### Intended task lifecycle
+If you want to see what's happening, you can open the transparency view. It shows useful execution details such as the current step, browser actions, sources collected, and anything that needs your attention. If you would rather keep things simple, you can hide that view. The agent continues working either way.
 
-1. **Ask** — The user describes the outcome they want.
-2. **Plan** — Browsphere turns the request into clear, actionable steps.
-3. **Execute** — The browser agent navigates supported websites and performs permitted actions.
-4. **Observe** — The system records task progress, meaningful actions, and page context.
-5. **Verify** — It checks whether the requested outcome was achieved.
-6. **Report** — The user receives the result, source evidence, and any incomplete steps.
+### A typical task
 
-## Core product principles
+1. **You ask:** Describe what you want done.
+2. **Browsphere plans:** It breaks the request into steps.
+3. **It works:** The browser agent visits supported websites and carries out permitted actions.
+4. **It keeps track:** Progress, useful observations, and sources are recorded.
+5. **It checks:** The system verifies whether the requested result was actually achieved.
+6. **You get the result:** Browsphere shares the outcome, supporting sources, and anything it could not complete.
 
-- **Outcome-oriented:** Users describe what they want accomplished, not every click.
-- **User-controlled:** Consequential actions require explicit approval.
-- **Observable:** Users can inspect plans, actions, progress, evidence, and verification status without exposing private hidden reasoning.
-- **Evidence-backed:** Important claims should link to sources; unknown or unsupported facts must remain clearly marked.
-- **Recoverable:** Errors, blocked pages, and incomplete tasks are reported honestly.
-- **Progressively autonomous:** Start with bounded research and low-risk workflows; expand autonomy as reliability is demonstrated.
+## What we're building
 
-## Planned capabilities
+The following is the intended product direction. It should not be read as a claim that every feature is already implemented.
 
-The following describes the product direction, not a claim that every capability is currently implemented.
-
-| Capability | Intended behavior |
+| Capability | What it means |
 |---|---|
-| Chat-first task input | Accept natural-language browser tasks |
-| Task planning | Break a goal into an understandable sequence of steps |
-| Browser control | Navigate and interact with supported websites |
-| Execution transparency | Show meaningful task and browser activity in an optional panel |
-| Evidence collection | Preserve source URLs and relevant observations |
-| Result synthesis | Return structured answers, comparisons, and summaries |
-| Verification | Check outcomes instead of trusting an agent's completion claim |
-| Approval gates | Pause before consequential actions |
-| Task history | Allow users to revisit previous task outcomes |
-| Voice interaction | Support spoken task input and responses through an integrated voice service |
+| Chat-based tasks | Ask Browsphere to do something using everyday language |
+| Task planning | See the steps it intends to take |
+| Browser automation | Navigate and interact with supported websites |
+| Optional transparency | Inspect meaningful execution activity when you want to |
+| Evidence collection | Keep links and relevant information from the pages it visits |
+| Research and summaries | Turn collected information into useful answers and comparisons |
+| Outcome verification | Check the result instead of assuming an action worked |
+| Approval before sensitive actions | Keep the user in control of consequential steps |
+| Task history | Revisit previous tasks and their results |
+| Voice interaction | Speak requests and hear responses through the selected voice integration |
 
-## MVP focus
+## The first milestone: research that gets finished
 
-The initial MVP should prove one complete workflow reliably: **multi-site research and comparison**.
+For the first MVP, we're focusing on one useful workflow: researching information across multiple websites and comparing what we find.
 
-Example request:
+For example:
 
 > Compare five project-management tools for a student team. Check their free plans, collaboration features, and limitations. Give me a comparison table with sources.
 
-A successful run should:
+For this to count as a successful task, Browsphere should:
 
-- Create a task plan.
-- Search and inspect a defined set of relevant websites.
-- Extract the requested facts.
-- Preserve source URLs and supporting evidence.
-- Mark missing or uncertain information instead of inventing it.
-- Produce a structured comparison.
-- Show execution progress when transparency is enabled.
-- Report completion only after checking the required outputs.
+- Turn the request into a clear plan.
+- Visit a defined set of relevant websites.
+- Find the information the user asked for.
+- Keep the source links and supporting observations.
+- Mark information it could not verify instead of making it up.
+- Produce a useful comparison.
+- Show progress in the transparency view when it is enabled.
+- Check that the requested parts of the task are complete before reporting success.
 
-The MVP should prioritize a repeatable end-to-end workflow over broad claims of universal website automation.
+We would rather make one workflow dependable than claim that Browsphere can automate every website from day one.
 
-## Trust, safety, and privacy
+## Keeping the user in control
 
-Browsphere is intended to operate in environments where websites may contain sensitive information and actions can have real consequences.
+A browser agent can encounter private information and actions that have real-world consequences. Trust cannot be an afterthought.
 
-The design therefore calls for:
+Browsphere is designed around a few important safeguards:
 
-- Explicit approval before purchases, submissions, messages, account changes, and other consequential actions.
-- Stop and cancel controls.
-- Least-privilege access to credentials and external services.
-- Server-side handling of API keys and secrets.
-- Data minimization and clear retention/deletion behavior.
-- Separation of trusted instructions from untrusted webpage content.
-- Protection against prompt injection in pages and documents.
-- Respect for website access controls, rate limits, and applicable terms.
-- Honest reporting of failures and incomplete work.
+- Ask for approval before actions such as purchases, submissions, sending messages, or changing account settings.
+- Let users stop or cancel a task.
+- Keep API keys and credentials out of the client wherever possible.
+- Give services only the access they need.
+- Collect and retain only the data needed to complete the task.
+- Treat webpage content as untrusted information, not as instructions that can override the user's request.
+- Respect website access controls and rate limits.
+- Be clear when a task fails, gets blocked, or is only partly complete.
 
-Webpage content is data to inspect, not an authority that can override user intent or system policies.
+A webpage should never be able to persuade the agent to reveal secrets or ignore the user's instructions.
 
-## Proposed architecture
+## How the system fits together
 
-The system is organized into independently replaceable layers:
+Browsphere is made up of a few parts that work together:
 
-1. **Browser client** — Browser UI, chat, task status, results, approval controls, and optional transparency view.
-2. **Task orchestrator** — Intent interpretation, planning, task state, scheduling, policy checks, and recovery.
-3. **Browser agent** — Page observation, navigation, element interaction, and action results.
-4. **Evidence and verification** — Source capture, provenance, outcome checks, and final reporting.
-5. **Model and voice services** — Model-provider abstraction for planning/extraction and voice capabilities.
-6. **Cloud infrastructure** — Hosting, persistence, secrets, queues, and monitoring as required.
+1. **Browser experience** — The browser interface, chat, task progress, results, and approval controls.
+2. **Task orchestrator** — Understands the request, plans the work, tracks progress, and decides what should happen next.
+3. **Browser agent** — Observes pages, navigates websites, and performs permitted interactions.
+4. **Evidence and verification** — Keeps track of sources and checks whether the requested outcome was reached.
+5. **AI and voice services** — Support task planning, information extraction, and spoken interaction.
+6. **Cloud infrastructure** — Supports the backend, storage, queues, secrets, and monitoring where needed.
 
-### Task state model
-
-A task may move through states such as:
+A task might move through:
 
 `CREATED → PLANNING → RUNNING → VERIFYING → COMPLETED`
 
-It may also enter `AWAITING_APPROVAL`, `NEEDS_USER_INPUT`, `BLOCKED`, `FAILED`, or `CANCELLED` as appropriate.
+Some tasks may pause for approval or user input. Others may be blocked, fail, or be cancelled. A click succeeding does not automatically mean the user's goal has been achieved, so verification is a separate step.
 
-A successful browser action is not, by itself, proof that the user's intended outcome occurred. Verification is a distinct stage.
+## Why AWS?
 
-## Technology integration direction
+AWS is intended to provide the cloud foundation behind Browsphere. It is not the part that decides what the user wants or controls the browser; it provides the backend services that help the application run reliably.
 
-### AWS
+For example, when someone gives Browsphere a research task, the backend needs to create a task record, keep track of its progress, store useful files, protect credentials, and make it possible to investigate errors. AWS services can take care of those infrastructure responsibilities so the product can focus on completing the task.
 
-AWS is the proposed cloud infrastructure foundation. Service selection should be driven by the actual deployment needs. Potential responsibilities include application hosting, object storage, task metadata, queues, secrets management, authentication, and operational monitoring.
+Depending on the needs of the implementation, the AWS pieces could include:
 
-Candidate services include Amazon S3, Amazon CloudWatch, AWS Secrets Manager, Amazon SQS, Amazon RDS or DynamoDB, and an appropriate compute platform. These are options, not a statement that all are currently deployed.
-
-### ElevenLabs
-
-ElevenLabs is the proposed voice integration for spoken task input and spoken responses, using the specific speech and voice APIs selected during implementation.
-
-Voice should use the same task-planning, authorization, execution, and verification pipeline as typed chat. It must not bypass approval or safety controls.
-
-## Evaluation
-
-The MVP should be measured using repeatable tasks and explicit pass/fail criteria.
-
-| Metric | What it measures |
+| AWS service | Where it could help |
 |---|---|
-| Verified task completion rate | Whether the intended outcome was actually achieved |
-| Evidence-supported claim rate | Whether returned claims have supporting sources |
-| Successful action rate | Reliability of browser interactions |
-| Time and actions per task | Efficiency compared with manual completion |
-| Trace completeness | Whether meaningful execution events are inspectable |
-| Approval-gate compliance | Whether consequential actions are correctly paused |
-| Recovery rate | Whether recoverable failures can be handled safely |
+| Amazon S3 | Store generated reports and other task files |
+| Amazon SQS | Queue work that should run in the background |
+| Amazon DynamoDB or Amazon RDS | Keep task records, status, and related metadata |
+| AWS Secrets Manager | Store service credentials securely on the backend |
+| Amazon CloudWatch | Collect logs and help investigate errors and performance |
+| Amazon ECS / Fargate, EC2, or another suitable compute option | Run backend services and agent workers |
 
-Publish measured results with the number of trials, test conditions, failures, and limitations. Do not present unmeasured performance as fact.
+We do not need every service just because it is available. The final architecture should use only the AWS services that solve a real requirement for the MVP. The table above describes the intended options; it does not mean they are all deployed today.
+
+## Why ElevenLabs?
+
+We want Browsphere to feel natural to use, whether someone prefers typing or speaking. ElevenLabs is intended to power the voice side of that experience.
+
+A user could speak a request instead of typing it. Browsphere would turn that request into the same task flow, use the browser agent to do the work, and then present the result on screen. If the user wants, it could also read the result or task updates aloud.
+
+Depending on the ElevenLabs products and APIs selected, this could include:
+
+- **Speech input:** Turn a spoken request into text the task system can understand.
+- **Text-to-speech:** Read answers, summaries, or progress updates aloud.
+- **Streaming voice:** Make spoken interactions feel more responsive.
+- **Voice design or selection:** Give the product a consistent voice.
+
+The important part is that voice does not become a separate agent with different permissions. Whether a task comes from typed chat or speech, it goes through the same planning, safety checks, browser execution, and verification. Speaking a request must never bypass an approval step.
+
+These are the intended integration roles. The exact ElevenLabs APIs and the features connected to them should be documented as they are implemented and tested.
+
+## How AWS, ElevenLabs, and the agent work together
+
+Think of the responsibilities this way:
+
+- **Browsphere is the product:** it owns the browser experience, task flow, permissions, and results.
+- **The AI model helps understand and plan:** it interprets requests, structures tasks, and helps process information.
+- **The browser agent does the web work:** it navigates pages and performs allowed actions.
+- **AWS supports the backend:** it can host services, store task data and files, manage background work, and provide monitoring.
+- **ElevenLabs adds voice:** it can let users speak to Browsphere and hear responses.
+
+For a spoken research request, the flow would look like this:
+
+1. The user speaks a request.
+2. The selected ElevenLabs speech service converts the audio into text, where that capability is used.
+3. Browsphere's task system plans the request and applies its normal safety rules.
+4. The browser agent visits the relevant websites and gathers information.
+5. The backend uses the selected AWS services to manage task state, background work, and stored artifacts.
+6. Browsphere checks the collected information and prepares the result.
+7. The result appears in the browser and can optionally be spoken using ElevenLabs text-to-speech.
+
+AWS and ElevenLabs support the experience; they do not replace Browsphere's own orchestration, browser agent, or verification logic.
+
+## How we'll know it's working
+
+We want to measure whether Browsphere actually helps people finish tasks, not just whether it can produce an impressive-looking demo.
+
+| Measure | What we'll look at |
+|---|---|
+| Verified task completion | Did the task reach the outcome the user asked for? |
+| Evidence-backed claims | Can important statements be traced to sources? |
+| Browser action reliability | How often do the required browser steps work? |
+| Time to complete | Does delegation save time compared with doing it manually? |
+| Execution visibility | Can users understand what happened when they choose to inspect it? |
+| Approval behavior | Does the agent pause when a consequential action needs permission? |
+| Failure recovery | Can it explain and recover from common problems? |
+
+We'll report the test conditions, number of runs, failures, and limitations alongside any results. We won't present targets or guesses as measured performance.
 
 ## Roadmap
 
-1. **Foundation:** Establish the browser client, chat interface, task model, and backend connection.
-2. **Agent execution:** Add planning, page observation, bounded browser actions, cancellation, and error handling.
-3. **Evidence and trust:** Add source capture, execution records, verification, approval gates, and prompt-injection defenses.
-4. **Integrations:** Connect the required cloud infrastructure and selected ElevenLabs voice capabilities.
-5. **Validation:** Run repeatable end-to-end tasks, measure reliability, fix high-impact failures, and prepare the demo.
+1. **Get the foundations in place:** Build the browser experience, chat, task model, and backend connection.
+2. **Make the agent useful:** Add task planning, page observation, supported browser actions, and reliable error handling.
+3. **Make results trustworthy:** Add evidence capture, verification, approval gates, and protection against malicious webpage instructions.
+4. **Connect the services:** Integrate the AWS infrastructure and the specific ElevenLabs voice capabilities the product needs.
+5. **Test real tasks:** Run repeatable workflows, measure what works, fix the weak points, and prepare a reliable demo.
 
 ## Project status
 
-This repository is the project home for Browsphere. The repository's implementation status should be updated as work is delivered and verified.
+This repository is the home for Browsphere. We will keep implementation status honest as the project develops.
 
-Use these labels in future documentation:
+Use these labels when documenting features:
 
 - **Implemented and verified**
 - **Implemented, not fully verified**
 - **In progress**
 - **Planned**
 
-Do not describe a mockup, design, placeholder, or proposed integration as a completed capability.
+A mockup, placeholder, or proposed integration should never be described as a completed feature.
 
-## Demo scenario
+## Demo idea
 
-A concise demonstration should show:
+A short demo should follow one task from beginning to end:
 
-1. A user assigning a multi-site research task in chat.
-2. Browsphere generating a plan.
-3. The agent navigating real supported pages and collecting evidence.
-4. The optional transparency panel showing meaningful execution activity.
-5. A structured result with source links and explicit unknowns.
-6. A verification step and, where relevant, an approval gate.
+1. The user asks Browsphere to research and compare several tools.
+2. Browsphere creates a plan.
+3. The agent visits real websites and collects information.
+4. The transparency view shows what it is doing, and can be hidden to show the simpler experience.
+5. The final comparison includes source links and clearly marked unknowns.
+6. Browsphere verifies the requested information and shows any step that could not be completed.
 
-The demo should use real, repeatable execution. If a recording is used as a fallback, it should be identified as a recording rather than presented as live activity.
+The demo should use real, repeatable execution. If a recording is used as a fallback, it should be clearly presented as a recording.
 
-## Contributing and development
+## Development
 
-Development instructions, supported platforms, setup steps, and test commands will be documented here as the implementation is established. Until those details are verified, they are intentionally not guessed.
+Setup instructions, supported platforms, architecture details, and test commands will be added as they are confirmed in the repository. We don't want to invent commands or prerequisites that have not been tested.
 
 ## License
 
-No license has been specified yet. All rights are reserved unless and until a license is added to this repository.
+No license has been selected yet. Until one is added, all rights are reserved.
