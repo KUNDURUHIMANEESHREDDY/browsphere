@@ -36,6 +36,19 @@ Updated: 22 November 2026
 **Release status: NOT PRODUCTION-CERTIFIED.** This pass hardens critical safety/privacy paths; it does not certify unrestricted real-world autonomy.
 
 
+## Native multi-step regression harness — 23 November 2026
+
+A reproducible Windows test harness is now checked in:
+
+- `tests/e2e/fixture/multistep.html`: a safe local SPA with search input, Search button, a results list, and an observed `?video=robotics-demo` page transition.
+- `tests/e2e/lucia-local-model-server.cjs`: deterministic **loopback-only simulated Ollama** responses for planner, browser actions, recovery, and source verification; it neither connects to real AI providers nor asserts that a production model will behave identically.
+- `tests/e2e/lucia-multistep-mock.cjs`: actual Tauri/WebView2 UI-bridge integration checks for type → search → result click → fresh URL/evidence verification, plus primary-click failure → fallback → verified success.
+- `tests/e2e/run-lucia-multistep.ps1`: launches a separate application/profile with local mock server and CDP debugging, runs the integration tests, and closes test processes. Do not expose CDP ports to remote networks.
+- `tests/lucia-local-model.test.cjs`: deterministic mock planner/action/verifier unit tests, included in Windows CI.
+- `.github/workflows/build-windows.yml`: runs the native E2E suite after the installer build. A build is not considered passing if the local multi-step or recovery E2E fails.
+
+**Status and limitations:** Eight deterministic mock-model logic checks were exercised against the GitHub source in an isolated JavaScript runtime and passed. The GitHub-hosted Windows action may execute the new native suite on push, but there is not yet a checked/passing native Windows execution result after the patch. Native WebView2 and real YouTube/Qwen regression status are **unverified** while the authorized laptop connector is usage-limited. Run the PowerShell launcher on an interactive Windows development machine if GitHub-hosted runners cannot create an interactive WebView2 window.
+
 ## Autonomous browsing hardening — 23 November 2026 (code implemented; live rerun pending)
 
 The latest `main` includes these changes:
