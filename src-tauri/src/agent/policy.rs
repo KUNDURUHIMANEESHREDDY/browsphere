@@ -195,12 +195,28 @@ pub fn evaluate_policy(
                 );
             }
             if *is_submit {
-                return (
-                    RiskLevel::High,
-                    PolicyDecision::RequireApproval {
-                        reason: format!("Form submission via '{element_label}' ({node_id})"),
-                    },
-                );
+                // Routine form actions are part of the user's authorized task.
+                // Only consequential commitments require an explicit decision.
+                // This label is rebound to the observed DOM before evaluation.
+                let consequential = [
+                    "application", "apply now", "register", "sign up", "create account",
+                    "subscribe", "publish", "post publicly", "send email",
+                    "send message", "send invitation", "sign contract", "agree to terms",
+                    "accept offer", "finalize", "place order", "book now",
+                    "reserve", "submit identity", "upload id", "submit tax",
+                    "confirm", "consent", "authorize",
+                ];
+                if consequential.iter().any(|kw| label_lower.contains(kw)) {
+                    return (
+                        RiskLevel::High,
+                        PolicyDecision::RequireApproval {
+                            reason: format!(
+                                "Consequential form submission via '{element_label}' ({node_id})"
+                            ),
+                        },
+                    );
+                }
+                return (RiskLevel::Medium, PolicyDecision::Allow);
             }
             (RiskLevel::Medium, PolicyDecision::Allow)
         }
@@ -356,5 +372,34 @@ mod production_trace_privacy_tests {
             summary: "Personal account details".into(),
         }).sanitized();
         assert!(!serde_json::to_string(&completion).unwrap().contains("Personal account"));
+    }
+}
+
+#[cfg(test)]
+mod autonomous_form_tests {
+    use super::*;
+
+    fn submission(label: &str) -> BrowserAction {
+        BrowserAction::Click {
+            node_id: "submit_btn".into(), element_label: label.into(), is_submit: true,
+        }
+    }
+
+    #[test]
+    fn routine_form_submissions_run_without_popup() {
+        for label in ["Submit feedback", "Send search query", "Submit sample form", "Apply filters"] {
+            let (risk, result) = evaluate_policy("https://example.org", &submission(label), &[]);
+            assert!(matches!(result, PolicyDecision::Allow), "{label}");
+            assert_eq!(risk, RiskLevel::Medium);
+        }
+    }
+
+    #[test]
+    fn consequential_submissions_still_require_confirmation() {
+        for label in ["Submit application", "Register account", "Sign up", "Publish post publicly",
+                      "Pay now", "Delete account", "Send money", "Finalize contract"] {
+            let (_, result) = evaluate_policy("https://example.org", &submission(label), &[]);
+            assert!(matches!(result, PolicyDecision::RequireApproval { .. }), "{label}");
+        }
     }
 }

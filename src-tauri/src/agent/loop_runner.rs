@@ -79,6 +79,32 @@ fn stop_after_approval_outcome(outcome: &str) -> bool {
         | "ABORTED: approval channel closed" | "ABORTED: task cancelled")
 }
 
+/// Routine form submissions are autonomous; submitting a form whose observed
+/// controls include sensitive or consequential content still needs approval.
+/// The model cannot set or clear this signal: it comes from the live DOM.
+fn evaluate_live_action_policy(
+    origin: &str,
+    action: &BrowserAction,
+    allowed_domains: &[String],
+    snapshot: &DomSnapshot,
+) -> (RiskLevel, PolicyDecision) {
+    let result = evaluate_policy(origin, action, allowed_domains);
+    if let BrowserAction::Click { node_id, is_submit: true, .. } = action {
+        if matches!(result.1, PolicyDecision::Allow)
+            && snapshot.interactive_nodes.iter()
+                .any(|node| node.node_id == *node_id && node.is_sensitive)
+        {
+            return (
+                RiskLevel::High,
+                PolicyDecision::RequireApproval {
+                    reason: "Submitting this form may disclose sensitive data or make a consequential commitment".into(),
+                },
+            );
+        }
+    }
+    result
+}
+
 fn action_state_signature(stage: usize, action: &BrowserAction, snapshot: &DomSnapshot) -> String {
     let mut state_hash = std::collections::hash_map::DefaultHasher::new();
     snapshot.origin.hash(&mut state_hash);
@@ -486,7 +512,7 @@ pub async fn run_react_loop(
         }
 
         duplicate_retries = 0;
-        let (risk, mut decision) = evaluate_policy(&snapshot.origin, &action, &allowed_domains);
+        let (risk, mut decision) = evaluate_live_action_policy(&snapshot.origin, &action, &allowed_domains, &snapshot);
         let mut verified_report: Option<VerificationReport> = None;
         if !orchestrator.specialist().allows_on_page(&action, &snapshot) {
             decision = PolicyDecision::Deny {
@@ -887,5 +913,49 @@ mod live_loop_recovery_tests {
             action_state_signature(0, &action, &updated));
         assert_ne!(action_state_signature(0, &action, &original),
             action_state_signature(1, &action, &original));
+    }
+}
+
+#[cfg(test)]
+mod autonomous_live_form_tests {
+    use super::*;
+    use crate::agent::dom_extractor::DomNodeSummary;
+
+    fn page(sensitive: bool) -> DomSnapshot {
+        DomSnapshot {
+            origin: "https://example.org/feedback".into(),
+            title: "Feedback".into(),
+            text_excerpt: "Feedback form".into(),
+            interactive_nodes: vec![DomNodeSummary {
+                node_id: "button".into(), tag: "button".into(),
+                role: "button".into(), label: "Submit feedback".into(),
+                is_submit: true, is_sensitive: sensitive, bbox: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn safe_form_click_is_autonomous() {
+        let snapshot = page(false);
+        let mut action = BrowserAction::Click {
+            node_id: "button".into(), element_label: "Continue".into(), is_submit: false,
+        };
+        bind_action_to_live_dom(&mut action, &snapshot, true).unwrap();
+        assert!(matches!(action, BrowserAction::Click { is_submit: true, .. }));
+        let (risk, decision) = evaluate_live_action_policy(&snapshot.origin, &action, &[], &snapshot);
+        assert_eq!(risk, RiskLevel::Medium);
+        assert!(matches!(decision, PolicyDecision::Allow));
+    }
+
+    #[test]
+    fn observed_sensitive_form_cannot_autosubmit_even_with_benign_label() {
+        let snapshot = page(true);
+        let mut action = BrowserAction::Click {
+            node_id: "button".into(), element_label: "Continue".into(), is_submit: false,
+        };
+        bind_action_to_live_dom(&mut action, &snapshot, true).unwrap();
+        let (risk, decision) = evaluate_live_action_policy(&snapshot.origin, &action, &[], &snapshot);
+        assert_eq!(risk, RiskLevel::High);
+        assert!(matches!(decision, PolicyDecision::RequireApproval { .. }));
     }
 }

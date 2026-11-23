@@ -6,7 +6,7 @@ Updated: 22 November 2026
 
 - Guard click/type actions using a fresh WebView DOM snapshot. Model-supplied click labels and safety flags cannot downgrade observed controls.
 - Deny stale, unknown, or unlabeled clickable controls; deny text input into non-text controls.
-- Require approval for live-page submit controls, sensitive fields, and high-consequence buttons.
+- Allow routine low-risk form submissions without interrupting the task, while requiring confirmation for consequential submissions, sensitive form content, and high-consequence controls.
 - Stop on denied, timed-out, or cancelled approvals; approval waits are bounded to 120 seconds and cancelled runs cannot execute a late authorization.
 - Deny downloads using non-HTTP(S) URLs or URLs with embedded credentials; likewise disallow credentialed navigation URLs.
 - Redact typed data, raw model rationale, approval descriptions, sensitive URL paths/parameters, and completion summaries from live agent traces and stored SQLite audit records.

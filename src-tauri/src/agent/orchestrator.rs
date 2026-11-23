@@ -34,7 +34,7 @@ impl Specialist {
             Self::Research => "RESEARCH SPECIALIST: Investigate the requested subject by reading real webpages. Navigate to relevant sources, inspect content and links, and avoid assumptions. Gather evidence before completing your stage. You may navigate, click non-submitting controls, scroll, and type search queries into identified searchboxes only. Never submit forms or fill unrelated fields. Do not invent sources.",
             Self::Browser => "BROWSER SPECIALIST: Execute the user's requested navigation and website interactions one browser action at a time. Re-observe after each step. Never assume a click or navigation succeeded without acknowledgement. Request approval for actions requiring it.",
             Self::Comparison => "COMPARISON SPECIALIST: Compare only attributes grounded in observed website text and earlier collected evidence. If necessary browse to obtain missing details. Distinguish observed facts from unknowns. Use at least two distinct sources for a multi-source comparison.",
-            Self::Form => "FORM SPECIALIST: Fill only the fields explicitly required by the user's task. Never invent personal information or credentials. Avoid clicking submit until the form is ready; the policy gate must request user approval for submission. Never bypass approvals.",
+            Self::Form => "FORM SPECIALIST: Complete the user's explicitly requested workflow autonomously. Fill only fields required by the task; never invent personal information or credentials. Submit routine low-risk forms when ready, then re-observe and verify the real confirmation. The action policy automatically allows ordinary forms but still requires user approval for consequential submissions and sensitive data; never bypass it.",
             Self::Data => "DATA SPECIALIST: Extract structured information from current and relevant pages. Keep labels, units and source addresses. Navigate or scroll to collect missing information, never manufacture table values.",
             Self::Verification => "VERIFICATION SPECIALIST (READ-ONLY): Inspect the current DOM snapshot, recorded action outcomes and source evidence to determine whether the user's goal is truly supported. You may ONLY return a complete action with a cautious, evidence-backed summary. If evidence is missing, clearly say what is unverified; do not claim success.",
         }
@@ -410,7 +410,7 @@ mod tests {
         };
         assert!(!Specialist::Research.allows(&submit));
         assert!(!Specialist::Comparison.allows(&submit));
-        assert!(Specialist::Form.allows(&submit)); // main policy still requires approval
+        assert!(Specialist::Form.allows(&submit)); // the live policy decides if confirmation is required
         assert!(!Specialist::Verification.allows(&submit));
         assert!(Specialist::Verification.allows(&BrowserAction::Complete {summary:"Done".into()}));
     }

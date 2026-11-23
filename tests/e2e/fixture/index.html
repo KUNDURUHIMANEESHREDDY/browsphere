@@ -9,4 +9,8 @@
 <label for="note">Test note</label><input id="note" name="note" type="text" placeholder="Optional sample text">
 <button type="submit">Submit sample application</button></form>
 <p id="feedback">No sample application has been submitted.</p>
+<form id="routine-feedback" onsubmit="event.preventDefault();document.getElementById('routine-result').textContent='Feedback sent successfully on the local test page.';">
+<label for="comments">Feedback note</label><input id="comments" name="comments" type="text" placeholder="Optional feedback">
+<button type="submit">Submit feedback</button></form>
+<p id="routine-result">Feedback has not been sent.</p>
 </body></html>

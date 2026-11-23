@@ -55,9 +55,13 @@ async function main() {
     assert.ok(snapshot.interactive_nodes?.length>=2,'Fixture interactive controls should be observed');
     const details=snapshot.interactive_nodes.find(n=>n.label.includes('Show fixture details'));
     const submit=snapshot.interactive_nodes.find(n=>n.label.includes('Submit sample application'));
+    const feedback=snapshot.interactive_nodes.find(n=>n.label==='Submit feedback');
     assert.equal(details?.is_submit,false,'Ordinary button must not require form submission approval');
-    assert.equal(submit?.is_submit,true,'Real submit must require approval');
-    console.log('PASS native DOM snapshot and submit classification');
+    assert.equal(submit?.is_submit,true,'Real submit must be recognized');
+    assert.equal(submit?.is_sensitive,true,'Consequential application form must be marked sensitive');
+    assert.equal(feedback?.is_submit,true,'Routine feedback submission must be recognized');
+    assert.equal(feedback?.is_sensitive,false,'Routine feedback must remain eligible for autonomous submission');
+    console.log('PASS native DOM snapshot, routine/critical form classification');
   } finally {ws.close();}
 }
 main().catch(err=>{console.error('FAIL',err?.stack||err); process.exitCode=1;});

@@ -146,12 +146,24 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
           (current.tagName === "BUTTON" &&
             (typeAttr === "submit" || (typeAttr === "" && !!current.form))) ||
           (current.tagName === "INPUT" && (typeAttr === "submit" || typeAttr === "image"));
-        // Custom JS submission controls may use type="button"; require
-        // approval for visibly submission-like controls too.
+        // Custom JS submission controls may use type="button"; classify
+        // them as submissions so the policy can assess their risk.
         const submissionLabel = /\b(submit|register|sign up|apply now|send application|place order|checkout|confirm purchase)\b/i;
         const isSubmit = formSubmit || (
           (current.tagName === "BUTTON" || current.getAttribute("role") === "button") &&
           submissionLabel.test(computeAccessibleName(current))
+        );
+        // A harmless-looking "Submit" can still commit sensitive form data.
+        // Mark such submit controls sensitive using the observed containing form.
+        const form = isSubmit ? (current.form || current.closest("form")) : null;
+        const sensitiveForm = !!form && (
+          Array.from(form.querySelectorAll("input, textarea")).some(isSensitiveField) ||
+          /\b(payment|credit card|card number|cvv|billing|delete account|register|sign up|application|loan|identity|passport|contract|bank transfer|purchase|checkout|reservation)\b/i
+            .test(form.innerText || "") ||
+          (form.action && (() => {{
+            try {{ return new URL(form.action, location.href).origin !== location.origin; }}
+            catch (_) {{ return true; }}
+          }})())
         );
 
         nodes.push({{
@@ -160,7 +172,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
           role: (current.getAttribute("role") || current.tagName).toLowerCase(),
           label: computeAccessibleName(current),
           is_submit: isSubmit,
-          is_sensitive: isSensitiveField(current),
+          is_sensitive: isSensitiveField(current) || sensitiveForm,
           bbox: {{
             x: Math.round(rect.x),
             y: Math.round(rect.y),

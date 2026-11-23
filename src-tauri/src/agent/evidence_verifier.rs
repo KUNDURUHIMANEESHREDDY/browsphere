@@ -154,6 +154,8 @@ pub fn check_submission_result(
         "successfully submitted", "submission received", "form submitted",
         "application received", "application submitted", "thank you for submitting",
         "registration complete", "order confirmed", "confirmation number",
+        "feedback sent", "feedback received", "message sent successfully",
+        "changes saved successfully", "settings updated successfully",
     ];
     if !confirmations.iter().any(|term| text.contains(term) && !earlier_text.contains(term)) {
         return Err("Page changed, but no visible submission confirmation was found".into());
@@ -241,5 +243,27 @@ mod tests {
             "Help text: Application received. Fields for your new submission.");
         assert!(check_submission_result(&prior_banner,
             &dom("https://example.org/apply","Application received. Loading another page.")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod autonomous_confirmation_tests {
+    use super::*;
+    #[test]
+    fn accepts_new_visible_feedback_confirmation_but_not_preexisting_text() {
+        let before = DomSnapshot {
+            origin: "https://example.org/feedback".into(),
+            title: "Feedback".into(),
+            text_excerpt: "No feedback has been submitted yet".into(),
+            interactive_nodes: vec![],
+        };
+        let mut after = before.clone();
+        after.text_excerpt = "Feedback sent successfully on the local test page".into();
+        assert!(check_submission_result(&before, &after).is_ok());
+        assert!(check_submission_result(&after, &after).is_err());
+
+        let mut unrelated = before.clone();
+        unrelated.text_excerpt = "A new panel appeared, but no confirmation was shown".into();
+        assert!(check_submission_result(&before, &unrelated).is_err());
     }
 }

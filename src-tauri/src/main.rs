@@ -28,6 +28,7 @@ use aws_discovery::AwsConnectResult;
 use agent::action_executor::ActionResult;
 use agent::dom_extractor::{request_live_dom_snapshot, DomSnapshot};
 use agent::loop_runner::{run_react_loop, ApprovalRequest};
+use agent::reactive_perception::{ReactivePerception, PerceptionStatus};
 use agent::policy::TraceEntry;
 use automation::engine::{AutomationEngine, AutomationJob, AutomationStep};
 use privacy::downloads::DownloadManager;
@@ -352,6 +353,7 @@ pub struct AppState {
     pub speech: Arc<SpeechRuntimeState>,
     pub automation: Arc<AutomationEngine>,
     pub tabs: TabManagerState,
+    pub perception: ReactivePerception,
     pub preview_cache: Arc<Mutex<HashMap<String, UrlPreview>>>,
     pub pending_approvals: Arc<Mutex<HashMap<Uuid, oneshot::Sender<bool>>>>,
     pub pending_snapshots: Arc<Mutex<HashMap<Uuid, oneshot::Sender<DomSnapshot>>>>,
@@ -993,6 +995,7 @@ async fn open_or_navigate_tab(
     hide_other_tab_webviews(&app, &state.tabs, &label).await;
 
     if let Some(existing) = app.get_webview(&label) {
+        state.perception.invalidate(&label);
         existing.navigate(parsed)
             .map_err(|e| format!("Could not navigate website: {e}"))?;
         apply_webview_geometry(&existing, &effective_bounds);
@@ -1011,6 +1014,8 @@ async fn open_or_navigate_tab(
     let private_for_permissions = is_private.unwrap_or(false);
     let tab_id_for_popups = tab_id.clone();
     let app_for_page_load = app.clone();
+    let perception_for_page_load = state.perception.clone();
+    let label_for_page_load = label.clone();
     let tab_id_for_page_load = tab_id.clone();
     let itp_for_dl = state.itp.clone();
     let dl_mgr_for_dl = state.downloads.clone();
@@ -1057,8 +1062,10 @@ async fn open_or_navigate_tab(
         })
         .initialization_script(&guard_script)
         .initialization_script(&theme_script)
+        .initialization_script(agent::reactive_perception::OBSERVER_SCRIPT)
         .on_page_load(move |_webview, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                perception_for_page_load.invalidate(&label_for_page_load);
                 let _ = app_for_page_load.emit(
                     "browser:page-loaded",
                     serde_json::json!({
@@ -1179,6 +1186,8 @@ async fn open_or_navigate_tab(
         )
         .map_err(|e| format!("Failed to attach child WebView2 view: {e}"))?;
 
+    agent::reactive_perception::attach_native_hint_receiver(&child_wv, label.clone(), state.perception.clone())?;
+    state.perception.invalidate(&label);
     if effective_bounds.hidden {
         let _ = child_wv.hide();
     }
@@ -1243,6 +1252,8 @@ async fn close_tab_webview(
     if let Some(wv) = app.get_webview(&label) {
         let _ = wv.close();
     }
+    // Do not retain a closed tab's page text or private session observations.
+    state.perception.forget(&label);
     Ok(())
 }
 
@@ -1581,7 +1592,143 @@ async fn capture_live_snapshot(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<Option<DomSnapshot>, String> {
     let label = state.tabs.active_webview_label().await;
-    Ok(request_live_dom_snapshot(&app, &label, &state.pending_snapshots, 2000).await)
+    let generation = state.perception.generation(&label);
+    let snapshot = request_live_dom_snapshot(&app, &label, &state.pending_snapshots, 2000).await;
+    if let Some(ref observed) = snapshot { state.perception.accept(&label, generation, observed.clone()); }
+    Ok(snapshot)
+}
+
+
+/// Synthetic, local-only WebView2 benchmark. Numbers start BEFORE the native
+/// ExecuteScript dispatch, therefore bound (not exactly equal) mutation-to-observation
+/// latency. No page-provided timestamps are trusted or used.
+#[derive(Debug, Clone, Serialize)]
+struct BrprLiveSample {
+    mutation_dispatch_to_native_hint_ms: f64,
+    mutation_dispatch_to_fresh_observation_ms: f64,
+}
+#[derive(Debug, Clone, Serialize)]
+struct BrprLiveReport {
+    attempted: usize,
+    samples: Vec<BrprLiveSample>,
+    failed: usize,
+    detection_p50_ms: Option<f64>,
+    detection_p95_ms: Option<f64>,
+    detection_p99_ms: Option<f64>,
+    observation_p50_ms: Option<f64>,
+    observation_p95_ms: Option<f64>,
+    observation_p99_ms: Option<f64>,
+    metric_note: String,
+}
+fn bench_percentile(mut values: Vec<f64>, percentile: usize) -> Option<f64> {
+    if values.is_empty() { return None; }
+    values.sort_by(|a,b| a.total_cmp(b));
+    Some(values[((values.len()*percentile+99)/100).saturating_sub(1).min(values.len()-1)])
+}
+
+#[tauri::command]
+async fn run_brpr_live_benchmark(
+    webview: tauri::Webview,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    iterations: Option<usize>,
+) -> Result<BrprLiveReport, String> {
+    if webview.label() != "main" { return Err("Trusted main view required".into()); }
+    let label = state.tabs.active_webview_label().await;
+    let child = app.get_webview(&label).ok_or("No native child browser WebView2")?;
+    let current = child.url().map_err(|e| e.to_string())?;
+    // Never mutate a user's real websites for a synthetic performance test.
+    if current.scheme() != "http" || current.host_str() != Some("127.0.0.1")
+        || current.port() != Some(18764) || current.path() != "/" {
+        return Err("Benchmark requires the isolated localhost:18764 fixture".into());
+    }
+    let iterations = iterations.unwrap_or(20).clamp(1, 100);
+    let mut report = BrprLiveReport {
+        attempted: iterations, samples: Vec::new(), failed: 0,
+        detection_p50_ms: None, detection_p95_ms: None, detection_p99_ms: None,
+        observation_p50_ms: None, observation_p95_ms: None, observation_p99_ms: None,
+        metric_note: "Elapsed Rust monotonic time starts before native script dispatch. This is an upper bound including browser scheduling, WebMessage delivery, debounce and DOM refresh, NOT a pure mutation timestamp or LLM response.".into()
+    };
+    // Readiness check: warm native page cache and avoid counting first load.
+    let warm_generation = state.perception.generation(&label);
+    if let Some(warm) = request_live_dom_snapshot(&app, &label, &state.pending_snapshots, 2000).await {
+        state.perception.accept(&label, warm_generation, warm);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    for i in 0..iterations {
+        let marker = format!("BRPR-LIVE-{}", i);
+        let script = format!(r#"(function() {{
+            const text = {};
+            let el = document.getElementById("brpr-benchmark");
+            if (!el) {{
+                el = document.createElement("p");
+                el.id = "brpr-benchmark";
+                document.body.appendChild(el);
+            }}
+            el.textContent = text;
+            return true;
+        }})()"#, serde_json::to_string(&marker).unwrap());
+        let before = state.perception.status(&label).signal_count;
+        let start = std::time::Instant::now();
+        let mut detected = None;
+        if agent::native_eval::eval_json(&app, &label, script, 2000).await.is_err() {
+            report.failed += 1;
+            continue;
+        }
+        let mut observed = None;
+        while start.elapsed() < std::time::Duration::from_secs(4) {
+            let status = state.perception.status(&label);
+            if detected.is_none() && status.signal_count > before {
+                detected = Some(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            if let Some(snapshot) = state.perception.cached_preview(&label, std::time::Duration::from_secs(2)) {
+                if snapshot.text_excerpt.contains(&marker) && detected.is_some() {
+                    observed = Some(start.elapsed().as_secs_f64() * 1000.0);
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        if let (Some(detection), Some(observation)) = (detected, observed) {
+            report.samples.push(BrprLiveSample {
+                mutation_dispatch_to_native_hint_ms: detection,
+                mutation_dispatch_to_fresh_observation_ms: observation,
+            });
+        } else {
+            report.failed += 1;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(35)).await;
+    }
+    let detections: Vec<f64> = report.samples.iter().map(|s| s.mutation_dispatch_to_native_hint_ms).collect();
+    let observations: Vec<f64> = report.samples.iter().map(|s| s.mutation_dispatch_to_fresh_observation_ms).collect();
+    report.detection_p50_ms = bench_percentile(detections.clone(), 50);
+    report.detection_p95_ms = bench_percentile(detections.clone(), 95);
+    report.detection_p99_ms = bench_percentile(detections, 99);
+    report.observation_p50_ms = bench_percentile(observations.clone(), 50);
+    report.observation_p95_ms = bench_percentile(observations.clone(), 95);
+    report.observation_p99_ms = bench_percentile(observations, 99);
+    Ok(report)
+}
+
+#[tauri::command]
+async fn get_brpr_status(webview: tauri::Webview, state: tauri::State<'_, Arc<AppState>>) -> Result<PerceptionStatus, String> {
+    if webview.label() != "main" && webview.label() != "ai-chat" { return Err("Trusted app view required".into()); }
+    let label = state.tabs.active_webview_label().await;
+    Ok(state.perception.status(&label))
+}
+
+/// Read-only, very recent observation. Never use this cached preview to
+/// authorize browser actions: the agent's executor requires a fresh capture.
+#[tauri::command]
+async fn get_brpr_cached_observation(
+    webview: tauri::Webview,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<Option<DomSnapshot>, String> {
+    if webview.label() != "main" && webview.label() != "ai-chat" {
+        return Err("Trusted app view required".into());
+    }
+    let label = state.tabs.active_webview_label().await;
+    Ok(state.perception.cached_preview(&label, std::time::Duration::from_millis(250)))
 }
 
 #[tauri::command]
@@ -2352,6 +2499,7 @@ fn main() {
     let automation = Arc::new(AutomationEngine::new(&data_dir));
     let speech = Arc::new(SpeechRuntimeState { tts_child: Arc::new(Mutex::new(None)) });
     let (pause_tx, _) = watch::channel(false);
+    let (perception, perception_rx) = ReactivePerception::new();
 
     let app_state = Arc::new(AppState {
         db: Arc::new(Mutex::new(db)),
@@ -2364,6 +2512,7 @@ fn main() {
         speech,
         automation: automation.clone(),
         tabs: TabManagerState::new(),
+        perception,
         preview_cache: Arc::new(Mutex::new(HashMap::new())),
         pending_approvals: Arc::new(Mutex::new(HashMap::new())),
         pending_snapshots: Arc::new(Mutex::new(HashMap::new())),
@@ -2377,6 +2526,9 @@ fn main() {
 
             match tauri::Builder::default()
         .setup(move |app| {
+            tauri::async_runtime::spawn(agent::reactive_perception::run_refresh_worker(
+                app.handle().clone(), state_for_sched.perception.clone(), perception_rx
+            ));
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
                 let _ = win.set_focus();
@@ -2415,6 +2567,9 @@ fn main() {
             fetch_url_preview,
             set_app_theme,
             open_or_navigate_tab,
+            get_brpr_status,
+            get_brpr_cached_observation,
+            run_brpr_live_benchmark,
             get_site_permissions,
             set_site_permission,
             switch_tab_webview,

@@ -1,0 +1,430 @@
+{
+  "at": "2026-11-23T03:12:52.965Z",
+  "app": {
+    "tauri": true,
+    "title": "Browsphere - AI-Native Browser"
+  },
+  "status": {
+    "generation": 4,
+    "dirty": false,
+    "cached": true,
+    "age_ms": 187,
+    "signal_count": 4,
+    "host_p50_us": 30,
+    "host_p95_us": 43,
+    "host_p99_us": 53
+  },
+  "report": {
+    "attempted": 100,
+    "samples": [
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6386,
+        "mutation_dispatch_to_fresh_observation_ms": 47.5055
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5204000000000002,
+        "mutation_dispatch_to_fresh_observation_ms": 47.6161
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6172,
+        "mutation_dispatch_to_fresh_observation_ms": 47.6447
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6807,
+        "mutation_dispatch_to_fresh_observation_ms": 47.252700000000004
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4437,
+        "mutation_dispatch_to_fresh_observation_ms": 47.2482
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6045,
+        "mutation_dispatch_to_fresh_observation_ms": 47.0485
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5925,
+        "mutation_dispatch_to_fresh_observation_ms": 47.3419
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3381999999999998,
+        "mutation_dispatch_to_fresh_observation_ms": 47.9746
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.9187,
+        "mutation_dispatch_to_fresh_observation_ms": 48.1145
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4614,
+        "mutation_dispatch_to_fresh_observation_ms": 46.5584
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4777,
+        "mutation_dispatch_to_fresh_observation_ms": 48.0325
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3739,
+        "mutation_dispatch_to_fresh_observation_ms": 48.0405
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3669,
+        "mutation_dispatch_to_fresh_observation_ms": 48.0148
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6019,
+        "mutation_dispatch_to_fresh_observation_ms": 48.0116
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6314000000000002,
+        "mutation_dispatch_to_fresh_observation_ms": 47.7301
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3959000000000001,
+        "mutation_dispatch_to_fresh_observation_ms": 48.0794
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5549,
+        "mutation_dispatch_to_fresh_observation_ms": 46.9726
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4435,
+        "mutation_dispatch_to_fresh_observation_ms": 47.7049
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4546,
+        "mutation_dispatch_to_fresh_observation_ms": 47.5156
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.563,
+        "mutation_dispatch_to_fresh_observation_ms": 46.8277
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6462,
+        "mutation_dispatch_to_fresh_observation_ms": 46.9412
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.8182,
+        "mutation_dispatch_to_fresh_observation_ms": 47.5529
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 2.3230999999999997,
+        "mutation_dispatch_to_fresh_observation_ms": 48.6316
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4116,
+        "mutation_dispatch_to_fresh_observation_ms": 46.726499999999994
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.8711000000000002,
+        "mutation_dispatch_to_fresh_observation_ms": 47.4857
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4071,
+        "mutation_dispatch_to_fresh_observation_ms": 47.638600000000004
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 2.4414,
+        "mutation_dispatch_to_fresh_observation_ms": 47.9959
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4587999999999999,
+        "mutation_dispatch_to_fresh_observation_ms": 46.599599999999995
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.2497,
+        "mutation_dispatch_to_fresh_observation_ms": 45.4875
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6306999999999998,
+        "mutation_dispatch_to_fresh_observation_ms": 47.995799999999996
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5723,
+        "mutation_dispatch_to_fresh_observation_ms": 48.037499999999994
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5986,
+        "mutation_dispatch_to_fresh_observation_ms": 47.957300000000004
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5803,
+        "mutation_dispatch_to_fresh_observation_ms": 46.921
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.7305000000000001,
+        "mutation_dispatch_to_fresh_observation_ms": 48.072900000000004
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5286,
+        "mutation_dispatch_to_fresh_observation_ms": 46.185700000000004
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3433,
+        "mutation_dispatch_to_fresh_observation_ms": 46.7208
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 3.0745999999999998,
+        "mutation_dispatch_to_fresh_observation_ms": 46.9155
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6266,
+        "mutation_dispatch_to_fresh_observation_ms": 47.4943
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5284,
+        "mutation_dispatch_to_fresh_observation_ms": 47.6608
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5130000000000001,
+        "mutation_dispatch_to_fresh_observation_ms": 46.133399999999995
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3724,
+        "mutation_dispatch_to_fresh_observation_ms": 48.6676
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3169,
+        "mutation_dispatch_to_fresh_observation_ms": 46.626
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5495,
+        "mutation_dispatch_to_fresh_observation_ms": 45.9677
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6025,
+        "mutation_dispatch_to_fresh_observation_ms": 47.978899999999996
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3933,
+        "mutation_dispatch_to_fresh_observation_ms": 47.096199999999996
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3982,
+        "mutation_dispatch_to_fresh_observation_ms": 47.0765
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5388000000000002,
+        "mutation_dispatch_to_fresh_observation_ms": 46.4792
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4813,
+        "mutation_dispatch_to_fresh_observation_ms": 47.1205
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4752,
+        "mutation_dispatch_to_fresh_observation_ms": 46.9604
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 2.0598,
+        "mutation_dispatch_to_fresh_observation_ms": 46.8753
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4469999999999998,
+        "mutation_dispatch_to_fresh_observation_ms": 46.9987
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5003,
+        "mutation_dispatch_to_fresh_observation_ms": 46.9936
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5007,
+        "mutation_dispatch_to_fresh_observation_ms": 47.4672
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6775,
+        "mutation_dispatch_to_fresh_observation_ms": 47.5068
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5447,
+        "mutation_dispatch_to_fresh_observation_ms": 47.4855
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5594999999999999,
+        "mutation_dispatch_to_fresh_observation_ms": 47.553
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6019,
+        "mutation_dispatch_to_fresh_observation_ms": 47.589
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.9308,
+        "mutation_dispatch_to_fresh_observation_ms": 46.311400000000006
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.7035,
+        "mutation_dispatch_to_fresh_observation_ms": 47.2902
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4929,
+        "mutation_dispatch_to_fresh_observation_ms": 47.3067
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4895,
+        "mutation_dispatch_to_fresh_observation_ms": 47.1441
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5547,
+        "mutation_dispatch_to_fresh_observation_ms": 46.9193
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3362999999999998,
+        "mutation_dispatch_to_fresh_observation_ms": 47.6314
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6805999999999999,
+        "mutation_dispatch_to_fresh_observation_ms": 47.5141
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6418,
+        "mutation_dispatch_to_fresh_observation_ms": 48.0309
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 2.0206,
+        "mutation_dispatch_to_fresh_observation_ms": 46.6914
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3618000000000001,
+        "mutation_dispatch_to_fresh_observation_ms": 47.9293
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3998000000000002,
+        "mutation_dispatch_to_fresh_observation_ms": 47.4853
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5385,
+        "mutation_dispatch_to_fresh_observation_ms": 47.7141
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3536,
+        "mutation_dispatch_to_fresh_observation_ms": 47.9641
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6745,
+        "mutation_dispatch_to_fresh_observation_ms": 48.0404
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5151999999999999,
+        "mutation_dispatch_to_fresh_observation_ms": 46.3709
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6305,
+        "mutation_dispatch_to_fresh_observation_ms": 47.6867
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5305,
+        "mutation_dispatch_to_fresh_observation_ms": 48.675999999999995
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3796,
+        "mutation_dispatch_to_fresh_observation_ms": 35.2646
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4441,
+        "mutation_dispatch_to_fresh_observation_ms": 46.1257
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6624999999999999,
+        "mutation_dispatch_to_fresh_observation_ms": 45.8335
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4086,
+        "mutation_dispatch_to_fresh_observation_ms": 46.4801
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6361999999999999,
+        "mutation_dispatch_to_fresh_observation_ms": 47.5878
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 2.4402,
+        "mutation_dispatch_to_fresh_observation_ms": 62.3031
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.7054,
+        "mutation_dispatch_to_fresh_observation_ms": 48.1076
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5816999999999999,
+        "mutation_dispatch_to_fresh_observation_ms": 48.020100000000006
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5888,
+        "mutation_dispatch_to_fresh_observation_ms": 46.527499999999996
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.7588000000000001,
+        "mutation_dispatch_to_fresh_observation_ms": 47.5837
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4545000000000001,
+        "mutation_dispatch_to_fresh_observation_ms": 47.972500000000004
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6186,
+        "mutation_dispatch_to_fresh_observation_ms": 47.9274
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5472000000000001,
+        "mutation_dispatch_to_fresh_observation_ms": 46.6511
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4239000000000002,
+        "mutation_dispatch_to_fresh_observation_ms": 47.9133
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5612,
+        "mutation_dispatch_to_fresh_observation_ms": 48.0462
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6088,
+        "mutation_dispatch_to_fresh_observation_ms": 46.7653
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 7.2429,
+        "mutation_dispatch_to_fresh_observation_ms": 63.5405
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.4189999999999998,
+        "mutation_dispatch_to_fresh_observation_ms": 48.0991
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5312,
+        "mutation_dispatch_to_fresh_observation_ms": 47.808299999999996
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.5207,
+        "mutation_dispatch_to_fresh_observation_ms": 47.5919
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.7729,
+        "mutation_dispatch_to_fresh_observation_ms": 47.502500000000005
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6800000000000002,
+        "mutation_dispatch_to_fresh_observation_ms": 47.5195
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.6504,
+        "mutation_dispatch_to_fresh_observation_ms": 46.6528
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3745,
+        "mutation_dispatch_to_fresh_observation_ms": 47.508
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.3412000000000002,
+        "mutation_dispatch_to_fresh_observation_ms": 47.627700000000004
+      },
+      {
+        "mutation_dispatch_to_native_hint_ms": 1.7309,
+        "mutation_dispatch_to_fresh_observation_ms": 47.5114
+      }
+    ],
+    "failed": 0,
+    "detection_p50_ms": 1.5495,
+    "detection_p95_ms": 2.0598,
+    "detection_p99_ms": 3.0745999999999998,
+    "observation_p50_ms": 47.508,
+    "observation_p95_ms": 48.1145,
+    "observation_p99_ms": 62.3031,
+    "metric_note": "Elapsed Rust monotonic time starts before native script dispatch. This is an upper bound including browser scheduling, WebMessage delivery, debounce and DOM refresh, NOT a pure mutation timestamp or LLM response."
+  }
+}
