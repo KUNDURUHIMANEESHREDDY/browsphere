@@ -148,6 +148,43 @@ fn trusted_search_bootstrap(
         BrowserAction::Navigate { url: target.to_string() })
 }
 
+/// Execute an explicitly requested YouTube search by visiting the actual
+/// results URL. This skips a fragile cycle of model-generated keystrokes on
+/// dynamic autocomplete UI, without guessing a search or a result.
+fn trusted_explicit_youtube_search(
+    goal: &str, snapshot: &DomSnapshot, specialist: Specialist,
+) -> Option<BrowserAction> {
+    if !matches!(specialist, Specialist::Browser | Specialist::Research) {
+        return None;
+    }
+    let request = goal.trim();
+    let lower = request.to_ascii_lowercase();
+    const PREFIX: &str = "search youtube for ";
+    if !lower.starts_with(PREFIX)
+        || !lower.contains(" and open the first video result")
+    {
+        return None;
+    }
+    let remainder = request.get(PREFIX.len()..)?;
+    let lower_tail = remainder.to_ascii_lowercase();
+    let end = lower_tail.find(" and open the first video result")?;
+    let query = remainder.get(..end)?.trim();
+    if query.chars().count() < 3 || query.chars().count() > 120
+        || query.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let on_start = snapshot.origin == "about:blank";
+    let on_youtube_home = url::Url::parse(&snapshot.origin).ok()
+        .is_some_and(|url| url.scheme() == "https"
+            && url.host_str() == Some("www.youtube.com") && url.path() == "/");
+    if !on_start && !on_youtube_home { return None; }
+
+    let mut target = url::Url::parse("https://www.youtube.com/results").ok()?;
+    target.query_pairs_mut().append_pair("search_query", query);
+    Some(BrowserAction::Navigate { url: target.to_string() })
+}
+
 /// Choose a freshly observed watch-page link only when the user explicitly
 /// asked for the first YouTube video result. This still passes through
 /// live DOM binding, standard policy checks, and independent verification.
@@ -616,6 +653,14 @@ pub async fn run_react_loop(
                     "Navigate to the website explicitly named by the user".to_string(),
                     BrowserAction::Navigate { url: target.to_string() },
                     "direct_navigation:trusted_user_goal".to_string(),
+                )
+            } else if let Some(action) =
+                trusted_explicit_youtube_search(&goal, &snapshot, orchestrator.specialist())
+            {
+                (
+                    "Search the site explicitly named by the user using their exact query".to_string(),
+                    action,
+                    "youtube_search:trusted_user_query".to_string(),
                 )
             } else if freshly_observed
                 && trusted_first_youtube_video_result(
@@ -1364,6 +1409,31 @@ mod first_youtube_result_tests {
                 in_viewport: visible
             }),
         }
+    }
+
+    #[test]
+    fn user_requested_youtube_search_uses_only_explicit_query_on_start_or_home() {
+        let mut page = DomSnapshot {
+            origin: "https://www.youtube.com/".into(),
+            title: "YouTube".into(),
+            text_excerpt: String::new(),
+            interactive_nodes: vec![],
+        };
+        let goal = "Search YouTube for NASA Artemis mission and open the first video result, then report the observed video page.";
+        let action = trusted_explicit_youtube_search(goal, &page, Specialist::Browser);
+        assert!(matches!(action, Some(BrowserAction::Navigate { url })
+            if url == "https://www.youtube.com/results?search_query=NASA+Artemis+mission"));
+        page.origin = "about:blank".into();
+        assert!(trusted_explicit_youtube_search(goal, &page, Specialist::Browser).is_some());
+        assert!(trusted_explicit_youtube_search(goal, &page, Specialist::Verification).is_none());
+        assert!(trusted_explicit_youtube_search("Search YouTube for NASA", &page, Specialist::Browser).is_none());
+        assert!(trusted_explicit_youtube_search(
+            "Search YouTube for NASA\n secrets and open the first video result",
+            &page, Specialist::Browser).is_none());
+        page.origin = "https://www.youtube.com/results?search_query=other".into();
+        assert!(trusted_explicit_youtube_search(goal, &page, Specialist::Browser).is_none());
+        page.origin = "https://www.youtube.com.attacker.test/".into();
+        assert!(trusted_explicit_youtube_search(goal, &page, Specialist::Browser).is_none());
     }
 
     #[test]

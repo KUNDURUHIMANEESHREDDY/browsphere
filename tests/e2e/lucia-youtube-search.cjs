@@ -90,8 +90,17 @@ async function main() {
     }));
     assert.equal(result.status, 'completed', 'Lucia did not finish the multi-step task');
     assert.ok(reports.length, 'No independent evidence-backed verification report');
-    assert.ok(actions.some(a=>a.type==='type_text' && ['ok','confirmed'].includes(a.outcome)),
-      'No successful search-input typing');
+    // A real search can be performed by entering text or by navigating to a
+    // valid YouTube results URL. Verify the *observed results*, not one input method.
+    const verifiedSearch = reports.some(e => (e.payload?.report?.findings || []).some(f => {
+      try {
+        const page = new URL(f.url);
+        return page.protocol === 'https:' && page.hostname === 'www.youtube.com'
+          && page.pathname === '/results'
+          && (page.searchParams.get('search_query') || '').trim().toLowerCase() === 'nasa artemis mission';
+      } catch { return false; }
+    }));
+    assert.ok(verifiedSearch, 'No independently verified YouTube search-results evidence');
     assert.ok(actions.some(a=>a.type==='click' && ['ok','confirmed'].includes(a.outcome)),
       'No successful video-result click');
     assert.match(after?.origin || '', /^https:\/\/(www\.)?youtube\.com\/watch/,
