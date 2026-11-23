@@ -89,3 +89,21 @@ Command: `run-lucia-real-sites-openrouter.ps1 -Site 'Python documentation' -CdpP
 - Native Windows WebView2 `run-lucia-multistep.ps1 -CloudCompat` using a **local simulated cloud-compatible model**: **PASS**; source evidence and page navigation, Enter-to-article, non-YouTube search/click, deliberate failure recovery, tab switching/closure and independent result verification all passed. This does **not** use the OpenRouter hosted model.
 
 **Release gate remains OPEN:** repeated model-driven multi-step browsing and independent verification on multiple *real websites* using real hosted OpenRouter inference are **not verified**. Further inference should respect the provider rate limit rather than rotate models or credentials to work around it.
+
+## Strict 4-site OpenRouter repeatability gate — 23 November 2026
+
+**Implementation:** The OpenRouter WebView2 runner now uses the shared real-site evidence evaluator, rejects error pages, requires independent verification, synchronized active tab and captured source URL, at least two *successful* actions from the exact hosted model, and terminal task success. Failed or denied actions and local-only actions cannot count as progress. `-Repeats 1..5` creates independent run IDs/cases and reports per-site pass counts, missing attempts and reasoned stoppages. No fallback, key rotation or quota-bypassing retries.
+
+**Executed:**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/e2e/run-lucia-real-sites-openrouter.ps1 -Model 'inclusionai/ling-3.2-flash:free' -Repeats 3 -CdpPort 9612 -ExecutablePath target/debug/browsphere-core.exe
+```
+
+- Public catalog: HTTP 200; selected model lists $0 usage and structured output compatibility.
+- Loaded real Python Docs page `https://docs.python.org/3/` in isolated native WebView2; title `Python 3.15.2 documentation`, 78 observed controls.
+- Launched real Browser Agent for `Python documentation #1/3`.
+- **OpenRouter HTTP 429** on the first requested browser action. No successful model action traces, no destination navigation or verified final result.
+- **Summary:** 0 passes of 12 planned attempts, 1 attempted and 11 correctly reported skipped. No other websites contacted by the model. Do not count skipped runs as tested failures or successes.
+- **Offline regression:** 130 Rust tests passed (5 ignored); 30 JavaScript tests passed; Windows debug build succeeded.
+
+**Release gate stays open:** General cross-site model-driven autonomy has not been established. An unsigned Windows installer built by the CI pipeline is a development/test artifact only, not a production-ready signed release.

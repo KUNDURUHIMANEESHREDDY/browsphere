@@ -37,9 +37,14 @@ test('native OpenRouter real-site suite keeps model-derived browser actions sepa
   const root = path.join(__dirname, '..');
   const runner = fs.readFileSync(path.join(root, 'tests/e2e/lucia-real-sites-openrouter.cjs'), 'utf8');
   const wrapper = fs.readFileSync(path.join(root, 'tests/e2e/run-lucia-real-sites-openrouter.ps1'), 'utf8');
-  assert.match(runner, /\.includes\('litellm:'\+model\)/);
-  assert.match(runner, /observedDestination&&modelUsed&&meaningfulActions>=2/);
-  assert.match(runner, /run\.verified/);
+  assert.match(runner, /verifiedAgentResult\(c,run,after,model\)/);
+  assert.match(runner, /pageReadiness\(before,c\.host\)/);
+  assert.match(runner, /buildRepetitions\(selected,process\.env\.LUCIA_REAL_REPEATS/);
+  assert.match(runner, /browserUrlSynchronized/);
+  assert.match(runner, /meaningfulActions:evaluation\.meaningfulActions/);
+  assert.match(runner, /site_unavailable/);
+  assert.match(wrapper, /LUCIA_REAL_REPEATS/);
+  assert.match(wrapper, /ValidateRange\(1,5\)/);
   assert.match(runner, /provider_rate_limited/);
   assert.match(runner, /provider_auth_failed/);
   assert.match(wrapper, /https:\/\/openrouter\.ai\/api\/v1\/chat\/completions/);

@@ -4,6 +4,7 @@
 param(
     [string]$Site = "",
     [int]$CdpPort = 9585,
+    [ValidateRange(1,5)][int]$Repeats = 1,
     [string]$ExecutablePath = "",
     [string]$Model = 'inclusionai/ling-3.2-flash:free',
     [switch]$CheckCatalogOnly
@@ -45,7 +46,7 @@ if (-not (Test-Path $ExecutablePath)) { throw "Native Browsphere release build m
 $profile = Join-Path $env:TEMP ('browsphere-openrouter-real-sites-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force (Join-Path $profile 'Roaming'),(Join-Path $profile 'Local'),(Join-Path $profile 'WebView2') | Out-Null
 
-$names = @('APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_CLOUD_ENDPOINT','LUCIA_TEST_CLOUD_MODEL','LUCIA_REAL_SITE')
+$names = @('APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_CLOUD_ENDPOINT','LUCIA_TEST_CLOUD_MODEL','LUCIA_REAL_SITE','LUCIA_REAL_REPEATS')
 $previous = @{}
 foreach ($name in $names) { $previous[$name] = [Environment]::GetEnvironmentVariable($name,'Process') }
 $env:APPDATA = Join-Path $profile 'Roaming'
@@ -56,6 +57,7 @@ $env:LUCIA_CDP_PORT = "$CdpPort"
 $env:LUCIA_TEST_CLOUD_ENDPOINT = $endpoint
 $env:LUCIA_TEST_CLOUD_MODEL = $model
 $env:LUCIA_REAL_SITE = $Site
+$env:LUCIA_REAL_REPEATS = "$Repeats"
 
 $app = $null
 try {

@@ -2,6 +2,8 @@
 // Real hosted-model browsing tests across distinct public websites in native WebView2.
 // No accounts, purchases, personal data, downloads, or consequential submissions.
 // Requires an already running isolated Browsphere instance with LUCIA_CDP_PORT.
+const {pageReadiness,buildRepetitions,verifiedAgentResult} =
+  require('./lucia-real-site-evidence.cjs');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const cdport=Number(process.env.LUCIA_CDP_PORT || 9553);
 const base='http://127.0.0.1:'+cdport;
@@ -133,7 +135,8 @@ async function main(){
     let stopReason=null;
     const selected=process.env.LUCIA_REAL_SITE ? cases.filter(x=>x.name.toLowerCase().includes(process.env.LUCIA_REAL_SITE.toLowerCase())) : cases;
     if(selected.length===0)throw Error('LUCIA_REAL_SITE did not match any case');
-    for(const c of selected){
+    const attempts=buildRepetitions(selected,process.env.LUCIA_REAL_REPEATS||'1');
+    for(const c of attempts){
       let before=null,after=null,run=null,error=null;
       try{
         await evaluate('window.browsphereApp.newTab('+JSON.stringify(c.start)+')');
@@ -142,11 +145,17 @@ async function main(){
           if(safeHost(before.url)===c.host&&before.controls>0&&before.excerptLength>=50)break;
           await sleep(500);
         }
-        if(safeHost(before?.url)!==c.host||before.excerptLength<50||/error|not found|access denied/i.test(before.title||''))
-          throw Error('Starting native page did not load as expected: '+JSON.stringify(before));
-        console.log('LIVE_SITE_START',JSON.stringify({name:c.name,before}));
+        const readiness=pageReadiness(before,c.host);
+        if(!readiness.ok)
+          throw Error('site_unavailable: '+readiness.reason);
+        console.log('LIVE_SITE_START',JSON.stringify({name:c.name,caseId:c.caseId,before}));
         run=await liveTask(c);
         after=await state();
+        // Require the native page origin and active tab URL to agree.
+        for(let n=0;n<8 && after.url && after.tabUrl!==after.url;n++){
+          await sleep(250);
+          after=await state();
+        }
       }catch(e){
         error=String(e);
         if(/CDP timeout|Native task launch did not settle|WebSocket.*closed/i.test(error))
@@ -157,25 +166,37 @@ async function main(){
         stopReason='provider_rate_limited';
       else if(/HTTP 401|HTTP 403|No API key saved|authentication or access/i.test(providerErrors))
         stopReason='provider_auth_failed';
-      const parsed=(()=>{try{return new URL(after?.url)}catch{return null}})();
-      const observedDestination=!!parsed&&parsed.host===c.host&&c.path.test(parsed.pathname);
-      const modelUsed=run?.actions?.some(x=>(x.route||'').includes('litellm:'+model))||false;
-      const meaningfulActions=run?.actions?.filter(x=>['click','type_text','press_key','select_option'].includes(x.type)).length||0;
-      const passed=!error&&run?.status==='completed'&&run.verified&&observedDestination&&modelUsed&&meaningfulActions>=2;
-      const record={name:c.name,passed,before,after,status:run?.status||'not-started',
-        verified:run?.verified||false,observedDestination,modelUsed,meaningfulActions,
+      const evaluation=verifiedAgentResult(c,run,after,model);
+      const passed=!error&&evaluation.passed;
+      const record={name:c.name,caseId:c.caseId,attempt:c.attempt,before,after,
+        status:run?.status||(String(error||'').includes('site_unavailable:')?'site_unavailable':'not-started'),
+        ...evaluation,passed,
         actions:run?.actions||[],errors:run?.errors||[],error,stages:run?.stages||[]};
       console.log('REAL_SITE_RESULT',JSON.stringify(record));
-      results.push({name:c.name,passed,status:record.status,observedDestination,modelUsed,verified:record.verified,error});
+      results.push({name:c.name,caseId:c.caseId,attempt:c.attempt,passed,
+        status:record.status,observedDestination:evaluation.observedDestination,
+        modelUsed:evaluation.modelUsed,verified:evaluation.verified,
+        browserUrlSynchronized:evaluation.browserUrlSynchronized,
+        meaningfulActions:evaluation.meaningfulActions,error});
       if(stopReason){
         console.log('REAL_SITE_STOP',JSON.stringify({reason:stopReason,after:c.name,
           message:'Remaining websites were not attempted; do not count them as failures or successes'}));
         break;
       }
     }
-    const skipped=selected.filter(c=>!results.some(r=>r.name===c.name)).map(c=>c.name);
-    console.log('REAL_SITES_SUMMARY',JSON.stringify({passed:results.filter(x=>x.passed).length,
-      attempted:results.length,total:selected.length,stopReason,skipped,results}));
+    const skipped=attempts.filter(c=>!results.some(r=>r.caseId===c.caseId))
+      .map(c=>c.caseId);
+    const modelTasksAttempted=results.filter(r=>r.status!=='site_unavailable'&&
+      r.status!=='not-started').length;
+    const siteUnavailable=results.filter(r=>r.status==='site_unavailable').length;
+    const perSite=selected.map(c=>({name:c.name,
+      passes:results.filter(r=>r.name===c.name&&r.passed).length,
+      attempted:results.filter(r=>r.name===c.name).length,
+      planned:attempts.filter(x=>x.name===c.name).length}));
+    console.log('REAL_SITES_SUMMARY',JSON.stringify({
+      passed:results.filter(x=>x.passed).length,
+      attempted:results.length,modelTasksAttempted,siteUnavailable,
+      total:attempts.length,stopReason,skipped,perSite,results}));
     if(results.some(x=>!x.passed)||skipped.length)process.exitCode=1;
   }finally{close()}
 }
