@@ -31,7 +31,7 @@
   window.browsphereCloudPresets = Object.freeze({
     openai: ['https://api.openai.com/v1/chat/completions', 'gpt-4o-mini'],
     groq: ['https://api.groq.com/openai/v1/chat/completions', 'llama-3.3-70b-versatile'],
-    openrouter: ['https://openrouter.ai/api/v1/chat/completions', 'openai/gpt-4o-mini'],
+    openrouter: ['https://openrouter.ai/api/v1/chat/completions', 'inclusionai/ling-3.2-flash:free'],
     ninerouter_local: ['http://127.0.0.1:20128/v1/chat/completions', '9router/select-model'],
     ninerouter_cloud: ['https://9router.com/v1/chat/completions', '9router/select-model']
   });
@@ -80,7 +80,9 @@
       '<datalist id="cfgInstalledOllama">' + installedOptions + '</datalist></div>';
     var is9Router = provider === 'ninerouter_local' || provider === 'ninerouter_cloud';
     var suggestions = cloudModels.length ? cloudModels :
-      (is9Router ? [] : ['gpt-4o-mini', 'gpt-4.1-mini', 'llama-3.3-70b-versatile', 'openai/gpt-4o-mini']);
+      (is9Router ? [] : provider === 'openrouter'
+        ? ['inclusionai/ling-3.2-flash:free']
+        : ['gpt-4o-mini', 'gpt-4.1-mini', 'llama-3.3-70b-versatile', 'openai/gpt-4o-mini']);
     var cloudModel = '<div style="width:100%;max-width:360px">' +
       input('cfgLiteLlmModel', cfg.litellm_model === '9router/select-model' ? '' : cfg.litellm_model,
         is9Router ? 'Fetch Models, then choose a model' : 'Choose a model ID') +
