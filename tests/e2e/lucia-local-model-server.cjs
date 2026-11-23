@@ -161,11 +161,15 @@ function runFixture(req, res) {
   }
 }
 
-const models = http.createServer(runLocalModel);
-const fixtures = http.createServer(runFixture);
-models.listen(modelPort, bind, () => {
-  fixtures.listen(fixturePort, bind, () =>
-    console.log('LUCIA_MOCK_READY model=' + modelPort + ' fixture=' + fixturePort));
-});
-process.on('SIGINT', () => { models.close(); fixtures.close(); });
-process.on('SIGTERM', () => { models.close(); fixtures.close(); });
+if (require.main === module) {
+  const models = http.createServer(runLocalModel);
+  const fixtures = http.createServer(runFixture);
+  models.listen(modelPort, bind, () => {
+    fixtures.listen(fixturePort, bind, () =>
+      console.log('LUCIA_MOCK_READY model=' + modelPort + ' fixture=' + fixturePort));
+  });
+  process.on('SIGINT', () => { models.close(); fixtures.close(); });
+  process.on('SIGTERM', () => { models.close(); fixtures.close(); });
+}
+
+module.exports = {observedNodes,decideAction,verifyEvidence,chat};
