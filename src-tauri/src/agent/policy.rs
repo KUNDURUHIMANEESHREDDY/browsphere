@@ -175,6 +175,25 @@ pub fn requested_navigation_url(goal: &str) -> Option<Url> {
     Some(parsed)
 }
 
+/// Unlike requested_navigation_url, this only authorizes entering a site
+/// for a compound task. It must never trigger the "navigation complete" path:
+/// the agent still has to play the requested music and verify the outcome.
+pub fn requested_music_entry_url(goal: &str) -> Option<Url> {
+    let normalized = goal.trim().trim_end_matches(['.', '!', '?'])
+        .trim().to_ascii_lowercase();
+    if normalized.len() > 220 || normalized.chars().any(char::is_control) {
+        return None;
+    }
+    let request = ["open youtube and play ", "visit youtube and play ",
+        "go to youtube and play ", "navigate to youtube and play "]
+        .iter().find_map(|prefix| normalized.strip_prefix(prefix))?;
+    if !["music", "some music", "any music", "a song", "any song",
+        "some songs", "a music video"].contains(&request) {
+        return None;
+    }
+    Url::parse("https://www.youtube.com/").ok()
+}
+
 /// A user who asks to search a named public website has already authorized
 /// ordinary navigation to that website. Recognize only explicit request shapes,
 /// never suggestions found in page content or generated model thoughts.
@@ -215,10 +234,13 @@ pub fn evaluate_user_navigation_policy(
     let Ok(actual) = Url::parse(url) else { return base };
     let user_explicitly_named_destination = requested_navigation_url(goal)
         .is_some_and(|expected| actual == expected);
+    let user_explicitly_named_music_entry = requested_music_entry_url(goal)
+        .is_some_and(|expected| actual == expected);
     let user_explicitly_named_search_site = requested_search_host(goal)
         .is_some_and(|host| actual.scheme() == "https"
             && actual.host_str() == Some(host));
-    if (user_explicitly_named_destination || user_explicitly_named_search_site)
+    if (user_explicitly_named_destination || user_explicitly_named_music_entry
+        || user_explicitly_named_search_site)
         && actual.host_str().is_some_and(|host| host_matches_allowlist(host, allowed_domains))
     {
         return (RiskLevel::Low, PolicyDecision::Allow);
@@ -490,6 +512,17 @@ mod tests {
         let navigate = |url: &str| BrowserAction::Navigate { url: url.into() };
         let origin = "https://example.com/";
         assert_eq!(requested_navigation_url("open youtube").unwrap().as_str(), "https://www.youtube.com/");
+        assert!(requested_navigation_url("Open YouTube and play any music").is_none(),
+            "Compound playback task must not be reduced to navigation-only");
+        assert_eq!(requested_music_entry_url("Open YouTube and play any music")
+            .unwrap().as_str(), "https://www.youtube.com/");
+        assert!(matches!(evaluate_user_navigation_policy(origin,
+            &navigate("https://www.youtube.com/"), &[],
+            "Open YouTube and play any music").1, PolicyDecision::Allow));
+        for unsafe_goal in ["open youtube and play music and delete my account",
+            "open youtube and play music and pay", "open youtube and play javascript:alert(1)"] {
+            assert!(requested_navigation_url(unsafe_goal).is_none());
+        }
         assert!(matches!(evaluate_user_navigation_policy(origin,
             &navigate("https://www.youtube.com/"), &[], "open youtube").1,
             PolicyDecision::Allow));
