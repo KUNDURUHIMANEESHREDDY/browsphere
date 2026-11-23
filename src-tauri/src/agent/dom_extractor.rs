@@ -35,7 +35,7 @@ pub struct DomSnapshot {
 /// Builds an IIFE injected into the active child WebView2 view.
 /// - Traverses document + open Shadow DOM roots
 /// - Skips hidden, display:none, visibility:hidden, zero-size, or aria-hidden nodes (prompt-injection hardening)
-/// - Assigns stable `data-aether-id` attributes (`n_1`, `n_2`, ...)
+/// - Assigns stable, page-unique `data-aether-id` attributes to interactive controls
 /// - Computes viewport bounding boxes & flags submit controls and sensitive inputs
 /// - Posts the structured snapshot back to Rust via `submit_dom_snapshot`
 pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars: usize) -> String {
@@ -123,7 +123,20 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   }}
 
   const nodes = [];
-  let counter = 1;
+  // Dynamic SPAs replace elements between observations. Every new node must
+  // receive a unique ID; restarting an n_1 counter could silently target a
+  // different, older control with the same data-aether-id.
+  const observedIds = new Set();
+  let counter = 0;
+  function freshNodeId() {{
+    let id;
+    do {{
+      const nonce = window.crypto?.randomUUID?.()
+        || (Date.now().toString(36) + "_" + Math.random().toString(36).slice(2));
+      id = "agent_" + nonce + "_" + (++counter);
+    }} while (observedIds.has(id) || document.querySelector('[data-aether-id="' + id + '"]'));
+    return id;
+  }}
   const vw = window.innerWidth || 1280;
   const vh = window.innerHeight || 800;
 
@@ -134,10 +147,11 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     while (current && nodes.length < MAX_NODES) {{
       if (isVisible(current) && isInteractive(current)) {{
         let nodeId = current.getAttribute("data-aether-id");
-        if (!nodeId) {{
-          nodeId = "n_" + counter++;
+        if (!nodeId || observedIds.has(nodeId)) {{
+          nodeId = freshNodeId();
           try {{ current.setAttribute("data-aether-id", nodeId); }} catch (_) {{}}
         }}
+        observedIds.add(nodeId);
         const rect = current.getBoundingClientRect();
         const inViewport = rect.bottom >= 0 && rect.right >= 0 && rect.top <= vh && rect.left <= vw;
         const typeAttr = (current.getAttribute("type") || "").toLowerCase();
