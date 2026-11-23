@@ -12,7 +12,7 @@ use crate::agent::memory::{can_classify_preference, infer_memories, preference_f
 use crate::agent::orchestrator::{plan_task, Orchestrator, Specialist};
 use crate::agent::evidence_verifier::{
     check_navigation_result, check_submission_result, requires_post_action_check,
-    verify_direct_navigation, VerificationReport,
+    verify_direct_navigation, verify_observed_youtube_first_result, VerificationReport,
 };
 use crate::agent::dom_extractor::{request_live_dom_snapshot, DomSnapshot};
 use crate::agent::policy::{
@@ -786,6 +786,18 @@ pub async fn run_react_loop(
                         .any(|stage| stage.specialist == Specialist::Comparison);
                     let result = if let Some(target) = requested_navigation_url(&goal) {
                         verify_direct_navigation(target.as_str(), &snapshot)
+                            .map_err(anyhow::Error::msg)
+                    } else if goal.to_ascii_lowercase().starts_with("search youtube for ")
+                        && goal.to_ascii_lowercase().contains(" and open the first video result")
+                        && recorded_steps.iter().any(|step| matches!(step, BrowserAction::Click { .. }))
+                        && orchestrator.can_complete(&snapshot).is_ok()
+                    {
+                        // Independent Rust evidence checks suffice for the
+                        // narrow page-navigation task. A small model should not
+                        // reject a real, already-observed URL because it cannot
+                        // generate an exact supporting quote.
+                        verify_observed_youtube_first_result(
+                            &goal, &snapshot, &orchestrator.evidence)
                             .map_err(anyhow::Error::msg)
                     } else {
                         let router = router.lock().await.clone();

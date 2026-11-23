@@ -177,6 +177,75 @@ pub fn verify_direct_navigation(
     })
 }
 
+/// A simple "search YouTube and open the first video" task can be verified
+/// deterministically from two independent native page observations. This
+/// verifies site navigation, not the contents or factual claims of the video.
+pub fn verify_observed_youtube_first_result(
+    goal: &str,
+    after: &DomSnapshot,
+    observed: &[SourceEvidence],
+) -> Result<VerificationReport, String> {
+    let normalized_goal = goal.trim().to_ascii_lowercase();
+    let requested_query = normalized_goal
+        .strip_prefix("search youtube for ")
+        .and_then(|tail| tail.split_once(" and open the first video result"))
+        .map(|(query, _)| query.trim())
+        .filter(|query| query.chars().count() >= 3 && query.chars().count() <= 120)
+        .ok_or("Not a supported explicit YouTube first-result task")?;
+
+    let watch_url = web_url(&after.origin)
+        .ok_or("No observed YouTube video page")?;
+    if watch_url.scheme() != "https"
+        || watch_url.host_str() != Some("www.youtube.com")
+        || watch_url.path() != "/watch"
+        || !watch_url.query_pairs().any(|(key, value)| key == "v" && !value.is_empty())
+    {
+        return Err("Observed destination is not a YouTube watch page".into());
+    }
+    check_navigation_result(after.origin.as_str(), after)?;
+    if after.text_excerpt.trim().chars().count() < 40 {
+        return Err("Observed video page has insufficient readable evidence".into());
+    }
+
+    let watched = observed.iter().find(|record|
+        web_url(&record.url).as_ref() == Some(&watch_url)
+        && record.excerpt.trim().chars().count() >= 40
+    ).ok_or("No independent native video-page evidence was recorded")?;
+
+    let searched = observed.iter().find(|record| {
+        let Some(url) = web_url(&record.url) else { return false };
+        url.scheme() == "https" && url.host_str() == Some("www.youtube.com")
+            && url.path() == "/results"
+            && url.query_pairs().any(|(key, value)|
+                key == "search_query" && normalized(value.as_ref()) == normalized(requested_query))
+            && record.excerpt.trim().chars().count() >= 30
+    }).ok_or("No matching YouTube search-results page was observed")?;
+
+    let title = after.title.trim().chars().take(120).collect::<String>();
+    let watched_quote = watched.excerpt.trim().chars().take(140).collect::<String>();
+    let searched_quote = searched.excerpt.trim().chars().take(140).collect::<String>();
+    Ok(VerificationReport {
+        status: "evidence_checked",
+        summary: format!(
+            "Verified: searched YouTube for '{}' and opened a video watch page ({}).",
+            requested_query, title
+        ),
+        findings: vec![
+            GroundedFinding {
+                claim: "The requested search results page was observed in the browser".into(),
+                url: searched.url.clone(),
+                quote: searched_quote,
+            },
+            GroundedFinding {
+                claim: "A YouTube watch page was observed after the search".into(),
+                url: watched.url.clone(),
+                quote: watched_quote,
+            },
+        ],
+        limitations: "This verifies observed page navigation and text only. It does not verify video accuracy or independently establish ranking beyond the selected on-page link.".into(),
+    })
+}
+
 /// A submit click acknowledgment is not proof of a received submission.
 pub fn check_submission_result(
     before: &DomSnapshot, after: &DomSnapshot,
@@ -328,5 +397,48 @@ mod autonomous_confirmation_tests {
         let mut unrelated = before.clone();
         unrelated.text_excerpt = "A new panel appeared, but no confirmation was shown".into();
         assert!(check_submission_result(&before, &unrelated).is_err());
+    }
+}
+
+#[cfg(test)]
+mod youtube_first_result_evidence_tests {
+    use super::*;
+    fn snapshot(url: &str) -> DomSnapshot {
+        DomSnapshot {
+            origin: url.into(),
+            title: "NASA Artemis explained - YouTube".into(),
+            text_excerpt: "A detailed NASA Artemis mission video with chapters and a description.".into(),
+            interactive_nodes: vec![],
+        }
+    }
+    #[test]
+    fn requires_both_actual_search_results_and_matching_video_page() {
+        let goal = "Search YouTube for NASA Artemis mission and open the first video result, then report the observed video page.";
+        let url = "https://www.youtube.com/watch?v=abcDEF12345";
+        let watch = snapshot(url);
+        let observed = vec![
+            SourceEvidence {
+                url: "https://www.youtube.com/results?search_query=NASA+Artemis+mission".into(),
+                title: "Results - YouTube".into(),
+                excerpt: "Search results for NASA Artemis mission videos and animations.".into(),
+            },
+            SourceEvidence {
+                url: url.into(),
+                title: watch.title.clone(),
+                excerpt: watch.text_excerpt.clone(),
+            },
+        ];
+        let report = verify_observed_youtube_first_result(goal, &watch, &observed).unwrap();
+        assert_eq!(report.status, "evidence_checked");
+        assert_eq!(report.findings.len(), 2);
+        assert!(verify_observed_youtube_first_result(goal, &watch, &observed[1..]).is_err());
+        assert!(verify_observed_youtube_first_result(goal,
+            &snapshot("https://www.youtube.com/results?search_query=NASA"), &observed).is_err());
+        assert!(verify_observed_youtube_first_result(goal,
+            &snapshot("https://www.youtube.com.attacker.test/watch?v=123"), &observed).is_err());
+        assert!(verify_observed_youtube_first_result("Open YouTube", &watch, &observed).is_err());
+        let mut wrong_search = observed.clone();
+        wrong_search[0].url = "https://www.youtube.com/results?search_query=unrelated".into();
+        assert!(verify_observed_youtube_first_result(goal, &watch, &wrong_search).is_err());
     }
 }
