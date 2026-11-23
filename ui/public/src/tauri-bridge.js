@@ -32,6 +32,9 @@
   let currentTabId = 'tab-1';
   const loadedExternalTabs = new Set();
   let currentTabIsExternal = false;
+  // Bind each agent run to the tab the user actually launched it from.
+  // This prevents an asynchronous SPA observation from updating another tab.
+  const agentRunTabs = new Map();
 
   if (hasTauri) {
     document.body.classList.remove('p-2', 'sm:p-4', 'md:p-6');
@@ -210,6 +213,29 @@
     document.getElementById('tauriRejectBtn').addEventListener('click', () => decide(false));
   }
 
+  async function reconcileAgentPage(runId) {
+    const key = String(runId || '');
+    const tabId = agentRunTabs.get(key);
+    if (!invoke || !tabId || tabId !== currentTabId) return;
+    try {
+      // WebView2 PageLoadEvent does not necessarily fire for history.pushState
+      // transitions in dynamic SPAs. Only a fresh native DOM observation can
+      // synchronize the address bar here; never trust the model's claimed URL.
+      const observed = await invoke('capture_live_snapshot');
+      if (agentRunTabs.get(key) !== tabId || tabId !== currentTabId) return;
+      const url = observed?.origin || '';
+      if (!/^https?:\/\//i.test(url)) return;
+      const currentUiUrl = window.browsphereApp?.activeTab?.()?.url;
+      if (currentUiUrl === url) return;
+      currentTabIsExternal = true;
+      loadedExternalTabs.add(tabId);
+      scheduleBoundsSync();
+      emitUiEvent('aether:page-loaded', { tabId, url });
+    } catch (_) {
+      // The next real page event or agent observation can repair the view.
+    }
+  }
+
   window.aetherBridge = {
     isNative: hasTauri,
 
@@ -354,7 +380,8 @@
           interactive_nodes: []
         };
       }
-      return invoke('start_agent_run', {
+      const launchTabId = currentTabId;
+      const runId = await invoke('start_agent_run', {
         goal,
         snapshot,
         allowedDomains: [],
@@ -363,6 +390,10 @@
         isPrivate: document.documentElement.getAttribute('data-private') === 'true',
         voiceMode: window.browsphereVoice?.enabled === true
       });
+      agentRunTabs.set(String(runId), launchTabId);
+      // Capture an initial navigation even if it raced ahead of the launch reply.
+      reconcileAgentPage(runId).catch(() => {});
+      return runId;
     },
 
     async resolveLuciaTaskApproval(approvalId, approved) {
@@ -731,6 +762,7 @@
     listen('agent:trace', (event) => {
       const t = event.payload;
       if (!t) return;
+      reconcileAgentPage(t.run_id).catch(() => {});
       emitUiEvent('aether:agent-trace', t);
       appendAgentBubble(
         `${t.model_route} · Step ${t.step_index} · Risk: ${t.risk}`,
@@ -741,6 +773,10 @@
 
     listen('agent:run_status', (event) => {
       closeApprovalBanner();
+      const runId = String(event.payload?.run_id || '');
+      reconcileAgentPage(runId)
+        .catch(() => {})
+        .finally(() => agentRunTabs.delete(runId));
       emitUiEvent('aether:agent-status', event.payload);
       emitUiEvent('aether:traces-updated', event.payload);
       emitUiEvent('aether:macros-updated', event.payload);
