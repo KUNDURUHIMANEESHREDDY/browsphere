@@ -289,7 +289,7 @@ User text: <text>{}</text>"#,
                 "stream": false,
                 "think": false,
                 "format": "json",
-                "options": {"temperature": 0, "num_predict": 1000}
+                "options": {"temperature": 0, "num_predict": 448, "num_ctx": 4096}
             })).send().await?.error_for_status()?;
             let body: serde_json::Value = response.json().await?;
             Ok(body.pointer("/message/content").and_then(|v| v.as_str())
