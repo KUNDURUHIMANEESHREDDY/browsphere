@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><title>Lucia Multi-Step Browser Fixture</title>
+<style>body{font:16px system-ui;max-width:650px;margin:54px auto}button,input{padding:12px;margin:8px}button[hidden]{display:none}</style>
+</head>
+<body>
+<h1>Lucia multi-step browser test</h1>
+<p>Search this local demonstration website for a robotics video, click the search control, then open the first result. The final result is confirmed only after an observed page transition.</p>
+<label for="site-search">Search</label>
+<input id="site-search" aria-label="Search" type="search" autocomplete="off" placeholder="Search" />
+<button id="search" type="button">Search</button>
+<p id="status">Enter a search query to begin.</p>
+<div id="results" hidden>
+  <h2>Robotics video search results</h2>
+  <button type="button" id="first-result">Open robotics video</button>
+</div>
+<section id="video" hidden>
+  <h2>Robotics video details</h2>
+  <p id="confirmation">VIDEO_PAGE_CONFIRMED. Robotics video opened successfully after searching and selecting the first result.</p>
+</section>
+<script>
+(() => {
+  const input = document.getElementById('site-search');
+  const status = document.getElementById('status');
+  const results = document.getElementById('results');
+  const video = document.getElementById('video');
+  input.addEventListener('input', () => {
+    status.textContent = 'Query: ' + input.value.trim();
+  });
+  document.getElementById('search').addEventListener('click', () => {
+    if (input.value.trim().toLowerCase() !== 'robotics video') {
+      status.textContent = 'Search requires the specified robotics video query.';
+      return;
+    }
+    results.hidden = false;
+    status.textContent = 'Search results loaded for robotics video.';
+  });
+  document.getElementById('first-result').addEventListener('click', () => {
+    if (results.hidden) return;
+    history.pushState({opened:true}, '', '/multistep.html?video=robotics-demo');
+    results.hidden = true;
+    video.hidden = false;
+    status.textContent = 'Video result opened.';
+  });
+  window.addEventListener('popstate', () => {
+    const opened = new URL(location.href).searchParams.has('video');
+    results.hidden = true;
+    video.hidden = !opened;
+    status.textContent = opened ? 'Video result opened.' : 'Enter a search query to begin.';
+  });
+})();
+</script>
+</body></html>
