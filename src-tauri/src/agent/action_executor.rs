@@ -53,8 +53,15 @@ fn build_click_script(request_id: Uuid, node_id: &str) -> String {
     // A disabled control ignores .click(), which must not count as success.
     // Check immediately before dispatch because the DOM may have changed
     // since the model's last observation.
-    if (el.matches(":disabled") || el.getAttribute("aria-disabled") === "true") {{
-      return postResult(false, `Control ${{TARGET_ID}} is disabled`);
+    if (!el.isConnected || el.matches(":disabled")
+        || el.getAttribute("aria-disabled") === "true") {{
+      return postResult(false, `Control ${{TARGET_ID}} is detached or disabled`);
+    }}
+    const style = getComputedStyle(el);
+    const bounds = el.getBoundingClientRect();
+    if (style.display === "none" || style.visibility === "hidden"
+        || bounds.width < 2 || bounds.height < 2) {{
+      return postResult(false, `Control ${{TARGET_ID}} is not currently visible`);
     }}
     el.scrollIntoView({{ block: "center", inline: "nearest", behavior: "instant" }});
     const rect = el.getBoundingClientRect();
@@ -114,7 +121,16 @@ fn build_type_script(request_id: Uuid, node_id: &str, text: &str) -> String {
       return postResult(false, `Input ${{TARGET_ID}} not found in DOM`);
       return;
     }}
+    if (!el.isConnected || el.matches(":disabled")
+        || el.getAttribute("aria-disabled") === "true"
+        || el.hasAttribute("readonly") || el.readOnly) {{
+      return postResult(false, `Input ${{TARGET_ID}} is detached, disabled or read-only`);
+    }}
+    if (!el.isContentEditable && el.tagName !== "INPUT" && el.tagName !== "TEXTAREA") {{
+      return postResult(false, `Control ${{TARGET_ID}} is not an editable text field`);
+    }}
     el.scrollIntoView({{ block: "center", inline: "nearest", behavior: "instant" }});
+    el.focus();
 
     if (el.isContentEditable) {{
       el.textContent = VALUE;
@@ -135,6 +151,9 @@ fn build_type_script(request_id: Uuid, node_id: &str, text: &str) -> String {
     }}
     el.dispatchEvent(new Event("input", {{ bubbles: true }}));
     el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+    if (el.value !== VALUE) {{
+      return postResult(false, `Text field ${{TARGET_ID}} rejected the requested value`);
+    }}
     return postResult(true, `Typed ${{VALUE.length}} chars into ${{el.tagName.toLowerCase()}} (${{TARGET_ID}})`);
   }} catch (err) {{
     return postResult(false, `Type error: ${{String(err)}}`);
@@ -303,6 +322,17 @@ pub async fn execute_browser_action(
 #[cfg(test)]
 mod failure_recovery_execution_tests {
     use super::*;
+
+    #[test]
+    fn type_script_refuses_noneditable_or_readonly_controls() {
+        let script = build_type_script(Uuid::new_v4(), "search", "NASA Artemis");
+        assert!(script.contains("el.hasAttribute(\"readonly\")"));
+        assert!(script.contains("el.isContentEditable"));
+        assert!(script.contains("el.tagName !== \"INPUT\""));
+        assert!(script.contains("el.value !== VALUE"));
+        assert!(script.find("el.value !== VALUE").unwrap()
+            < script.find("return postResult(true, `Typed").unwrap());
+    }
 
     #[test]
     fn click_script_checks_disabled_controls_before_claiming_success() {
