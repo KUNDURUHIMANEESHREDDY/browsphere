@@ -517,6 +517,7 @@
         litellm_api_key: '',
         domain_overrides: {},
         prefer_local_for_simple: true,
+        lucia_cloud_only: false,
         cloud_model_catalogs: {}
       };
       var nativeAwsConfig = {
@@ -947,6 +948,9 @@
               break;
             case 'test-cloud-model':
               testNativeModelConnection('cloud');
+              break;
+            case 'test-cloud-agent':
+              testNativeModelConnection('cloud-agent');
               break;
             case 'fetch-cloud-models':
               fetchNativeCloudModels();
@@ -3725,6 +3729,8 @@
         });
         var preferred = document.getElementById('cfgPreferLocal');
         var isLocal = preferred ? preferred.checked : nativeRouterConfig.prefer_local_for_simple;
+        var cloudOnlyEl = document.getElementById('cfgLuciaCloudOnly');
+        var isCloudOnly = cloudOnlyEl ? cloudOnlyEl.checked : nativeRouterConfig.lucia_cloud_only;
         var bedrockEl = document.getElementById('cfgAwsBedrockEnabled');
         var bedrockValue = bedrockEl ? bedrockEl.checked : nativeAwsConfig.bedrock_enabled;
         renderSettingsPane();
@@ -3734,6 +3740,8 @@
         });
         var restoredBedrock = document.getElementById('cfgAwsBedrockEnabled');
         if (restoredBedrock) restoredBedrock.checked = bedrockValue;
+        var restoredCloudOnly = document.getElementById('cfgLuciaCloudOnly');
+        if (restoredCloudOnly) restoredCloudOnly.checked = Boolean(isCloudOnly);
         setNativeAiPreferred(isLocal ? 'ollama' : 'litellm');
       }
 
@@ -3787,6 +3795,7 @@
           litellm_api_key: (document.getElementById('cfgLiteLlmKey')?.value || '').trim() || null,
           domain_overrides: Object.assign({}, nativeRouterConfig.domain_overrides || {}),
           prefer_local_for_simple: Boolean(document.getElementById('cfgPreferLocal')?.checked),
+          lucia_cloud_only: Boolean(document.getElementById('cfgLuciaCloudOnly')?.checked),
           cloud_model_catalogs: Object.assign({}, nativeRouterConfig.cloud_model_catalogs || {})
         };
         if (!window.aetherBridge || !window.aetherBridge.isNative) {
@@ -3875,8 +3884,9 @@
       async function testNativeModelConnection(backend) {
         var saved = await saveNativeRouterSettings();
         if (!saved) return;
-        showModelTestStatus(backend === 'local' ? 'Contacting Ollama…' :
-          backend === 'cloud' ? 'Contacting cloud provider…' : 'Contacting selected model…');
+        showModelTestStatus(backend === 'cloud-agent' ? 'Checking cloud model browser-action JSON...' :
+          backend === 'local' ? 'Contacting Ollama...' :
+          backend === 'cloud' ? 'Contacting cloud provider...' : 'Contacting selected model...');
         try {
           var result = await window.aetherBridge.testModelConnection(backend);
           showModelTestStatus('Connected: ' + result);

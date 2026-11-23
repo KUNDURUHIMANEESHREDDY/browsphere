@@ -52,6 +52,11 @@ pub struct RouterConfig {
     pub litellm_api_key: Option<String>,
     pub domain_overrides: HashMap<String, String>,
     pub prefer_local_for_simple: bool,
+    /// When enabled, Lucia's planner, browser specialists, and verifier use
+    /// only the configured cloud provider. Never silently fall back to Ollama
+    /// when a cloud request fails. Older saved configurations default to off.
+    #[serde(default)]
+    pub lucia_cloud_only: bool,
     /// Fetched model IDs keyed by provider API endpoint; no API keys are stored here.
     #[serde(default)]
     pub cloud_model_catalogs: HashMap<String, Vec<String>>,
@@ -67,6 +72,7 @@ impl Default for RouterConfig {
             litellm_api_key: None,
             domain_overrides: HashMap::new(),
             prefer_local_for_simple: true,
+            lucia_cloud_only: false,
             cloud_model_catalogs: HashMap::new(),
         }
     }
@@ -156,6 +162,12 @@ impl ModelRouter {
         }
     }
 
+    /// The explicit cloud-only option takes priority over local defaults and
+    /// per-site overrides for all browser-task model calls.
+    fn lucia_uses_local(&self) -> bool {
+        self.config.prefer_local_for_simple && !self.config.lucia_cloud_only
+    }
+
     pub fn update_aws_config(&mut self, config: AwsConfig) { self.aws = config; }
 
     pub fn update_config(&mut self, config: RouterConfig) {
@@ -170,6 +182,24 @@ impl ModelRouter {
 
     /// Send a real, small inference request using the currently selected backend.
     pub async fn test_connection(&self, creds: &CredentialStore, backend: Option<&str>) -> anyhow::Result<String> {
+        if backend == Some("cloud-agent") {
+            // Explicit button only: one small provider call, never a browser
+            // action. Verify the model produces Lucia's actual JSON schema,
+            // not merely that it can answer a generic chat prompt.
+            let mut probe = self.clone();
+            probe.config.lucia_cloud_only = true;
+            let (_, action, route) = probe.propose_specialist_action(
+                "about:blank",
+                "The user requests: open https://example.com/. Return exactly one navigate action to https://example.com/. There is no live page or clickable DOM.",
+                "Test browser-action JSON schema only. Do not browse, and do not invent DOM IDs.",
+                creds, false
+            ).await?;
+            anyhow::ensure!(
+                matches!(action, BrowserAction::Navigate { ref url } if url == "https://example.com/"),
+                "Cloud model {route} replied but did not produce the requested, valid browser navigation action"
+            );
+            return Ok(format!("{route} returned a valid Lucia browser-action JSON response"));
+        }
         let use_local = match backend {
             Some("local") => true,
             Some("cloud") => false,
@@ -278,7 +308,7 @@ User text: <text>{}</text>"#,
             {"role":"system","content":system_prompt},
             {"role":"user","content":user_text}
         ]);
-        if self.config.prefer_local_for_simple {
+        if self.lucia_uses_local() {
             let endpoint = format!("{}/api/chat", self.config.ollama_url.trim_end_matches('/'));
             let response = client.post(endpoint).json(&json!({
                 "model": self.config.ollama_model,
@@ -292,6 +322,11 @@ User text: <text>{}</text>"#,
             Ok(body.pointer("/message/content").and_then(|v| v.as_str())
                 .unwrap_or("").to_string())
         } else {
+            // Keep planner, intent classification, verifier and action-model
+            // requests on the same explicitly enabled Bedrock backend.
+            if self.aws.bedrock_enabled {
+                return aws::converse_with_system(&self.aws, system_prompt, user_text).await;
+            }
             let endpoint = Url::parse(&self.config.litellm_url)?;
             let local = matches!(endpoint.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
             anyhow::ensure!(endpoint.scheme() == "https" || (local && endpoint.scheme() == "http"),
@@ -443,6 +478,9 @@ Rules: quote a real sentence fragment from one of the provided observed_web_page
     }
 
     pub fn select_backend(&self, origin: &str) -> &str {
+        // Cloud-only explicitly overrides a site's old local override. The
+        // user can still turn this off to restore normal per-domain routing.
+        if self.config.lucia_cloud_only { return "litellm"; }
         if let Ok(parsed) = Url::parse(origin) {
             if let Some(host) = parsed.host_str() {
                 let h = host.to_lowercase();
@@ -659,6 +697,78 @@ Example: {{"thought":"Visit the website requested by the user","action":{{"type"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lucia_cloud_only_is_opt_in_and_overrides_local_domain_rules() {
+        let legacy = serde_json::json!({
+            "ollama_url":"http://127.0.0.1:11434",
+            "ollama_model":"qwen2.5:3b-instruct",
+            "litellm_url":"https://api.openai.com/v1/chat/completions",
+            "litellm_model":"example-cloud-model",
+            "litellm_api_key":null,
+            "domain_overrides":{"youtube.com":"ollama"},
+            "prefer_local_for_simple":true,
+            "cloud_model_catalogs":{}
+        });
+        let config: RouterConfig = serde_json::from_value(legacy).unwrap();
+        assert!(!config.lucia_cloud_only);
+        let mut router = ModelRouter::new(config);
+        assert!(router.lucia_uses_local());
+        assert_eq!(router.select_backend("https://youtube.com/watch"), "ollama");
+        let mut cfg = router.get_config();
+        cfg.lucia_cloud_only = true;
+        router.update_config(cfg);
+        assert!(!router.lucia_uses_local());
+        assert_eq!(router.select_backend("https://youtube.com/watch"), "litellm");
+        assert_eq!(router.select_backend("https://www.youtube.com/"), "litellm");
+        // This is a routing preference, not an API call or permission bypass.
+        let restored: RouterConfig = serde_json::from_value(
+            serde_json::to_value(router.get_config()).unwrap()).unwrap();
+        assert!(restored.lucia_cloud_only);
+    }
+
+    #[tokio::test]
+    async fn cloud_only_planner_and_agent_use_mock_provider_not_ollama() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use crate::agent::orchestrator::Specialist;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for content in [
+                serde_json::json!({"stages":[{"specialist":"browser",
+                    "objective":"Open the observed site",
+                    "success_criteria":"A browser page is visible"}]}).to_string(),
+                serde_json::json!({"thought":"Open the requested page",
+                    "action":{"type":"navigate","url":"https://example.org/"}}).to_string(),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = [0u8; 8192];
+                let n = stream.read(&mut buffer).await.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..n]);
+                assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+                let body = serde_json::json!({"choices":[{"message":{"content":content}}]}).to_string();
+                let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",body.len(),body);
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let mut cfg = RouterConfig::default();
+        cfg.prefer_local_for_simple = true;
+        cfg.lucia_cloud_only = true;
+        cfg.ollama_url = "http://127.0.0.1:1".into();
+        cfg.litellm_url = format!("http://{addr}/v1/chat/completions");
+        cfg.litellm_model = "fixture-cloud-model".into();
+        cfg.domain_overrides.insert("example.org".into(), "ollama".into());
+        let router = ModelRouter::new(cfg);
+        let creds = CredentialStore::new("browsphere-lucia-cloud-only-mock-test");
+        let plan = router.plan_specialist_task("Open example.org", &creds).await.unwrap();
+        assert_eq!(plan.stages[0].specialist, Specialist::Browser);
+        let (_, action, route) = router.propose_specialist_action(
+            "https://example.org/", "Goal: open example.org", "Observe and open the website",
+            &creds, false).await.unwrap();
+        assert!(matches!(action, BrowserAction::Navigate { url } if url == "https://example.org/"));
+        assert_eq!(route, "litellm:fixture-cloud-model");
+        server.await.unwrap();
+    }
 
     #[test]
     fn groq_agent_requests_json_mode_and_complete_action_schema() {

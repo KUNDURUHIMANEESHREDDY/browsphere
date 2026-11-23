@@ -40,6 +40,7 @@
     var cloudModels = Array.isArray(cloudCatalogs[cfg.litellm_url])
       ? cloudCatalogs[cfg.litellm_url] : [];
     var preferLocal = !!cfg.prefer_local_for_simple;
+    var cloudOnly = !!cfg.lucia_cloud_only;
     var provider = providerOf(cfg.litellm_url || '');
     var providers = [
       ['custom', 'Custom / LiteLLM'], ['openai', 'OpenAI'],
@@ -77,8 +78,12 @@
       !preferLocal + '">Cloud</button>' +
       '<input type="checkbox" id="cfgPreferLocal" hidden tabindex="-1" ' +
       (preferLocal ? 'checked' : '') + ' /></div>';
+    var luciaCloudOnly = '<label class="mac-ai-switch" aria-label="Use only cloud models for Lucia browser tasks">' +
+      '<input id="cfgLuciaCloudOnly" type="checkbox"' + (cloudOnly ? ' checked' : '') +
+      ' /><span class="track"><span class="thumb"></span></span></label>';
     var primary = section('Default Intelligence', 'Choose which model Browsphere uses for new agent tasks.',
       row('Preferred engine', 'Use local processing or your configured cloud API.', engineControl) +
+      row('Lucia cloud-only reasoning', 'Use the selected cloud provider for planning, browser actions and verification. No silent Ollama fallback. Webpage excerpts and task requests are sent to the provider; API usage may be billed. Save a provider key and test cloud connection first.', luciaCloudOnly) +
       row('Local model', 'Ollama model used for local tasks.', localModel) +
       row('Cloud provider', 'OpenAI-compatible API providers.', providerControl) +
       row('Cloud model', 'Enter a supported model ID.', cloudModel));
@@ -124,7 +129,8 @@
         esc(state.fetchStatus || (cloudModels.length ? 'Saved models are available below.' : 'Ready to fetch')) +
         '</span></div>') +
       row('Available models', 'Choose a fetched model; your selection is saved.', cloudSelector) +
-      row('Connection', 'Test the selected cloud model and key.', btn('test-cloud-model', 'Test cloud connection')));
+      row('Connection', 'Test the selected cloud model and key.', btn('test-cloud-model', 'Test cloud connection')) +
+      row('Lucia model readiness', 'Send one small API request to confirm that the chosen cloud model generates a valid browser-action JSON response. Provider charges may apply; no webpage is opened.', btn('test-cloud-agent', 'Test Lucia reasoning')));
     var awsDiscovered = Array.isArray(state.awsServices) ? state.awsServices : [];
     var awsServiceSummary = awsDiscovered.length
       ? '<div class="mac-aws-services" aria-label="Discovered AWS services">' +
