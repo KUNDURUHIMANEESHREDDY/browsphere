@@ -88,7 +88,7 @@ async function main() {
       throw Error('Fixture navigation not observed in native WebView: ' + url);
     }
 
-    async function run(goal, initial, limit=realModel?280:60) {
+    async function run(goal, initial, limit=realModel?720:60) {
       // Exercise the real UI-to-Rust bridge, including run-to-tab registration.
       const id = await evaluate('window.aetherBridge.startLuciaSpecialistTask(' +
         JSON.stringify(goal) + ',' + JSON.stringify(initial.origin) + ',' +
