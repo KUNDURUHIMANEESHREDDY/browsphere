@@ -228,6 +228,62 @@ pub fn verify_observed_named_result_title(
     })
 }
 
+/// A narrowly scoped, read-only link-and-title task such as
+/// "click the Tutorial link ... report the page title". Do not use this for
+/// forms, purchases, arbitrary navigation, or tasks without a named link.
+pub fn requested_named_link_title(goal: &str) -> Option<String> {
+    let lower = goal.to_ascii_lowercase();
+    if !lower.contains("report") || !lower.contains("title") { return None; }
+    let start = lower.find("click the ").map(|i| i + "click the ".len())
+        .or_else(|| lower.find("click ").map(|i| i + "click ".len()))?;
+    let suffix = goal.get(start..)?;
+    let end = suffix.to_ascii_lowercase().find(" link")?;
+    let label = suffix.get(..end)?.trim();
+    if !(3..=64).contains(&label.chars().count())
+        || !label.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-')
+        || label.split_whitespace().count() > 7
+    { return None; }
+    Some(label.to_string())
+}
+
+/// Verify a *real* previously clicked link opened a matching readable page.
+/// The caller separately requires a successful observed non-submit click.
+/// A matching URL/title alone cannot authorize browser actions.
+pub fn verify_observed_named_link_title(
+    goal: &str,
+    starting_origin: &str,
+    after: &DomSnapshot,
+    observations: &[SourceEvidence],
+) -> Result<VerificationReport, String> {
+    let label = requested_named_link_title(goal)
+        .ok_or("Not a named-link page-title request")?;
+    let url = web_url(&after.origin).ok_or("The destination is not a web page")?;
+    if starting_origin == after.origin {
+        return Err("The requested link did not open a new page".into());
+    }
+    let expected = normalized(&label);
+    let title = normalized(&after.title);
+    let path = normalized(&url.path().replace(['-', '_'], " "));
+    if !title.contains(&expected) || !path.contains(&expected)
+        || after.text_excerpt.trim().chars().count() < 40
+        || title.contains("search results") || title.contains("not found")
+    { return Err("Destination title and path do not match the clicked link".into()); }
+    if !observations.iter().any(|item|
+        item.url == after.origin && item.title == after.title
+        && !item.excerpt.trim().is_empty())
+    { return Err("Missing fresh recorded WebView evidence for the opened link".into()); }
+    Ok(VerificationReport {
+        status: "evidence_checked",
+        summary: format!("Opened a page titled {}.", after.title.trim()),
+        findings: vec![GroundedFinding {
+            claim: "The named link destination was opened".into(),
+            url: after.origin.clone(),
+            quote: format!("Observed document title: {}", after.title.trim()),
+        }],
+        limitations: "This confirms the observed destination URL and title, not the truth of page claims.".into(),
+    })
+}
+
 /// For explicitly requested named-article searches, a search control can
 /// navigate without producing a form-submission confirmation message.
 /// This is a *navigation* postcondition and never permits claiming a purchase,
@@ -518,6 +574,40 @@ mod tests {
             ..article
         };
         assert!(verify_observed_named_result_title(goal, start, &other, &sources).is_err());
+    }
+
+    #[test]
+    fn named_link_title_requires_matching_destination_and_real_evidence() {
+        let goal = "On this Python documentation homepage, click the Tutorial link to open the Python Tutorial page. Then report the page title.";
+        assert_eq!(requested_named_link_title(goal).as_deref(), Some("Tutorial"));
+        assert!(requested_named_link_title("Click Tutorial to buy a subscription").is_none());
+        assert!(requested_named_link_title("Submit the feedback form and report its title").is_none());
+        let start = "https://docs.python.org/3/";
+        let page = DomSnapshot {
+            origin: "https://docs.python.org/3/tutorial/index.html".into(),
+            title: "The Python Tutorial — Python 3.15 documentation".into(),
+            text_excerpt: "The Python Tutorial contains an introduction to Python with extensive examples and lessons.".into(),
+            interactive_nodes: vec![],
+        };
+        let evidence = vec![SourceEvidence {
+            url: page.origin.clone(), title: page.title.clone(),
+            excerpt: page.text_excerpt.clone(),
+        }];
+        let report = verify_observed_named_link_title(goal, start, &page, &evidence).unwrap();
+        assert_eq!(report.status, "evidence_checked");
+        assert!(verify_observed_named_link_title(goal, start, &page, &[]).is_err());
+        assert!(verify_observed_named_link_title(goal, &page.origin, &page, &evidence).is_err());
+        let wrong = DomSnapshot {
+            origin: "https://docs.python.org/3/library/index.html".into(),
+            title: "The Python Library — Python documentation".into(),
+            ..page.clone()
+        };
+        assert!(verify_observed_named_link_title(goal, start, &wrong, &evidence).is_err());
+        let forged = DomSnapshot {
+            origin: "https://docs.python.org.evil.test/3/tutorial/index.html".into(),
+            ..page
+        };
+        assert!(verify_observed_named_link_title(goal, start, &forged, &evidence).is_err());
     }
 
     #[test]

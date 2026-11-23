@@ -14,7 +14,8 @@ use crate::agent::evidence_verifier::{
     check_navigation_result, check_submission_result, check_named_search_transition,
     requires_post_action_check,
     verify_direct_navigation, verify_observed_youtube_first_result,
-    verify_observed_named_result_title, requested_named_result_title, VerificationReport,
+    verify_observed_named_result_title, requested_named_result_title,
+    verify_observed_named_link_title, requested_named_link_title, VerificationReport,
 };
 use crate::agent::dom_extractor::{request_live_dom_snapshot, DomSnapshot};
 use crate::agent::policy::{
@@ -1057,6 +1058,26 @@ pub async fn run_react_loop(
             } else if freshly_observed
                 && !last_action_failed
                 && matches!(orchestrator.specialist(), Specialist::Browser | Specialist::Research)
+                && recorded_steps.iter().any(|step|
+                    matches!(step, BrowserAction::Click { is_submit: false, .. }))
+                && orchestrator.can_complete(&snapshot).is_ok()
+                && verify_observed_named_link_title(
+                    &goal, &initial_origin, &snapshot, &orchestrator.evidence
+                ).is_ok()
+            {
+                // A previously clicked, named link has reached a matching
+                // observed URL and title. Stop asking the local model to
+                // click more controls; run the independent verifier next.
+                (
+                    "The named link destination is visible; request independent verification".into(),
+                    BrowserAction::Complete {
+                        summary: "Observed requested link destination and page title".into(),
+                    },
+                    "observed_link_title:grounded_stage_handoff".into(),
+                )
+            } else if freshly_observed
+                && !last_action_failed
+                && matches!(orchestrator.specialist(), Specialist::Browser | Specialist::Research)
                 && (confirmed_named_search_navigation
                     || recorded_steps.iter().any(|step|
                         matches!(step, BrowserAction::Click { is_submit: false, .. })))
@@ -1392,6 +1413,18 @@ pub async fn run_react_loop(
                     let result = if let Some(target) = requested_navigation_url(&goal) {
                         verify_direct_navigation(target.as_str(), &snapshot)
                             .map_err(anyhow::Error::msg)
+                    } else if requested_named_link_title(&goal).is_some() {
+                        // Require both the original successful click and a
+                        // fresh exact destination/title/evidence match.
+                        if !recorded_steps.iter().any(|step|
+                            matches!(step, BrowserAction::Click { is_submit: false, .. }))
+                        {
+                            Err(anyhow::anyhow!("No successful named-link click occurred"))
+                        } else {
+                            verify_observed_named_link_title(
+                                &goal, &initial_origin, &snapshot, &orchestrator.evidence
+                            ).map_err(anyhow::Error::msg)
+                        }
                     } else if requested_named_result_title(&goal).is_some() {
                         // Narrow title-only workflow; do not let a model
                         // invent an article title, URL, or result click.

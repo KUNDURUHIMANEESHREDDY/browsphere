@@ -98,11 +98,16 @@ async function main(){
       const mine=events.filter(e=>e.payload?.run_id===id);
       return {status:approvalRequired?'approval':(end?.payload?.status||'timeout'),
         approvalRequired, actions:mine.filter(e=>e.kind==='agent:trace')
-        .map(e=>({type:e.payload?.action?.type,outcome:e.payload?.outcome,modelRoute:e.payload?.model_route})),
+        .map(e=>({type:e.payload?.action?.type,
+          nodeId:e.payload?.action?.node_id,
+          outcome:e.payload?.outcome,
+          decision:e.payload?.decision,
+          modelRoute:e.payload?.model_route})),
         errors:mine.filter(e=>e.kind==='agent:run_error').map(e=>String(e.payload?.message||'').slice(0,150)),
         verified:mine.some(e=>e.kind==='agent:verification_report' && e.payload?.report?.status==='evidence_checked')};
     }
-    const cases=process.env.LUCIA_ONLY_WIKIPEDIA === '1' ? [] : [
+    const onlyPythonTutorial=process.env.LUCIA_ONLY_PYTHON_TUTORIAL === '1';
+    const cases=(process.env.LUCIA_ONLY_WIKIPEDIA === '1' || onlyPythonTutorial) ? [] : [
       ['Example Domain','open example.com','example.com'],
       ['GitHub','open github.com','github.com'],
       ['Wikipedia','open wikipedia.org','wikipedia.org'],
@@ -125,7 +130,33 @@ async function main(){
           {status:task.status,actualWebView:actual,state,actions:task.actions,errors:task.errors,verified:task.verified});
       }catch(e){record(name+' autonomous open',false,{error:String(e)});}
     }
-    if(useCloud || hasQwen){
+    if(onlyPythonTutorial && !useCloud && hasQwen){
+      try {
+        await evalJs("window.browsphereApp.newTab('https://docs.python.org/3/')");
+        let before;
+        for(let i=0;i<45;i++){
+          before=await nativeState();
+          if(hostname(before.observed)==='docs.python.org' && before.controls>0)break;
+          await sleep(400);
+        }
+        if(hostname(before?.observed)!=='docs.python.org' || before.controls===0 ||
+            /error|not found|access denied/i.test(before?.title||''))
+          throw Error('Python documentation was not loaded with live interactive controls');
+        const task=await runTask('On this Python documentation homepage, click the Tutorial link to open the Python Tutorial page. Then report the page title.','https://docs.python.org/3/',135);
+        const after=await nativeState();
+        const destination=(()=>{try{return new URL(after.observed)}catch{return null}})();
+        const modelClick=task.actions.some(a=>a.type==='click' &&
+          (a.outcome==='ok'||a.outcome==='confirmed') &&
+          /ollama:qwen2\.5:3b-instruct/.test(a.modelRoute||''));
+        console.log('PYTHON_TUTORIAL_ACTION_TRACE',JSON.stringify({status:task.status,actions:task.actions,errors:task.errors,verified:task.verified,before,after}));
+        record('Python Docs local agent click Tutorial',task.status==='completed' &&
+          !!destination && destination.host==='docs.python.org' &&
+          destination.pathname==='/3/tutorial/index.html' &&
+          task.verified && modelClick,
+          {status:task.status,modelClick,verified:task.verified,before,after,actions:task.actions,errors:task.errors});
+      }catch(e){record('Python Docs local agent click Tutorial',false,{error:String(e)});}
+    }
+    if(!onlyPythonTutorial && (useCloud || hasQwen)){
       try {
         await evalJs("window.browsphereApp.newTab('https://en.wikipedia.org/wiki/Main_Page')");
         let before;
@@ -137,6 +168,8 @@ async function main(){
         if(hostname(before?.observed)!=='en.wikipedia.org' ||
             /error|not found|access denied/i.test(before?.title||''))
           throw Error('Wikipedia starting document unavailable or error page; do not test model planning against an error page');
+        const searchControls=await evalJs("(async()=>{const s=await window.__TAURI__.core.invoke('capture_live_snapshot');return s.interactive_nodes.filter(n=>n.label?.toLowerCase().includes('search')||n.role==='searchbox').slice(0,20).map(n=>({tag:n.tag,role:n.role,label:n.label,submit:n.is_submit,sensitive:n.is_sensitive,inViewport:n.bbox?.in_viewport,node_id:n.node_id}))})()");
+        console.log('WIKIPEDIA_SEARCH_CONTROLS',JSON.stringify(searchControls));
         const task=await runTask('On this Wikipedia page, search for Ada Lovelace and open the corresponding article. Then report its page title.','https://en.wikipedia.org/wiki/Main_Page',140);
         console.log('WIKIPEDIA_ACTION_TRACE', JSON.stringify({status:task.status,actions:task.actions,errors:task.errors,verified:task.verified}).slice(0,9000));
         const after=await nativeState();
@@ -149,7 +182,7 @@ async function main(){
           task.verified && selectedRouteSeen,
           {status:task.status,before,after,selectedRouteSeen,actions:task.actions,errors:task.errors,verified:task.verified});
       }catch(e){record('Wikipedia real-model search and article',false,{error:String(e)});}
-    }else record('Wikipedia real-model search and article',false,{reason:'No configured live model available; no genuine model call attempted'});
+    }else if(!onlyPythonTutorial) record('Wikipedia real-model search and article',false,{reason:'No configured live model available; no genuine model call attempted'});
   }finally{close();}
   console.log('CROSS_SITE_RESULT',JSON.stringify({passed:result.filter(x=>x.success).length,total:result.length,results:result.map(x=>({name:x.name,success:x.success}))}));
   if(result.some(x=>!x.success))process.exitCode=1;
