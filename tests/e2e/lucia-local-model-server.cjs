@@ -153,7 +153,9 @@ function runFixture(req, res) {
   if (req.url === '/health') return send(res, 200, {ok:true,kind:'fixture'});
   const exact = {
     '/multistep.html':'multistep.html',
-    '/recovery.html':'recovery.html'
+    '/recovery.html':'recovery.html',
+    '/generic-controls.html':'generic-controls.html',
+    '/generic-document.html':'generic-document.html'
   }[new URL(req.url || '/', 'http://127.0.0.1').pathname];
   if (!exact || req.method !== 'GET') return send(res, 404, 'Not found', 'text/plain');
   try {
