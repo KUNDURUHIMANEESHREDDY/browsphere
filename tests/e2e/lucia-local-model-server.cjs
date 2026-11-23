@@ -136,6 +136,9 @@ function chat(body) {
 
 function runLocalModel(req, res) {
   if (req.url === '/health') return send(res, 200, {ok:true,kind:'mock-ollama'});
+  if (req.method === 'GET' && req.url === '/api/tags') {
+    return send(res, 200, {models:[{name:'lucia-local-e2e',model:'lucia-local-e2e'}]});
+  }
   if (req.method !== 'POST' || !['/api/chat','/api/generate'].includes(req.url)) {
     return send(res, 404, {error:'Not found'});
   }
