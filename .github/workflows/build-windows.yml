@@ -64,6 +64,11 @@ jobs:
         timeout-minutes: 8
         run: ./tests/e2e/run-lucia-multistep.ps1
 
+      - name: Run cloud-only Lucia WebView2 E2E through OpenAI-compatible endpoint
+        shell: pwsh
+        timeout-minutes: 8
+        run: ./tests/e2e/run-lucia-multistep.ps1 -CloudCompat -CdpPort 9274 -ModelPort 18769 -FixturePort 18770
+
       - name: Verify installer artifact exists
         shell: pwsh
         run: |
