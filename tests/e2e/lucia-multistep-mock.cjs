@@ -4,9 +4,9 @@
 const assert = require('node:assert/strict');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const port = Number(process.env.LUCIA_CDP_PORT || 9272);
-const base = 'http://127.0.0.1:18764';
+const base = 'http://127.0.0.1:' + Number(process.env.LUCIA_FIXTURE_PORT || 18764);
 const realModel = process.env.LUCIA_E2E_REAL_MODEL?.trim() || null;
-const modelUrl = realModel ? 'http://127.0.0.1:11434' : 'http://127.0.0.1:18766';
+const modelUrl = realModel ? 'http://127.0.0.1:11434' : 'http://127.0.0.1:' + Number(process.env.LUCIA_MODEL_PORT || 18766);
 const chosenModel = realModel || 'lucia-local-e2e';
 
 async function connect() {
@@ -329,6 +329,21 @@ async function main() {
       if (backgroundTerminal) break;
     }
     assert.ok(backgroundTerminal, 'Background task never reached a terminal state');
+    if (backgroundTerminal.payload?.status !== 'completed') {
+      const backgroundEvents = await evaluate(eventsExpression) || [];
+      const debugPage = await evaluate(
+      "window.__TAURI__.core.invoke('capture_tab_snapshot',{tabId:" + JSON.stringify(taskId) + "})").catch(()=>null);
+    console.log('BACKGROUND_DEBUG',JSON.stringify({
+      status:backgroundTerminal.payload?.status,
+      origin:debugPage?.origin,
+      interactiveCount:debugPage?.interactive_nodes?.length,
+      textFound:debugPage?.text_excerpt?.includes('VIDEO_PAGE_CONFIRMED'),
+      traces:backgroundEvents.filter(e=>e.event==='agent:trace'&&e.payload?.run_id===backgroundRun)
+        .map(e=>({action:e.payload?.action?.type,outcome:e.payload?.outcome,route:e.payload?.model_route})),
+      errors:backgroundEvents.filter(e=>e.event==='agent:run_error'&&e.payload?.run_id===backgroundRun)
+        .map(e=>e.payload?.message)
+      }));
+    }
     assert.equal(backgroundTerminal.payload?.status, 'completed',
       'The background multi-step task failed');
     const backgroundSnapshot = await evaluate(

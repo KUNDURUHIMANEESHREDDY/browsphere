@@ -1,6 +1,12 @@
 # Native Lucia end-to-end tests with a loopback-only model and fixture.
 # Never uses the user's actual browser data, accounts, or API credentials.
-param([string]$ExecutablePath = "", [switch]$CloudCompat)
+param(
+    [string]$ExecutablePath = "",
+    [switch]$CloudCompat,
+    [int]$CdpPort = 9272,
+    [int]$ModelPort = 18766,
+    [int]$FixturePort = 18764
+)
 
 $ErrorActionPreference = 'Stop'
 $previousCloudMode = $env:LUCIA_E2E_CLOUD_COMPAT
@@ -23,7 +29,10 @@ $profile = Join-Path ([IO.Path]::GetTempPath()) ('lucia-native-e2e-' + [Guid]::N
 $env:APPDATA = Join-Path $profile 'Roaming'
 $env:LOCALAPPDATA = Join-Path $profile 'Local'
 $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $profile 'WebView2'
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9272 --remote-allow-origins=*'
+$env:LUCIA_CDP_PORT = "$CdpPort"
+$env:LUCIA_MODEL_PORT = "$ModelPort"
+$env:LUCIA_FIXTURE_PORT = "$FixturePort"
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$CdpPort --remote-allow-origins=*"
 New-Item -ItemType Directory -Force $env:APPDATA, $env:LOCALAPPDATA, $env:WEBVIEW2_USER_DATA_FOLDER | Out-Null
 
 $modelProcess = $null
@@ -62,13 +71,13 @@ try {
     $serverScript = Join-Path $root 'tests\e2e\lucia-local-model-server.cjs'
     $modelProcess = Start-Process -FilePath 'node' -ArgumentList @('"' + $serverScript + '"') -WorkingDirectory $root -PassThru -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr
 
-    Wait-ForLoopback 'http://127.0.0.1:18766/health'
-    Wait-ForLoopback 'http://127.0.0.1:18764/health'
+    Wait-ForLoopback "http://127.0.0.1:$ModelPort/health"
+    Wait-ForLoopback "http://127.0.0.1:$FixturePort/health"
 
     Write-Host 'Starting isolated Browsphere native WebView2 fixture tests'
     $appProcess = Start-Process -FilePath $ExecutablePath -WorkingDirectory $root -PassThru
     try {
-        Wait-ForLoopback 'http://127.0.0.1:9272/json' 55
+        Wait-ForLoopback "http://127.0.0.1:$CdpPort/json" 55
     } catch {
         $appProcess.Refresh()
         Write-Host "Native app exited: $($appProcess.HasExited)"

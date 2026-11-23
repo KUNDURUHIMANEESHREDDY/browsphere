@@ -354,6 +354,16 @@ fn evaluate_live_action_policy(
     result
 }
 
+fn delayed_navigation_is_verified(expected: &str, observed: &DomSnapshot) -> bool {
+    check_navigation_result(expected, observed).is_ok()
+}
+
+fn should_bootstrap_direct_navigation(goal: &str, specialist: Specialist, already_attempted: bool) -> bool {
+    // One browser bootstrap per task, not one per step. Failed or slow network
+    // loads must be re-evaluated from live evidence by the model, not replayed.
+    specialist == Specialist::Browser && !already_attempted && requested_navigation_url(goal).is_some()
+}
+
 fn action_state_signature(stage: usize, action: &BrowserAction, snapshot: &DomSnapshot) -> String {
     let mut state_hash = std::collections::hash_map::DefaultHasher::new();
     snapshot.origin.hash(&mut state_hash);
@@ -489,6 +499,12 @@ pub async fn run_react_loop(
     let mut next_step_index: u32 = 0;
     let mut recent_outcomes: Vec<String> = Vec::new();
     let mut last_action_failed = false;
+    // Never force the same deterministic navigation after it fails. The
+    // specialist model must inspect the fresh state and choose recovery.
+    let mut direct_navigation_attempted = false;
+    // WebView2 may acknowledge navigation before a slow site yields a loaded DOM.
+    // Only a later, fresh and exact native page observation may recover it.
+    let mut pending_direct_navigation: Option<String> = None;
     let mut duplicate_retries: u8 = 0;
     let mut failures_observed: HashSet<RecoveredFailure> = HashSet::new();
     // Lucia delegates the task through real specialist stages; each stage has
@@ -656,6 +672,21 @@ pub async fn run_react_loop(
             freshly_observed = true;
         }
 
+        if freshly_observed {
+            if let Some(target) = pending_direct_navigation.as_ref() {
+                if delayed_navigation_is_verified(target, &snapshot) {
+                    let recovered_action = BrowserAction::Navigate { url: target.clone() };
+                    orchestrator.action_outcome(&recovered_action, true);
+                    orchestrator.confirmed_navigation(&snapshot);
+                    recorded_steps.push(recovered_action);
+                    last_action_failed = false;
+                    pending_direct_navigation = None;
+                    recent_outcomes.push("Delayed navigation is now verified by the native page".to_string());
+                    if recent_outcomes.len() > 5 { recent_outcomes.remove(0); }
+                }
+            }
+        }
+
         let safe_excerpt = sanitize_untrusted_page_text(&snapshot.text_excerpt, 2400);
 
         // Include only relevant user-saved notes, scoped to the current site or global.
@@ -722,14 +753,27 @@ pub async fn run_react_loop(
                     },
                     "observed_video:verified_stage_handoff".to_string(),
                 )
-            } else if orchestrator.specialist() == Specialist::Browser
+            } else if freshly_observed
+                && orchestrator.specialist() == Specialist::Browser
                 && requested_navigation_url(&goal).is_some()
+                && orchestrator.can_complete(&snapshot).is_ok()
+            {
+                // The originally dispatched navigation finished loading after
+                // its first timeout; proceed to independent evidence checking
+                // instead of asking the model to navigate again.
+                (
+                    "The requested destination is now verified in the live browser".to_string(),
+                    BrowserAction::Complete { summary: "Destination observed and ready for verification".into() },
+                    "delayed_navigation:live_dom_confirmed".to_string(),
+                )
+            } else if should_bootstrap_direct_navigation(&goal, orchestrator.specialist(), direct_navigation_attempted)
             {
                 // A direct user instruction such as "open youtube" is a
                 // deterministic browser command. It does not need a cloud
                 // model call (or rate-limit budget) to choose the URL.
                 // Policy and fresh native verification still run below.
                 let target = requested_navigation_url(&goal).expect("guarded above");
+                direct_navigation_attempted = true;
                 (
                     "Navigate to the website explicitly named by the user".to_string(),
                     BrowserAction::Navigate { url: target.to_string() },
@@ -868,6 +912,14 @@ pub async fn run_react_loop(
                 outcome: "HALTED: loop guard".to_string(),
             };
             let _ = trace_tx.send(entry.sanitized()).await;
+            let message = if failures_observed.contains(&RecoveredFailure::NavigationFailure) {
+                "Lucia stopped after navigation failed and the next actions repeated without a verified page change. Check the task tab and choose a working model or a different navigation path."
+            } else {
+                "Lucia stopped because its browser actions repeated without changing the observed page. Inspect the task tab and retry with a different approach."
+            };
+            let _ = app.emit("agent:run_error", serde_json::json!({
+                "run_id": run_id, "message": message
+            }));
             final_status = "halted".to_string();
             break;
             }
@@ -990,6 +1042,7 @@ pub async fn run_react_loop(
         // A WebView action acknowledgment does not prove the desired effect.
         // Re-observe the live webpage before marking navigation or a submit as
         // successful. An ambiguous submit must NOT be retried automatically.
+        let navigation_dispatched = ok && matches!(action, BrowserAction::Navigate { .. });
         let mut submission_unconfirmed = false;
         if ok && requires_post_action_check(&action) {
             let before = snapshot.clone();
@@ -1021,6 +1074,14 @@ pub async fn run_react_loop(
                     submission_unconfirmed =
                         matches!(action, BrowserAction::Click { is_submit: true, .. });
                     outcome = format!("UNVERIFIED ACTION EFFECT: {problem}");
+                }
+            }
+        }
+
+        if !ok && navigation_dispatched {
+            if let BrowserAction::Navigate { url } = &action {
+                if requested_navigation_url(&goal).is_some_and(|expected| expected.as_str() == url) {
+                    pending_direct_navigation = Some(url.clone());
                 }
             }
         }
@@ -1211,14 +1272,41 @@ pub async fn run_react_loop(
         }
     }
 
+    if final_status == "max_steps" {
+        let _ = app.emit("agent:run_error", serde_json::json!({
+            "run_id": run_id,
+            "message": "Lucia reached its browser-step limit without verified completion. Open the task tab and review the last successful action before retrying."
+        }));
+    }
     Ok(final_status)
 }
-
 
 
 #[cfg(test)]
 mod production_safety_tests {
     use super::*;
+
+    #[test]
+    fn delayed_navigation_requires_a_loaded_exact_native_document() {
+        let mut state = DomSnapshot {
+            origin: "https://example.org/".into(), title: String::new(),
+            text_excerpt: String::new(), interactive_nodes: vec![],
+        };
+        assert!(!delayed_navigation_is_verified("https://example.org/", &state));
+        state.title = "Example documentation".into();
+        assert!(delayed_navigation_is_verified("https://example.org/", &state));
+        assert!(!delayed_navigation_is_verified("https://another.example/", &state));
+        state.title = "This page isn't working".into();
+        assert!(!delayed_navigation_is_verified("https://example.org/", &state));
+    }
+
+    #[test]
+    fn direct_navigation_bootstrap_is_one_shot_and_general() {
+        assert!(should_bootstrap_direct_navigation("open example.com", Specialist::Browser, false));
+        assert!(!should_bootstrap_direct_navigation("open example.com", Specialist::Browser, true));
+        assert!(!should_bootstrap_direct_navigation("search example.com for flights", Specialist::Browser, false));
+        assert!(!should_bootstrap_direct_navigation("open example.com", Specialist::Verification, false));
+    }
 
     #[test]
     fn enter_requires_current_non_sensitive_search_control() {

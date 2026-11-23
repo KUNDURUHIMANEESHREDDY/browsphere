@@ -4566,7 +4566,13 @@
           } else {
             thread.messages.push({role:'assistant',content:
               'The task did not finish (' + payload.status + '). ' +
-              (task.error || 'Review the specialist progress and try again.'),error:true});
+              (task.error || ({
+                halted:'Lucia stopped after repeated actions or an unrecovered browser failure. Inspect the task tab and its last action.',
+                max_steps:'Lucia used its available steps without verifying the result. Inspect the task tab before retrying.',
+                unverified:'Lucia could not verify that the webpage changed as requested. Inspect the destination before retrying.',
+                rejected:'The requested browser action was blocked or not approved. No further actions were performed.',
+                failed:'Lucia encountered an execution or model error. Review the latest task step and AI & ML model settings.'
+              }[payload.status] || 'The task stopped before verification. Review the specialist progress.')),error:true});
           }
         }
         if (kind === 'stage' && payload.status === 'completed' &&

@@ -2461,6 +2461,17 @@ async fn stop_automation_job(
     Ok(state.automation.stop_job(&id).await)
 }
 
+fn initial_task_tab_snapshot(origin: String) -> DomSnapshot {
+    // A new task WebView has not been observed yet. Never copy another tab's
+    // DOM labels, text, or node IDs into it.
+    DomSnapshot {
+        origin,
+        title: String::new(),
+        text_excerpt: String::new(),
+        interactive_nodes: Vec::new(),
+    }
+}
+
 #[tauri::command]
 async fn start_agent_run(
     app: tauri::AppHandle,
@@ -2510,7 +2521,10 @@ async fn start_agent_run(
                 text_excerpt: String::new(), interactive_nodes: Vec::new(),
             }
         } else {
-            snapshot
+            // This WebView was just created. The caller's DOM belongs to the
+            // original tab, not the dedicated task tab. Never let Lucia act on
+            // controls copied from a different page or potentially stale URL.
+            initial_task_tab_snapshot(start_url)
         }
     } else if on_start_page || child.is_none() {
         // Start with an empty document. The first real destination, including a
@@ -2731,7 +2745,16 @@ fn close_aware_agent_result(
 
 #[cfg(test)]
 mod tab_closed_tests {
-    use super::close_aware_agent_result;
+    use super::{close_aware_agent_result, initial_task_tab_snapshot};
+
+    #[test]
+    fn dedicated_task_tab_starts_without_foreground_dom_content() {
+        let state = initial_task_tab_snapshot("https://example.org/".to_owned());
+        assert_eq!(state.origin, "https://example.org/");
+        assert!(state.interactive_nodes.is_empty());
+        assert!(state.text_excerpt.is_empty());
+        assert!(state.title.is_empty());
+    }
 
     #[test]
     fn closing_a_task_tab_overrides_a_cancelled_or_failed_run() {
