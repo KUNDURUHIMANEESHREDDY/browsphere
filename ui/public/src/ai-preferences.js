@@ -25,10 +25,29 @@
   function btn(action, label) {
     return '<button class="mac-ai-btn" type="button" data-action="' + action + '">' + label + '</button>';
   }
+  // Keep Cloud Models presets in one registry shared with the settings event
+  // handler. Selecting a preset never contacts the provider or spends credits.
+  // 9Router serves an OpenAI-compatible API locally or from 9router.com.
+  window.browsphereCloudPresets = Object.freeze({
+    openai: ['https://api.openai.com/v1/chat/completions', 'gpt-4o-mini'],
+    groq: ['https://api.groq.com/openai/v1/chat/completions', 'llama-3.3-70b-versatile'],
+    openrouter: ['https://openrouter.ai/api/v1/chat/completions', 'openai/gpt-4o-mini'],
+    ninerouter_local: ['http://127.0.0.1:20128/v1/chat/completions', 'cc/claude-sonnet-4-6'],
+    ninerouter_cloud: ['https://9router.com/v1/chat/completions', 'cc/claude-sonnet-4-6']
+  });
   function providerOf(url) {
-    if (url.indexOf('api.openai.com') !== -1) return 'openai';
-    if (url.indexOf('api.groq.com') !== -1) return 'groq';
-    if (url.indexOf('openrouter.ai') !== -1) return 'openrouter';
+    try {
+      var parsed = new URL(url);
+      var host = parsed.hostname.toLowerCase();
+      if (host === 'api.openai.com') return 'openai';
+      if (host === 'api.groq.com') return 'groq';
+      if (host === 'openrouter.ai') return 'openrouter';
+      if (parsed.pathname === '/v1/chat/completions') {
+        if (host === '9router.com' && parsed.protocol === 'https:') return 'ninerouter_cloud';
+        if ((host === '127.0.0.1' || host === 'localhost') &&
+            parsed.protocol === 'http:' && parsed.port === '20128') return 'ninerouter_local';
+      }
+    } catch (_) {}
     return 'custom';
   }
   window.renderMacAiPreferences = function (state) {
@@ -44,7 +63,9 @@
     var provider = providerOf(cfg.litellm_url || '');
     var providers = [
       ['custom', 'Custom / LiteLLM'], ['openai', 'OpenAI'],
-      ['groq', 'Groq'], ['openrouter', 'OpenRouter']
+      ['groq', 'Groq'], ['openrouter', 'OpenRouter'],
+      ['ninerouter_local', '9Router (Local gateway)'],
+      ['ninerouter_cloud', '9Router (Cloud)']
     ];
     var providerControl = '<select class="mac-ai-select" id="cfgProviderPreset" aria-label="Cloud provider">' +
       providers.map(function (item) {
@@ -57,8 +78,9 @@
     var localModel = '<div style="width:100%;max-width:360px">' +
       input('cfgOllamaModel', cfg.ollama_model, 'Select or enter a model ID') +
       '<datalist id="cfgInstalledOllama">' + installedOptions + '</datalist></div>';
+    var is9Router = provider === 'ninerouter_local' || provider === 'ninerouter_cloud';
     var suggestions = cloudModels.length ? cloudModels :
-      ['gpt-4o-mini', 'gpt-4.1-mini', 'llama-3.3-70b-versatile', 'openai/gpt-4o-mini'];
+      (is9Router ? [] : ['gpt-4o-mini', 'gpt-4.1-mini', 'llama-3.3-70b-versatile', 'openai/gpt-4o-mini']);
     var cloudModel = '<div style="width:100%;max-width:360px">' +
       input('cfgLiteLlmModel', cfg.litellm_model, 'Choose a model ID') +
       '<datalist id="cfgCloudModels">' + suggestions.map(function (id) {
@@ -66,6 +88,7 @@
       }).join('') + '</datalist>' +
       '<div class="mac-ai-model-hint">' +
       (cloudModels.length ? cloudModels.length + ' models fetched for this provider' :
+        is9Router ? 'This is an example model ID. Start/configure 9Router, then Fetch Models and select one actually available to your account.' :
         'Enter a model ID or fetch the provider\'s available models below.') +
       '</div></div>';
     // Link custom model inputs to their suggestions without hiding user-entered IDs.
@@ -120,7 +143,7 @@
         cloudModels.length + ' saved for this endpoint</span>' : '') +
       '</div>';
     var cloud = section('Cloud Models', '',
-      row('API endpoint', 'HTTPS required for remote providers.', input('cfgLiteLlmUrl', cfg.litellm_url, 'https://api.example.com/v1/chat/completions', 'url')) +
+      row('API endpoint', '9Router local gateway: http://127.0.0.1:20128/v1/chat/completions. Hosted 9Router: https://9router.com/v1/chat/completions. Other remote providers require HTTPS.', input('cfgLiteLlmUrl', cfg.litellm_url, 'https://api.example.com/v1/chat/completions', 'url')) +
       row('API key', 'Credentials are kept in Windows Credential Manager, not the settings database.', keyControl) +
       row('Fetch models', 'Retrieve model IDs from this provider using the endpoint and saved key.',
         '<div class="mac-ai-fetch-controls">' +

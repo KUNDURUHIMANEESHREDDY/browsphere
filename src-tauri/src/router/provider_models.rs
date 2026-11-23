@@ -127,6 +127,8 @@ mod tests {
             ("https://openrouter.ai/api/v1/chat/completions", "https://openrouter.ai/api/v1/models"),
             ("https://proxy.test/v1", "https://proxy.test/v1/models"),
             ("http://127.0.0.1:4000/v1/chat/completions", "http://127.0.0.1:4000/v1/models"),
+            ("http://127.0.0.1:20128/v1/chat/completions", "http://127.0.0.1:20128/v1/models"),
+            ("https://9router.com/v1/chat/completions", "https://9router.com/v1/models"),
             ("https://proxy.test/v1/models", "https://proxy.test/v1/models"),
         ];
         for (input, expected) in cases {

@@ -581,12 +581,7 @@
             }
           }
           if (event.target && event.target.id === 'cfgProviderPreset') {
-            var presets = {
-              openai: ['https://api.openai.com/v1/chat/completions', 'gpt-4o-mini'],
-              groq: ['https://api.groq.com/openai/v1/chat/completions', 'llama-3.3-70b-versatile'],
-              openrouter: ['https://openrouter.ai/api/v1/chat/completions', 'openai/gpt-4o-mini']
-            };
-            var preset = presets[event.target.value];
+            var preset = (window.browsphereCloudPresets || {})[event.target.value];
             if (preset) {
               document.getElementById('cfgLiteLlmUrl').value = preset[0];
               document.getElementById('cfgLiteLlmModel').value = preset[1];
