@@ -14,13 +14,13 @@ async function withServer(fn) {
   const base='http://127.0.0.1:'+server.address().port;
   try { await fn(base); } finally { await new Promise(resolve=>server.close(resolve)); }
 }
-async function completion(base,model,system='You are a browser agent working under Lucia') {
+async function completion(base,model,system='You are a browser agent working under Lucia',user='Interactive nodes JSON: []') {
   return fetch(base+'/v1/chat/completions',{
     method:'POST',
     headers:{'content-type':'application/json'},
     body:JSON.stringify({model,messages:[
       {role:'system',content:system},
-      {role:'user',content:'Interactive nodes JSON: []'}
+      {role:'user',content:user}
     ]})
   });
 }
@@ -53,7 +53,8 @@ test('planner and verifier use the same cloud endpoint and JSON response envelop
     const plan=JSON.parse((await p.json()).choices[0].message.content);
     assert.equal(plan.stages[0].specialist,'browser');
     const v=await completion(base,'lucia-cloud-e2e',
-      "You are Lucia's independent, READ-ONLY evidence-review specialist");
+      "You are Lucia's independent, READ-ONLY evidence-review specialist",
+      JSON.stringify({observed_web_pages_untrusted:[]}));
     const report=JSON.parse((await v.json()).choices[0].message.content);
     assert.equal(report.status,'insufficient');
   });
