@@ -91,14 +91,20 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     if (labelledBy) {{
       const txt = labelledBy
         .split(/\s+/)
-        .map((id) => document.getElementById(id)?.innerText || "")
+        .map((id) => {{
+          const root = el.getRootNode();
+          const target = root?.getElementById?.(id) || document.getElementById(id);
+          return target?.innerText || target?.textContent || "";
+        }})
         .join(" ")
         .trim();
       if (txt) return txt.slice(0, 120);
     }}
 
     if (el.id) {{
-      const lbl = document.querySelector(`label[for="${{CSS.escape(el.id)}}"]`);
+      const root = el.getRootNode();
+      const selector = `label[for="${{CSS.escape(el.id)}}"]`;
+      const lbl = root?.querySelector?.(selector) || document.querySelector(selector);
       if (lbl && lbl.innerText.trim()) return lbl.innerText.trim().slice(0, 120);
     }}
 
@@ -108,7 +114,12 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     const title = el.getAttribute("title");
     if (title && title.trim()) return title.trim().slice(0, 120);
 
-    const text = (el.innerText || el.value || "").replace(/\s+/g, " ").trim();
+    // Image-only result cards and controls in Shadow DOM still need meaningful
+    // accessible names; unlabelled clickable cards were otherwise skipped.
+    const ancestorLabel = el.closest("label");
+    const imageAlt = el.querySelector("img[alt]")?.getAttribute("alt") || "";
+    const text = (el.innerText || el.value || ancestorLabel?.innerText ||
+      imageAlt || el.getAttribute("alt") || "").replace(/\s+/g, " ").trim();
     return text.slice(0, 120);
   }}
 
@@ -129,6 +140,10 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   // receive a unique ID; restarting an n_1 counter could silently target a
   // different, older control with the same data-aether-id.
   const observedIds = new Set();
+  // The same control may appear in both the high-priority main/search subtree
+  // and a later document-wide scan. Count each element only once while still
+  // assigning a new ID to *different* elements with duplicate attributes.
+  const visitedElements = new WeakSet();
   let counter = 0;
   function freshNodeId() {{
     let id;
@@ -148,7 +163,8 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     let current = walker.nextNode();
     while (current && nodes.length < MAX_NODES) {{
       if (isVisible(current) && isInteractive(current) &&
-          !observedIds.has(current.getAttribute("data-aether-id"))) {{
+          !visitedElements.has(current)) {{
+        visitedElements.add(current);
         let nodeId = current.getAttribute("data-aether-id");
         if (!nodeId || observedIds.has(nodeId)) {{
           nodeId = freshNodeId();
@@ -227,14 +243,17 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     }}
   }}
 
-  // On YouTube search results, inspect result cards before the numerous
-  // navigation/toolbar controls exhaust the bounded interactive node budget.
-  // This is still a fresh DOM observation, never a guessed result URL.
-  if (/^([^.]+\.)?youtube\.com$/i.test(location.hostname) &&
-      location.pathname === "/results") {{
-    const resultsRoot = document.querySelector(
-      'ytd-two-column-search-results-renderer #contents');
-    if (resultsRoot) walk(resultsRoot);
+  // Prioritize *general page semantics*, not site-specific selectors. Many
+  // websites place hundreds of links in their header/sidebar before the
+  // relevant article, results, search form, or dialog. Scan those regions
+  // first within the bounded observation budget, then the rest of the page.
+  for (const selector of [
+    '[role="dialog"][aria-modal="true"]', '[role="search"]', 'form[role="search"]',
+    'main', '[role="main"]', '#main', '#content', '.search-results',
+    '[role="dialog"]'
+  ]) {{
+    const region = document.querySelector(selector);
+    if (region && isVisible(region)) walk(region);
   }}
   walk(document.body || document.documentElement);
 
