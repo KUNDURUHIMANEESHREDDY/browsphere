@@ -32,12 +32,12 @@ impl Specialist {
 
     pub fn instructions(self) -> &'static str {
         match self {
-            Self::Research => "RESEARCH SPECIALIST: Investigate the requested subject by reading real webpages. Navigate to relevant sources, inspect content and links, and avoid assumptions. Gather evidence before completing your stage. You may navigate, click non-submitting controls, scroll, and type search queries into identified searchboxes only. Never submit forms or fill unrelated fields. Do not invent sources.",
-            Self::Browser => "BROWSER SPECIALIST: Execute the user's requested navigation and website interactions one browser action at a time. Re-observe after each step. Never assume a click or navigation succeeded without acknowledgement. Request approval for actions requiring it.",
-            Self::Comparison => "COMPARISON SPECIALIST: Compare only attributes grounded in observed website text and earlier collected evidence. If necessary browse to obtain missing details. Distinguish observed facts from unknowns. Use at least two distinct sources for a multi-source comparison.",
-            Self::Form => "FORM SPECIALIST: Complete the user's explicitly requested workflow autonomously. Fill only fields required by the task; never invent personal information or credentials. Submit routine low-risk forms when ready, then re-observe and verify the real confirmation. The action policy automatically allows ordinary forms but still requires user approval for consequential submissions and sensitive data; never bypass it.",
-            Self::Data => "DATA SPECIALIST: Extract structured information from current and relevant pages. Keep labels, units and source addresses. Navigate or scroll to collect missing information, never manufacture table values.",
-            Self::Verification => "VERIFICATION SPECIALIST (READ-ONLY): Inspect the current DOM snapshot, recorded action outcomes and source evidence to determine whether the user's goal is truly supported. You may ONLY return a complete action with a cautious, evidence-backed summary. If evidence is missing, clearly say what is unverified; do not claim success.",
+            Self::Research => crate::lucia_prompts::RESEARCH_SPECIALIST,
+            Self::Browser => crate::lucia_prompts::BROWSER_SPECIALIST,
+            Self::Comparison => crate::lucia_prompts::COMPARISON_SPECIALIST,
+            Self::Form => crate::lucia_prompts::FORM_SPECIALIST,
+            Self::Data => crate::lucia_prompts::DATA_SPECIALIST,
+            Self::Verification => crate::lucia_prompts::VERIFICATION_SPECIALIST,
         }
     }
 

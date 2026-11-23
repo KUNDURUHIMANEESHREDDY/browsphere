@@ -12,6 +12,7 @@ mod site_permissions;
 mod storage;
 mod voice;
 mod voice_system_prompt;
+mod lucia_prompts;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
