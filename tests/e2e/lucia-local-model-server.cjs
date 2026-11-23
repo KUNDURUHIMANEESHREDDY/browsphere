@@ -10,6 +10,18 @@ const fixturePort = Number(process.env.LUCIA_FIXTURE_PORT || 18764);
 const modelPort = Number(process.env.LUCIA_MODEL_PORT || 18766);
 const fixtureRoot = path.join(__dirname, 'fixture');
 const MAX_BODY = 120000;
+// Count request categories only. Never retain prompts, page text, model
+// responses, authorization headers, or other credentials in diagnostics.
+const providerStats = {planner:0,actions:0,verifier:0,other:0,ollama:0};
+
+function cloudPhase(messages) {
+  const system = String((messages || []).find(m=>m.role==='system')?.content || '').toLowerCase();
+  if (system.includes('autonomous browser task planner')) return 'planner';
+  if (system.includes('independent, read-only evidence-review specialist')) return 'verifier';
+  if (system.includes('browser agent working under lucia')) return 'actions';
+  return 'other';
+}
+
 
 function send(res, status, value, contentType = 'application/json; charset=utf-8') {
   const payload = typeof value === 'string' ? value : JSON.stringify(value);
@@ -233,7 +245,14 @@ function chat(body) {
 }
 
 function runLocalModel(req, res) {
-  if (req.url === '/health') return send(res, 200, {ok:true,kind:'mock-ollama'});
+  if (req.method === 'GET' && req.url === '/health')
+    return send(res, 200, {ok:true,kind:'mock-provider'});
+  if (req.method === 'GET' && req.url === '/stats')
+    return send(res, 200, { ...providerStats });
+  if (req.method === 'GET' && req.url === '/v1/models')
+    return send(res, 200, {object:'list',data:[
+      {id:'lucia-cloud-e2e',object:'model'}
+    ]});
   if (req.method === 'GET' && req.url === '/api/tags') {
     return send(res, 200, {models:[{name:'lucia-local-e2e',model:'lucia-local-e2e'}]});
   }
@@ -243,17 +262,37 @@ function runLocalModel(req, res) {
   }
   boundedBody(req).then(body => {
     if (req.url === '/v1/chat/completions') {
+      const model = String(body.model || '');
+      const failures = {
+        'lucia-cloud-reject-401': [401,'invalid_api_key'],
+        'lucia-cloud-limit-429': [429,'rate_limit_exceeded'],
+        'lucia-cloud-unavailable-503': [503,'provider_unavailable']
+      };
+      if (Object.prototype.hasOwnProperty.call(failures, model)) {
+        const [status, code] = failures[model];
+        return send(res, status, {error:{type:code,code,message:'Simulated provider failure'}});
+      }
+      if (model === 'lucia-cloud-invalid-json') {
+        return send(res,200,{id:'chatcmpl-invalid',choices:[
+          {index:0,message:{role:'assistant',content:'not a browser action'},finish_reason:'stop'}
+        ]});
+      }
+      if (model !== 'lucia-cloud-e2e') {
+        return send(res, 404, {error:{code:'model_not_found'}});
+      }
       const messages = Array.isArray(body.messages) ? body.messages : [];
-      const system = String(messages.find(m => m.role === 'system')?.content || '');
+      const phase = cloudPhase(messages);
+      providerStats[phase]++;
       const user = String(messages.find(m => m.role === 'user')?.content || '');
-      const answer = system.includes('browser agent working under Lucia')
+      const answer = phase === 'actions'
         ? JSON.stringify(decideAction(user))
         : chat(body).message.content;
       return send(res, 200, {
-        id:'chatcmpl-lucia-fixture',model:'lucia-cloud-e2e',
+        id:'chatcmpl-lucia-fixture',model,
         choices:[{index:0,message:{role:'assistant',content:answer},finish_reason:'stop'}]
       });
     }
+    providerStats.ollama++;
     if (req.url === '/api/chat') return send(res, 200, chat(body));
     const output = decideAction(String(body.prompt || ''));
     return send(res, 200, {model:'lucia-local-e2e',response:JSON.stringify(output),done:true});
@@ -291,4 +330,4 @@ if (require.main === module) {
   process.on('SIGTERM', () => { models.close(); fixtures.close(); });
 }
 
-module.exports = {observedNodes,decideAction,currentPageText,verifyEvidence,chat};
+module.exports = {observedNodes,decideAction,currentPageText,verifyEvidence,chat,cloudPhase,runLocalModel,providerStats};
