@@ -174,7 +174,9 @@ function runFixture(req, res) {
   const exact = {
     '/multistep.html':'multistep.html',
     '/generic-search.html':'generic-search.html',
-    '/recovery.html':'recovery.html'
+    '/recovery.html':'recovery.html',
+    '/generic-controls.html':'generic-controls.html',
+    '/generic-document.html':'generic-document.html'
   }[new URL(req.url || '/', 'http://127.0.0.1').pathname];
   if (!exact || req.method !== 'GET') return send(res, 404, 'Not found', 'text/plain');
   try {

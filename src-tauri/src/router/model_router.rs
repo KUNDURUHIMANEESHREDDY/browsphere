@@ -300,8 +300,11 @@ User text: <text>{}</text>"#,
         user_text: &str,
         creds: &CredentialStore,
     ) -> anyhow::Result<String> {
+        // CPU-only local models can take longer to read structured evidence.
+        // Keep cloud requests bounded separately from on-device inference.
+        let timeout_secs = if self.config.prefer_local_for_simple { 120 } else { 60 };
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(timeout_secs))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let messages = json!([
@@ -316,7 +319,7 @@ User text: <text>{}</text>"#,
                 "stream": false,
                 "think": false,
                 "format": "json",
-                "options": {"temperature": 0, "num_predict": 1000}
+                "options": {"temperature": 0, "num_predict": 448, "num_ctx": 4096}
             })).send().await?.error_for_status()?;
             let body: serde_json::Value = response.json().await?;
             Ok(body.pointer("/message/content").and_then(|v| v.as_str())
@@ -538,7 +541,9 @@ Rules: quote a real sentence fragment from one of the provided observed_web_page
                 "prompt": prompt_payload,
                 "stream": false,
                 "format": "json",
-                "options": {"temperature": 0.1, "num_predict": 640}
+                // Browser actions need compact JSON, not long free-form prose.
+                // Lower output caps reduce CPU-only model latency and runaway generations.
+                "options": {"temperature": 0, "num_predict": 256, "num_ctx": 4096}
             });
 
             let resp = self.client.post(&url).json(&body).send().await
