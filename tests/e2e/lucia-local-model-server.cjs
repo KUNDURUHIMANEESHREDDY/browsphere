@@ -47,7 +47,18 @@ function observedNodes(prompt) {
   }
 }
 
+function currentPageText(prompt) {
+  const marker = '<untrusted_page_data origin="';
+  const index = prompt.lastIndexOf(marker);
+  if (index < 0) return prompt;
+  const start = prompt.indexOf('>\n', index);
+  if (start < 0) return prompt;
+  const end = prompt.indexOf('\n</untrusted_page_data>', start + 2);
+  return end < 0 ? prompt : prompt.slice(start + 2, end);
+}
+
 function decideAction(prompt) {
+  const page = currentPageText(prompt);
   const nodes = observedNodes(prompt);
   const has = label => nodes.find(n => n.label === label);
   const reply = action => ({
@@ -55,53 +66,54 @@ function decideAction(prompt) {
     action
   });
   if (prompt.includes('Original user goal: Open keyboard dialog')) {
-    if (prompt.includes('KEYBOARD_DIALOG_CLOSED'))
+    if (page.includes('KEYBOARD_DIALOG_CLOSED'))
       return reply({type:'complete',summary:'Observed dialog closed after Escape'});
-    if (prompt.includes('Keyboard dialog is open') && has('Keyboard dialog'))
+    if (page.includes('Keyboard dialog is open') && has('Keyboard dialog'))
       return reply({type:'press_key',node_id:has('Keyboard dialog').node_id,key:'Escape'});
-    if (has('Open keyboard dialog'))
+    if (page.includes('Keyboard dialog not opened') && has('Open keyboard dialog'))
       return reply({type:'click',node_id:has('Open keyboard dialog').node_id,
         element_label:'Open keyboard dialog',is_submit:false});
+    return reply({type:'scroll',delta_y:0});
   }
-  if (prompt.includes('CONTROLS_FLOW_CONFIRMED')) {
+  if (page.includes('CONTROLS_FLOW_CONFIRMED')) {
     return reply({type:'complete',summary:'Observed full browser controls confirmation'});
   }
-  if (prompt.includes('Dialog is open') && has('Close details')) {
+  if (page.includes('Dialog is open') && has('Close details')) {
     return reply({type:'click',node_id:has('Close details').node_id,
       element_label:'Close details',is_submit:false});
   }
-  if (prompt.includes('Advanced is enabled') &&
-      prompt.includes('Dialog not opened') && has('Open details')) {
+  if (page.includes('Advanced is enabled') &&
+      page.includes('Dialog not opened') && has('Open details')) {
     return reply({type:'click',node_id:has('Open details').node_id,
       element_label:'Open details',is_submit:false});
   }
-  if (has('Category') && !prompt.includes('Selected category: Engineering')) {
+  if (has('Category') && !page.includes('Selected category: Engineering')) {
     return reply({type:'select_option',node_id:has('Category').node_id,option_label:'Engineering'});
   }
-  if (has('Include examples') && !prompt.includes('Examples enabled')) {
+  if (has('Include examples') && !page.includes('Examples enabled')) {
     return reply({type:'set_checked',node_id:has('Include examples').node_id,
       element_label:'Include examples',checked:true});
   }
-  if (has('Intermediate') && !prompt.includes('Mode: Intermediate')) {
+  if (has('Intermediate') && !page.includes('Mode: Intermediate')) {
     return reply({type:'set_checked',node_id:has('Intermediate').node_id,
       element_label:'Intermediate',checked:true});
   }
-  if (has('Draft note') && !prompt.includes('Note drafted')) {
+  if (has('Draft note') && !page.includes('Note drafted')) {
     return reply({type:'type_text',node_id:has('Draft note').node_id,
       text:'Automated note',is_sensitive:false});
   }
-  if (has('Show advanced') && !prompt.includes('Advanced is enabled')) {
+  if (has('Show advanced') && !page.includes('Advanced is enabled')) {
     return reply({type:'set_checked',node_id:has('Show advanced').node_id,
       element_label:'Show advanced',checked:true});
   }
-  if (prompt.includes('GENERIC_DOCS_CONFIRMED')) {
+  if (page.includes('GENERIC_DOCS_CONFIRMED')) {
     return reply({type:'complete',summary:'Observed documentation reference confirmation'});
   }
   if (has('Open API reference')) {
     return reply({type:'click', node_id:has('Open API reference').node_id,
       element_label:'Open API reference',is_submit:false});
   }
-  if (prompt.includes('Typed query: systems')) {
+  if (page.includes('Typed query: systems')) {
     const input = has('Search documentation');
     if (input) return reply({type:'press_key',node_id:input.node_id,key:'Enter'});
   }
@@ -109,7 +121,7 @@ function decideAction(prompt) {
     return reply({type:'type_text',node_id:has('Search documentation').node_id,
       text:'systems',is_sensitive:false});
   }
-  if (prompt.includes('Recovery complete: fallback button succeeded')) {
+  if (page.includes('Recovery complete: fallback button succeeded')) {
     return reply({type:'complete', summary:'Observed local fallback confirmation'});
   }
   if (has('Use recovery fallback')) {
@@ -120,14 +132,14 @@ function decideAction(prompt) {
     return reply({type:'click', node_id:has('Start recovery test').node_id,
       element_label:'Start recovery test', is_submit:false});
   }
-  if (prompt.includes('VIDEO_PAGE_CONFIRMED')) {
+  if (page.includes('VIDEO_PAGE_CONFIRMED')) {
     return reply({type:'complete', summary:'Observed robotics video success confirmation'});
   }
   if (has('Open robotics video')) {
     return reply({type:'click',node_id:has('Open robotics video').node_id,
       element_label:'Open robotics video',is_submit:false});
   }
-  if (prompt.includes('Query: robotics video')) {
+  if (page.includes('Query: robotics video')) {
     // Deliberately emit an obsolete node ID to test exact-label DOM rebinding.
     return reply({type:'click',node_id:'invalid-search-button-id',
       element_label:'Search',is_submit:false});
@@ -262,4 +274,4 @@ if (require.main === module) {
   process.on('SIGTERM', () => { models.close(); fixtures.close(); });
 }
 
-module.exports = {observedNodes,decideAction,verifyEvidence,chat};
+module.exports = {observedNodes,decideAction,currentPageText,verifyEvidence,chat};

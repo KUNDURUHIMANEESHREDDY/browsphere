@@ -469,7 +469,16 @@ pub async fn execute_browser_action(
         BrowserAction::PressKey { node_id, key } => {
             let req_id = Uuid::new_v4();
             let script = build_key_script(node_id, key);
-            eval_in_active_tab(app, webview_label, pending_results, script, req_id, 2200).await
+            let result = eval_in_active_tab(
+                app, webview_label, pending_results, script, req_id, 2200
+            ).await;
+            if result.success && key == "Escape" {
+                // Native HTMLDialogElement.close() updates its open flag
+                // immediately, but close event handlers run in a later task.
+                // Allow page handlers to settle before the next observation.
+                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+            }
+            result
         }
         BrowserAction::Scroll { delta_y } => {
             let req_id = Uuid::new_v4();
