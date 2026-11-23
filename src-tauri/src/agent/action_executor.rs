@@ -168,6 +168,81 @@ fn build_type_script(request_id: Uuid, node_id: &str, text: &str) -> String {
     )
 }
 
+fn build_key_script(node_id: &str, key: &str) -> String {
+    let id_json = serde_json::to_string(node_id).unwrap_or_else(|_| "\"\"".into());
+    let key_json = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".into());
+    format!(r#"(function() {{
+      const target = {id_json};
+      const key = {key_json};
+      function find(root) {{
+        if (!root) return null;
+        const here = root.querySelector('[data-aether-id="' + CSS.escape(target) + '"]');
+        if (here) return here;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+        let el;
+        while ((el = walker.nextNode())) {{
+          if (el.shadowRoot) {{
+            const result = find(el.shadowRoot);
+            if (result) return result;
+          }}
+        }}
+        return null;
+      }}
+      const fail = detail => ({{ success: false, detail }});
+      try {{
+        if (key !== "Enter" && key !== "Escape") return fail("Unsupported key");
+        const el = find(document);
+        if (!el || !el.isConnected || el.matches(":disabled") ||
+            el.getAttribute("aria-disabled") === "true") return fail("Key target unavailable");
+        const box = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        if (box.width < 2 || box.height < 2 || style.display === "none" ||
+            style.visibility === "hidden") return fail("Key target is hidden");
+        if (key === "Enter") {{
+          const tag = el.tagName.toLowerCase();
+          const role = (el.getAttribute("role") || "").toLowerCase();
+          const hint = [el.getAttribute("aria-label"), el.getAttribute("placeholder"),
+            el.getAttribute("name")].join(" ").toLowerCase();
+          const kind = (el.getAttribute("type") || "").toLowerCase();
+          if (tag !== "input" && tag !== "textarea" && !el.isContentEditable)
+            return fail("Enter requires a text input");
+          if (kind === "password" || kind === "hidden" || el.readOnly)
+            return fail("Restricted input");
+          if (role !== "searchbox" && role !== "combobox" && kind !== "search" &&
+              !hint.includes("search")) return fail("Not a search field");
+          const form = el.closest("form");
+          if (form) {{
+            if (form.querySelector('input[type="password"],input[autocomplete^="cc-"],input[name*="secret"]'))
+              return fail("Sensitive search form");
+            const otherInputs = Array.from(form.querySelectorAll("input, textarea, select"))
+              .filter(field => field !== el && field.type !== "hidden" && field.type !== "submit");
+            if (otherInputs.length) return fail("Search form has additional fields");
+            const action = new URL(form.getAttribute("action") || location.href, location.href);
+            if (action.origin !== location.origin) return fail("Cross-origin search form blocked");
+            if (/\b(payment|checkout|purchase|delete account|transfer|contract)\b/i.test(form.innerText || ""))
+              return fail("Consequential search form blocked");
+          }}
+          el.focus();
+          const proceed = el.dispatchEvent(new KeyboardEvent("keydown",
+            {{ key: "Enter", code: "Enter", bubbles: true, cancelable: true }}));
+          el.dispatchEvent(new KeyboardEvent("keyup",
+            {{ key: "Enter", code: "Enter", bubbles: true }}));
+          if (proceed && form && typeof form.requestSubmit === "function")
+            form.requestSubmit();
+          return {{ success: true, detail: "Enter dispatched to observed search control" }};
+        }}
+        el.focus();
+        el.dispatchEvent(new KeyboardEvent("keydown",
+          {{ key: "Escape", code: "Escape", bubbles: true, cancelable: true }}));
+        el.dispatchEvent(new KeyboardEvent("keyup",
+          {{ key: "Escape", code: "Escape", bubbles: true }}));
+        return {{ success: true, detail: "Escape dispatched to observed control" }};
+      }} catch (error) {{
+        return fail("Key action failed: " + String(error).slice(0, 120));
+      }}
+    }})();"#, id_json=id_json, key_json=key_json)
+}
+
 fn build_scroll_script(request_id: Uuid, delta_y: i32) -> String {
     format!(
         r#"(function() {{
@@ -275,6 +350,11 @@ pub async fn execute_browser_action(
             let req_id = Uuid::new_v4();
             let script = build_type_script(req_id, node_id, text);
             eval_in_active_tab(app, webview_label, pending_results, script, req_id, 1800).await
+        }
+        BrowserAction::PressKey { node_id, key } => {
+            let req_id = Uuid::new_v4();
+            let script = build_key_script(node_id, key);
+            eval_in_active_tab(app, webview_label, pending_results, script, req_id, 2200).await
         }
         BrowserAction::Scroll { delta_y } => {
             let req_id = Uuid::new_v4();

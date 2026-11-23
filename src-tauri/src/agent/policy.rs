@@ -17,6 +17,7 @@ pub enum BrowserAction {
     Navigate { url: String },
     Click { node_id: String, element_label: String, is_submit: bool },
     TypeText { node_id: String, text: String, is_sensitive: bool },
+    PressKey { node_id: String, key: String },
     Scroll { delta_y: i32 },
     Download { url: String, suggested_filename: Option<String> },
     Complete { summary: String },
@@ -221,6 +222,13 @@ pub fn evaluate_policy(
     allowed_domains: &[String],
 ) -> (RiskLevel, PolicyDecision) {
     match action {
+        BrowserAction::PressKey { node_id, key } => match key.as_str() {
+            "Enter" => (RiskLevel::Medium, PolicyDecision::Allow),
+            "Escape" => (RiskLevel::Low, PolicyDecision::Allow),
+            _ => (RiskLevel::High, PolicyDecision::Deny {
+                reason: format!("Unsupported keyboard action on {node_id}"),
+            }),
+        },
         BrowserAction::Scroll { .. } | BrowserAction::Complete { .. } => {
             (RiskLevel::Low, PolicyDecision::Allow)
         }
@@ -369,6 +377,17 @@ pub fn evaluate_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bounded_keyboard_policy() {
+        for key in ["Enter", "Escape"] {
+            let action = BrowserAction::PressKey { node_id: "search".into(), key: key.into() };
+            assert!(matches!(evaluate_policy("https://example.com", &action, &[]).1, PolicyDecision::Allow));
+        }
+        let blocked = BrowserAction::PressKey { node_id: "search".into(), key: "Control+L".into() };
+        assert!(matches!(evaluate_policy("https://example.com", &blocked, &[]).1,
+            PolicyDecision::Deny { .. }));
+    }
+
 
     #[test]
     fn trace_outcome_reads_execution_status_not_untrusted_summary_words() {

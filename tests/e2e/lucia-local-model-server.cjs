@@ -54,6 +54,21 @@ function decideAction(prompt) {
     thought: 'Select the next action from the freshly observed local test page.',
     action
   });
+  if (prompt.includes('GENERIC_DOCS_CONFIRMED')) {
+    return reply({type:'complete',summary:'Observed documentation reference confirmation'});
+  }
+  if (has('Open API reference')) {
+    return reply({type:'click', node_id:has('Open API reference').node_id,
+      element_label:'Open API reference',is_submit:false});
+  }
+  if (prompt.includes('Typed query: systems')) {
+    const input = has('Search documentation');
+    if (input) return reply({type:'press_key',node_id:input.node_id,key:'Enter'});
+  }
+  if (has('Search documentation')) {
+    return reply({type:'type_text',node_id:has('Search documentation').node_id,
+      text:'systems',is_sensitive:false});
+  }
   if (prompt.includes('Recovery complete: fallback button succeeded')) {
     return reply({type:'complete', summary:'Observed local fallback confirmation'});
   }
@@ -91,6 +106,11 @@ function verifyEvidence(payload) {
   const sources = Array.isArray(data.observed_web_pages_untrusted)
     ? data.observed_web_pages_untrusted : [];
   const accepted = [
+    {
+      token:'GENERIC_DOCS_CONFIRMED',
+      quote:'GENERIC_DOCS_CONFIRMED. API reference opened successfully after an Enter-key search.',
+      claim:'API reference opened after autonomous documentation search'
+    },
     {
       token:'VIDEO_PAGE_CONFIRMED',
       quote:'VIDEO_PAGE_CONFIRMED. Robotics video opened successfully after searching and selecting the first result.',
@@ -153,6 +173,7 @@ function runFixture(req, res) {
   if (req.url === '/health') return send(res, 200, {ok:true,kind:'fixture'});
   const exact = {
     '/multistep.html':'multistep.html',
+    '/generic-search.html':'generic-search.html',
     '/recovery.html':'recovery.html'
   }[new URL(req.url || '/', 'http://127.0.0.1').pathname];
   if (!exact || req.method !== 'GET') return send(res, 404, 'Not found', 'text/plain');

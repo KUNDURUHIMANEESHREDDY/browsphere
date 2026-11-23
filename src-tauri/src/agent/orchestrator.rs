@@ -46,6 +46,7 @@ impl Specialist {
             Self::Verification => matches!(action, BrowserAction::Complete { .. }),
             Self::Research | Self::Comparison | Self::Data => match action {
                 BrowserAction::TypeText { is_sensitive, .. } => !is_sensitive,
+                BrowserAction::PressKey { key, .. } => matches!(key.as_str(), "Enter" | "Escape"),
                 BrowserAction::Download { .. } => false,
                 BrowserAction::Click { is_submit, .. } => !is_submit,
                 _ => true,
@@ -58,6 +59,14 @@ impl Specialist {
     pub fn allows_on_page(self, action: &BrowserAction, page: &DomSnapshot) -> bool {
         if !self.allows(action) { return false; }
         if matches!(self, Self::Research | Self::Comparison | Self::Data) {
+            if let BrowserAction::PressKey { node_id, key } = action {
+                if key == "Enter" {
+                    return page.interactive_nodes.iter().any(|node|
+                        &node.node_id == node_id && !node.is_sensitive &&
+                        (node.role.eq_ignore_ascii_case("searchbox") ||
+                            node.label.to_lowercase().contains("search")));
+                }
+            }
             if let BrowserAction::TypeText { node_id, .. } = action {
                 return page.interactive_nodes.iter().any(|node|
                     &node.node_id == node_id &&

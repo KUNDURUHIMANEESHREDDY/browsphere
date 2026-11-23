@@ -108,7 +108,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     const title = el.getAttribute("title");
     if (title && title.trim()) return title.trim().slice(0, 120);
 
-    const text = (el.innerText || el.value || "").replace(/\s+/g, " ").trim();
+    const text = (el.innerText || "").replace(/\s+/g, " ").trim();
     return text.slice(0, 120);
   }}
 
@@ -236,9 +236,13 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
       'ytd-two-column-search-results-renderer #contents');
     if (resultsRoot) walk(resultsRoot);
   }}
+  // Generic main-content-first prioritization on long navigation-heavy sites.
+  const primary = document.querySelector('main, [role="main"], article, #main-content');
+  if (primary) walk(primary);
   walk(document.body || document.documentElement);
 
-  const visibleText = (document.body?.innerText || "")
+  const mainText = (primary?.innerText || "").trim();
+  const visibleText = ((mainText.length >= 16 ? mainText : document.body?.innerText) || "")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, MAX_TEXT);

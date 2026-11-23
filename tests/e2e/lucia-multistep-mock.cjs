@@ -146,7 +146,27 @@ async function main() {
     assert.ok(synced,'Visible browser URL was not synchronized with SPA navigation');
     console.log('PASS native multi-step typing, search, result click, SPA URL sync and evidence review');
 
-    // 2. Genuine failed primary click -> model recovers with fallback -> verified.
+    // 2. Generic website: heavy navigation chrome hides real controls unless
+    // the DOM reader prioritizes main content; search works only on Enter.
+    const docsInitial = await openLocal('/generic-search.html');
+    const docs = await run(
+      'Search this documentation website for systems, press Enter, and open the API reference.',
+      docsInitial
+    );
+    assert.ok(docs.actions.some(a=>a.type==='type_text' &&
+      ['ok','confirmed'].includes(a.outcome)),'Generic docs query not typed');
+    assert.ok(docs.actions.some(a=>a.type==='press_key' &&
+      ['ok','confirmed'].includes(a.outcome)),'Generic docs Enter action not executed');
+    assert.ok(docs.actions.some(a=>a.type==='click' &&
+      ['ok','confirmed'].includes(a.outcome)),'Generic docs result link not clicked');
+    const docsAfter = await evaluate(snapshotExpression);
+    assert.ok(docsAfter?.origin?.includes('/generic-search.html?doc=api'),
+      'Generic docs result URL not observed');
+    assert.ok(docsAfter?.text_excerpt?.includes('GENERIC_DOCS_CONFIRMED'),
+      'Generic docs confirmation not observed');
+    console.log('PASS native generic website with 180 navigation controls and Enter-only search');
+
+    // 3. Genuine failed primary click -> model recovers with fallback -> verified.
     const recoveryInitial=await openLocal('/recovery.html');
     const recovery=await run(
       'On the local recovery test page, click Start recovery test. After it fails, use the recovery fallback.',

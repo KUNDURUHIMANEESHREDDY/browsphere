@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Documentation Catalog</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; margin: 0; }
+    nav { padding: 12px; height: 30px; overflow: hidden; background: #eee; }
+    nav button { margin: 2px; }
+    main { margin: 25px auto; max-width: 700px; padding: 20px; }
+    input { font: inherit; padding: 12px; width: 330px; }
+    a { display: block; margin-top: 22px; }
+  </style>
+</head>
+<body>
+<nav id="busy-toolbar" aria-label="Navigation"></nav>
+<main>
+  <h1>Documentation Catalog</h1>
+  <p>Search the documentation and open the API reference.</p>
+  <input id="docs-query" type="search" role="searchbox"
+    aria-label="Search documentation" placeholder="Search documentation"/>
+  <p id="status">Use the search field to find topics.</p>
+  <section id="results" aria-label="Documentation results"></section>
+</main>
+<script>
+  const nav = document.getElementById('busy-toolbar');
+  for (let i = 0; i < 180; i++) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Navigation item ' + (i + 1);
+    nav.appendChild(button);
+  }
+  const input = document.getElementById('docs-query');
+  const status = document.getElementById('status');
+  const results = document.getElementById('results');
+  input.addEventListener('input', () => {
+    status.textContent = 'Typed query: ' + input.value;
+  });
+  input.addEventListener('keydown', event => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    status.textContent = 'Search results for: ' + input.value;
+    results.replaceChildren();
+    const link = document.createElement('a');
+    link.href = '/generic-search.html?doc=api';
+    link.textContent = 'Open API reference';
+    link.addEventListener('click', click => {
+      click.preventDefault();
+      history.pushState({}, '', '/generic-search.html?doc=api');
+      status.textContent =
+        'GENERIC_DOCS_CONFIRMED. API reference opened successfully after an Enter-key search.';
+      results.replaceChildren();
+    });
+    results.appendChild(link);
+  });
+</script>
+</body>
+</html>
