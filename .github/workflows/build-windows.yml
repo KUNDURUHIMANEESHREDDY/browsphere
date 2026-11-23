@@ -43,6 +43,9 @@ jobs:
           node --check ui/public/src/tauri-bridge.js
           node --check ui/public/src/voice-agent.js
           node --check ui/public/src/browser-state.js
+          node --check tests/e2e/lucia-youtube-search.cjs
+          node --check tests/e2e/lucia-failure-recovery.cjs
+          node --check tests/e2e/lucia-start-page-navigation.cjs
           Get-ChildItem tests -Filter *.test.cjs | ForEach-Object { node --test $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
 
       - name: Run Rust safety and regression tests
