@@ -5,11 +5,15 @@ param(
     [string]$Site = "",
     [int]$CdpPort = 9585,
     [string]$ExecutablePath = "",
+    [string]$Model = 'inclusionai/ling-3.2-flash:free',
     [switch]$CheckCatalogOnly
 )
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$model = 'inclusionai/ling-3.2-flash:free'
+$model = $Model.Trim()
+if ($model -ne 'openrouter/free' -and -not $model.EndsWith(':free', [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'ONLY_FREE_MODELS: Model must be an OpenRouter :free variant or openrouter/free.'
+}
 $endpoint = 'https://openrouter.ai/api/v1/chat/completions'
 
 # Verify this is a currently available free chat model with structured outputs.

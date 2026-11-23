@@ -37,7 +37,7 @@ test('native OpenRouter real-site suite keeps model-derived browser actions sepa
   const root = path.join(__dirname, '..');
   const runner = fs.readFileSync(path.join(root, 'tests/e2e/lucia-real-sites-openrouter.cjs'), 'utf8');
   const wrapper = fs.readFileSync(path.join(root, 'tests/e2e/run-lucia-real-sites-openrouter.ps1'), 'utf8');
-  assert.match(runner, /litellm:inclusionai\/ling-3\.2-flash:free/);
+  assert.match(runner, /\.includes\('litellm:'\+model\)/);
   assert.match(runner, /observedDestination&&modelUsed&&meaningfulActions>=2/);
   assert.match(runner, /run\.verified/);
   assert.match(runner, /provider_rate_limited/);
@@ -45,6 +45,9 @@ test('native OpenRouter real-site suite keeps model-derived browser actions sepa
   assert.match(wrapper, /https:\/\/openrouter\.ai\/api\/v1\/chat\/completions/);
   assert.match(wrapper, /MISSING_OPENROUTER_KEY/);
   assert.match(wrapper, /structured_outputs/);
+  assert.match(wrapper, /ONLY_FREE_MODELS/);
+  assert.match(wrapper, /openrouter\/free/);
+  assert.match(wrapper, /[.]EndsWith\(':free'/);
   assert.match(wrapper, /browsphere-openrouter-real-sites/);
   assert.doesNotMatch(wrapper, /9router\.com|20128/);
 });

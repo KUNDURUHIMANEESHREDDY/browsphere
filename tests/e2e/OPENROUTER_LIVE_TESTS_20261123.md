@@ -36,14 +36,6 @@ This suite targets Browsphere's **real Windows WebView2** and a **real OpenRoute
 
 The test runner uses a separate temporary app/browser profile, so it does not navigate or modify a person's normal tabs. A missing saved credential is detected before launching the browser. Provider 401/403 and 429 errors stop remaining scenarios; they are not treated as successful browser outcomes.
 
-## Retest with free models on 23 November 2026
-
-- The OpenRouter catalog returned HTTP 200 and confirmed both `inclusionai/ling-3.2-flash:free` and `openrouter/free` have $0 input/output prices and structured output support.
-- The native runner's credential-presence preflight passed on the subsequent run, so it launched isolated Browsphere with a real public Python Docs page.
-- Both a pinned Ling 3.2 Flash free-model run and an `openrouter/free` run stopped at the first real cloud browser-action request with **HTTP 429**. No model-generated browser actions or verified page result were produced. All other sites were deliberately not attempted after the 429 response.
-- `node --test tests/openrouter-config.test.cjs` passed. Paid-model selection is now rejected by the runner. No test attempted to bypass the provider's free tier or switch accounts.
-- **Live multi-site autonomous browsing remains unverified.** Provider rate limits must permit inference requests before the four-site suite can substantiate success.
-
 ## Results on 23 November 2026
 
 | Check | Observed |
@@ -80,6 +72,7 @@ Command: `run-lucia-real-sites-openrouter.ps1 -Site 'Python documentation' -CdpP
 - **Provider inference:** OpenRouter returned **HTTP 429** on the first browser-action request. Lucia reported `failed` and `provider_rate_limited` and stopped without changing the provider.
 - **Action trace:** zero actual model-generated browser actions; no requested destination URL; no independent completed-task verification.
 - **Verdict:** **FAIL / provider rate-limited**, not a real autonomous task pass. Other live-model site cases were not attempted after this failure. Do not claim that the key's presence proves usable quota, or that the provider 429 establishes whether the limit is model-specific versus account-wide.
+- **Additional free-router attempt:** `-Model 'openrouter/free'` passed the public $0/structured-outputs catalog check and launched the same isolated Python Docs task, but also returned **HTTP 429**, with zero model actions and no verified result. This was stopped after the first response without retry loops. The runner now accepts explicitly catalog-verified `:free` models or `openrouter/free`, and rejects paid IDs.
 
 ### Separate independent regressions
 

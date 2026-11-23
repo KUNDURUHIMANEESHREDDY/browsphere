@@ -75,7 +75,8 @@ async function main(){
   const endpoint=process.env.LUCIA_TEST_CLOUD_ENDPOINT;
   const model=process.env.LUCIA_TEST_CLOUD_MODEL;
   if(!endpoint || !model)throw Error('Missing model routing environment');
-  if(model!=='inclusionai/ling-3.2-flash:free')throw Error('Wrong provider model for this test');
+  if(!(model==='openrouter/free'||/^[a-z0-9._/-]+:free$/i.test(model)))
+    throw Error('Only verified zero-price OpenRouter model IDs are allowed');
   const config={prefer_local_for_simple:false,lucia_cloud_only:true,
     litellm_url:endpoint,litellm_model:model,domain_overrides:{}};
   try{
@@ -158,7 +159,7 @@ async function main(){
         stopReason='provider_auth_failed';
       const parsed=(()=>{try{return new URL(after?.url)}catch{return null}})();
       const observedDestination=!!parsed&&parsed.host===c.host&&c.path.test(parsed.pathname);
-      const modelUsed=run?.actions?.some(x=>(x.route||'').includes('litellm:inclusionai/ling-3.2-flash:free'))||false;
+      const modelUsed=run?.actions?.some(x=>(x.route||'').includes('litellm:'+model))||false;
       const meaningfulActions=run?.actions?.filter(x=>['click','type_text','press_key','select_option'].includes(x.type)).length||0;
       const passed=!error&&run?.status==='completed'&&run.verified&&observedDestination&&modelUsed&&meaningfulActions>=2;
       const record={name:c.name,passed,before,after,status:run?.status||'not-started',
