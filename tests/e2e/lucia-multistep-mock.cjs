@@ -172,9 +172,14 @@ async function main() {
       if (cloudCompat) {
         const modelActions=actions.filter(a=>a.route?.includes('Browser Agent') &&
           a.type !== 'complete' && a.outcome !== 'stopped_or_unknown');
-        assert.ok(modelActions.length,'No real browser actions were proposed through cloud API');
-        assert.ok(modelActions.every(a=>a.route?.includes('litellm:lucia-cloud-e2e')),
-          'Browser agent used a local model or incorrect provider during cloud-only test');
+        assert.ok(modelActions.some(a=>a.route?.includes('litellm:lucia-cloud-e2e')),
+          'No browser actions were proposed through the cloud API');
+        // A uniquely identified live-DOM result click is a deterministic
+        // recovery step, not a claim that the cloud model proposed it.
+        assert.ok(modelActions.every(a=>a.route?.includes('litellm:lucia-cloud-e2e') ||
+          (a.type==='click' && a.route?.includes('first_result:unique_live_dom')) ||
+          (a.type==='type_text' && a.route?.includes('search_input:trusted_user_query'))),
+          'Browser action used an unexpected provider or ungrounded route');
         assert.ok(actions.every(a=>!a.route?.includes('ollama:')),
           'Cloud-only task unexpectedly fell back to Ollama');
       }
@@ -269,7 +274,10 @@ async function main() {
       const providerAfter = await (await fetch(modelUrl+'/stats')).json();
       assert.equal(providerAfter.planner-providerBefore.planner,0,
         'Simple title lookup unexpectedly spent a cloud model request on planning');
-      assert.ok(providerAfter.actions-providerBefore.actions>=2,
+      // The explicitly requested search term can be entered through a
+      // trusted, live-DOM-bound input action. Enter still needs a real model
+      // decision, so one cloud action request is the minimum here.
+      assert.ok(providerAfter.actions-providerBefore.actions>=1,
         'Browser action decisions did not use the cloud-compatible model');
     }
     console.log('PASS native model-selected Enter -> named article, independent evidence, no redundant cloud plan');
