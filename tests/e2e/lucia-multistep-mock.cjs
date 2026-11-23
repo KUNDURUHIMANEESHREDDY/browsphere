@@ -8,6 +8,7 @@ const base = 'http://127.0.0.1:' + Number(process.env.LUCIA_FIXTURE_PORT || 1876
 const realModel = process.env.LUCIA_E2E_REAL_MODEL?.trim() || null;
 const modelUrl = realModel ? 'http://127.0.0.1:11434' : 'http://127.0.0.1:' + Number(process.env.LUCIA_MODEL_PORT || 18766);
 const chosenModel = realModel || 'lucia-local-e2e';
+const cloudCompat = process.env.LUCIA_E2E_CLOUD_COMPAT === '1';
 
 async function connect() {
   let target;
@@ -81,7 +82,16 @@ async function main() {
       await sleep(300);
     }
     assert.ok(shellReady, 'Native Browsphere UI never became ready');
-    await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');c.ollama_url=" + JSON.stringify(modelUrl) + ";c.ollama_model=" + JSON.stringify(chosenModel) + ";c.litellm_url='http://127.0.0.1:18766/v1/chat/completions';c.litellm_model='lucia-cloud-e2e';c.lucia_cloud_only=" + (process.env.LUCIA_E2E_CLOUD_COMPAT === '1' ? 'true' : 'false') + ";c.prefer_local_for_simple=" + (process.env.LUCIA_E2E_CLOUD_COMPAT === '1' ? 'false' : 'true') + ";c.domain_overrides={};await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaNativeEvents=[];for(const name of ['agent:plan','agent:stage','agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required'])await window.__TAURI__.event.listen(name,e=>window.__luciaNativeEvents.push({event:name,payload:e.payload}));return true})()");
+    // Cloud CI deliberately points Ollama at a closed port. Every specialist
+    // must use the OpenAI-compatible API; local fallback would fail the run.
+    const localEndpoint = cloudCompat ? 'http://127.0.0.1:1' : modelUrl;
+    const cloudEndpoint = modelUrl + '/v1/chat/completions';
+    await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');c.ollama_url=" +
+      JSON.stringify(localEndpoint) + ";c.ollama_model=" + JSON.stringify(chosenModel) +
+      ";c.litellm_url=" + JSON.stringify(cloudEndpoint) +
+      ";c.litellm_model='lucia-cloud-e2e';c.lucia_cloud_only=" + String(cloudCompat) +
+      ";c.prefer_local_for_simple=" + String(!cloudCompat) +
+      ";c.domain_overrides={};await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaNativeEvents=[];for(const name of ['agent:plan','agent:stage','agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required'])await window.__TAURI__.event.listen(name,e=>window.__luciaNativeEvents.push({event:name,payload:e.payload}));return true})()");
     async function openLocal(path) {
       const url = base + path;
       await evaluate('window.browsphereApp.newTab(' + JSON.stringify(url) + ')');
@@ -149,6 +159,15 @@ async function main() {
       }));
       assert.equal(terminal.payload?.status,'completed','Agent run did not finish');
       assert.equal(report?.status,'evidence_checked','Missing independent evidence');
+      if (cloudCompat) {
+        const modelActions=actions.filter(a=>a.route?.includes('Browser Agent') &&
+          a.type !== 'complete' && a.outcome !== 'stopped_or_unknown');
+        assert.ok(modelActions.length,'No real browser actions were proposed through cloud API');
+        assert.ok(modelActions.every(a=>a.route?.includes('litellm:lucia-cloud-e2e')),
+          'Browser agent used a local model or incorrect provider during cloud-only test');
+        assert.ok(actions.every(a=>!a.route?.includes('ollama:')),
+          'Cloud-only task unexpectedly fell back to Ollama');
+      }
       return {actions,report};
     }
 
@@ -386,6 +405,18 @@ async function main() {
       console.log('PASS closing the background task tab cancels with a clear message');
     } finally {
       await evaluate("window.__TAURI__.core.invoke('set_agent_paused',{paused:false})");
+    }
+
+    if (cloudCompat) {
+      const response = await fetch(modelUrl + '/stats');
+      assert.equal(response.status,200,'Cloud-model diagnostic counters unavailable');
+      const counts = await response.json();
+      assert.ok(counts.planner >= 4,'Cloud model was not used for task planning');
+      assert.ok(counts.actions >= 10,'Cloud model did not propose enough browser actions');
+      assert.ok(counts.verifier >= 4,'Cloud model was not used for source verification');
+      assert.equal(counts.ollama,0,'Local Ollama requests occurred during cloud-only test');
+      console.log('PASS cloud-only planner, browser actions, and verifier; no local fallback',
+        JSON.stringify(counts));
     }
 
     // 5. The user-facing View task tab control must open the assigned tab.
