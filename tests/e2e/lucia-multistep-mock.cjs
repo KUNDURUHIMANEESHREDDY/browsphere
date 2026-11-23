@@ -236,6 +236,36 @@ async function main() {
     console.log('PASS native multi-step typing, search, result click, SPA URL sync and evidence review');
 
     if (!realModel) {
+    // A named-article search can navigate straight to its result on Enter.
+    // The production agent must still use the chosen model for real actions
+    // and a fresh WebView2 title/URL for final verification; its specialist
+    // plan is fixed so one unnecessary hosted planning request is avoided.
+    const providerBefore = cloudCompat ? await (await fetch(modelUrl+'/stats')).json() : null;
+    const namedInitial = await openLocal('/named-enter.html');
+    const named = await run(
+      'On this local dictionary page, search for nebula and open the corresponding article. Then report its page title.',
+      namedInitial,100
+    );
+    assert.ok(named.actions.some(a=>a.type==='type_text'&&a.outcome==='ok'),
+      'Named article query was not typed into the observed field');
+    assert.ok(named.actions.some(a=>a.type==='press_key'&&a.outcome==='ok'),
+      'Named article search was not submitted through its observed Enter key');
+    const namedAfter = await evaluate(snapshotExpression);
+    assert.equal(new URL(namedAfter.origin).pathname,'/nebula.html',
+      'Enter search did not open the requested article in native WebView2');
+    assert.equal(namedAfter.title,'nebula - Fixture Dictionary',
+      'The native article title is missing or mismatched');
+    assert.ok(namedAfter.text_excerpt.includes('Fixture Dictionary article: nebula'),
+      'Named article has no readable source evidence');
+    if (cloudCompat) {
+      const providerAfter = await (await fetch(modelUrl+'/stats')).json();
+      assert.equal(providerAfter.planner-providerBefore.planner,0,
+        'Simple title lookup unexpectedly spent a cloud model request on planning');
+      assert.ok(providerAfter.actions-providerBefore.actions>=2,
+        'Browser action decisions did not use the cloud-compatible model');
+    }
+    console.log('PASS native model-selected Enter -> named article, independent evidence, no redundant cloud plan');
+
     // 2. Generic website: heavy navigation chrome hides real controls unless
     // the DOM reader prioritizes main content; search works only on Enter.
     const docsInitial = await openLocal('/generic-search.html');

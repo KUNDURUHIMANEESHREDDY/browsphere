@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use crate::agent::dom_extractor::DomSnapshot;
 use crate::agent::policy::{requested_navigation_url, BrowserAction};
-use crate::agent::evidence_verifier::check_navigation_result;
+use crate::agent::evidence_verifier::{check_navigation_result, requested_named_result_title};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -208,11 +208,29 @@ pub(crate) fn observed_youtube_video_page(origin: &str) -> bool {
         url.path().strip_prefix(prefix).is_some_and(|id| !id.trim_matches('/').is_empty()))
 }
 
+/// A tightly scoped, read-only article-title lookup does not require a
+/// separately billed cloud planning request. The model still decides EVERY
+/// browser action using freshly observed DOM; no search, click, or result URL
+/// is predetermined. Other tasks retain the model-generated specialist plan.
+pub(crate) fn is_simple_named_title_task(goal: &str) -> bool {
+    if requested_named_result_title(goal).is_none() { return false; }
+    let lower = goal.to_lowercase();
+    !contains_any(&lower, &[
+        "compare", "extract", "download", "upload", "screenshot", "video",
+        "purchase", "checkout", "buy ", "pay ", "order ", "book ",
+        "register", "sign up", "apply ", "submit", "send ", "delete",
+        "remove ", "change ", "update ", "account", "email", "message",
+        "fill ", "form", "several", "multiple", "list of",
+    ])
+}
+
 /// A deterministic minimum plan, built from the user's intent.
 /// The selected LLM decides actual actions for each specialist at runtime.
 pub fn plan_task(goal: &str) -> TaskPlan {
     let lower = goal.to_lowercase();
-    let mut roles: Vec<Specialist> = if contains_any(
+    let mut roles: Vec<Specialist> = if is_simple_named_title_task(goal) {
+        vec![Specialist::Browser]
+    } else if contains_any(
         &lower, &["compare", "comparison", "versus", " vs ", "difference between", "best among"],
     ) {
         vec![Specialist::Research, Specialist::Comparison]
@@ -483,6 +501,32 @@ mod tests {
         assert_eq!(plan.stages[2].specialist, Specialist::Verification);
         assert!(parse_generated_plan("Demo", r#"{"stages":[{"specialist":"shell","objective":"run","success_criteria":"done"}]}"#).is_err());
         assert!(parse_generated_plan("Demo", r#"{"stages":[]}"#).is_err());
+    }
+
+    #[test]
+    fn named_article_title_lookup_skips_only_redundant_cloud_planning() {
+        for goal in [
+            "On this Wikipedia page, search for Ada Lovelace and open the corresponding article. Then report its page title.",
+            "On this Python documentation page, search for asyncio and open the corresponding reference article. Then report its page title.",
+            "On this MDN website, search for Array and open the corresponding JavaScript reference article. Then report its page title.",
+            "On this Wiktionary page, search for photosynthesis and open the corresponding article. Then report its page title.",
+        ] {
+            assert!(is_simple_named_title_task(goal), "unexpected rejection: {goal}");
+            let stages = plan_task(goal).stages.into_iter()
+                .map(|stage| stage.specialist).collect::<Vec<_>>();
+            assert_eq!(stages, vec![Specialist::Browser, Specialist::Verification]);
+        }
+        for goal in [
+            "Search for Ada Lovelace and open her article, then purchase a membership and report the title",
+            "Search for Ada Lovelace and open her article, then submit my form and report the title",
+            "Search for Ada Lovelace and open her article, compare other sources and report the title",
+            "Search for Ada Lovelace and report its title without opening the article",
+            "Research Ada Lovelace and write a comparison of multiple webpages",
+        ] {
+            assert!(!is_simple_named_title_task(goal), "unsafe optimization: {goal}");
+        }
+        // Direct URL opening retains its own canonical route, not an inference shortcut.
+        assert!(!is_simple_named_title_task("Open github.com"));
     }
 
     #[test]

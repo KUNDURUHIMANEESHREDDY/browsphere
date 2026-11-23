@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::agent::action_executor::{execute_browser_action, ActionResult};
 use crate::agent::memory::{can_classify_preference, infer_memories, preference_from_label, RecoveredFailure};
-use crate::agent::orchestrator::{plan_task, Orchestrator, Specialist};
+use crate::agent::orchestrator::{is_simple_named_title_task, plan_task, Orchestrator, Specialist};
 use crate::agent::evidence_verifier::{
     check_navigation_result, check_submission_result, check_named_search_transition,
     requires_post_action_check,
@@ -237,6 +237,24 @@ fn is_named_search_submit_click(
     )
 }
 
+/// Some documentation and wiki search forms navigate straight to the exact
+/// named article on Enter. This exception is limited to a real non-sensitive
+/// search input and a narrow read-only page-title task; the post-action URL,
+/// title, and saved WebView evidence are still checked independently.
+fn is_named_search_enter(
+    goal: &str, action: &BrowserAction, snapshot: &DomSnapshot,
+) -> bool {
+    if !is_simple_named_title_task(goal) { return false; }
+    let BrowserAction::PressKey { node_id, key } = action else { return false; };
+    if key != "Enter" { return false; }
+    snapshot.interactive_nodes.iter().any(|node|
+        node.node_id == *node_id && !node.is_sensitive &&
+        matches!(node.tag.as_str(), "input" | "textarea") &&
+        (node.role.eq_ignore_ascii_case("searchbox") ||
+            node.label.to_lowercase().contains("search"))
+    )
+}
+
 /// Exactly one model replan is permitted after an invalid live DOM binding.
 fn should_replan_invalid_control(route: &str, action: &BrowserAction) -> bool {
     let model_selected = ["ollama:", "litellm:", "groq:", "bedrock:"]
@@ -413,9 +431,9 @@ fn delayed_navigation_is_verified(expected: &str, observed: &DomSnapshot) -> boo
     check_navigation_result(expected, observed).is_ok()
 }
 
-/// A unit-test helper for the full search-to-title postcondition; the
-/// running agent accepts an intermediate results page only as progress.
-#[cfg(test)]
+/// A strict check for direct search-to-article navigation. An observed safe
+/// Enter on a real search field can open the named page without a result click.
+/// The URL, page title, body and recorded source are independently checked.
 fn check_named_title_search_navigation(
     goal: &str,
     initial_origin: &str,
@@ -689,6 +707,10 @@ pub async fn run_react_loop(
     let mut seen_signatures: HashSet<String> = HashSet::new();
     let mut recorded_steps: Vec<BrowserAction> = Vec::new();
     let mut confirmed_named_search_navigation = false;
+    // Enter on a search field may navigate after the initial post-action poll.
+    // Only a fresh matching native article can clear this pending observation;
+    // this never retries the form or invents its destination.
+    let mut pending_named_search_enter: Option<DomSnapshot> = None;
     let mut next_step_index: u32 = 0;
     let mut recent_outcomes: Vec<String> = Vec::new();
     let mut last_action_failed = false;
@@ -705,10 +727,13 @@ pub async fn run_react_loop(
     let mut failures_observed: HashSet<RecoveredFailure> = HashSet::new();
     // Lucia delegates the task through real specialist stages; each stage has
     // distinct instructions, action permissions and evidence requirements.
-    // Simple direct navigation needs one browser specialist and an independent
-    // verifier, not a multi-stage research plan. The LLM still selects the
-    // concrete action; no navigation result is hardcoded.
-    let model_plan = if requested_navigation_url(&goal).is_some() {
+    // Simple direct navigation and narrowly recognized read-only named-page
+    // title lookups can use a safe two-stage plan without spending a cloud
+    // planning call. The LLM still chooses the concrete webpage interactions;
+    // live browser actions and independent evidence checks are mandatory.
+    let model_plan = if requested_navigation_url(&goal).is_some()
+        || is_simple_named_title_task(&goal)
+    {
         plan_task(&goal)
     } else {
         let selected_model = router.lock().await.clone();
@@ -885,6 +910,18 @@ pub async fn run_react_loop(
         observation_failures = 0;
         snapshot = live;
         orchestrator.observe(&snapshot);
+        if let Some(before) = pending_named_search_enter.as_ref() {
+            if check_named_title_search_navigation(
+                &goal, &initial_origin, before, &snapshot, &orchestrator.evidence
+            ).is_ok() {
+                confirmed_named_search_navigation = true;
+                pending_named_search_enter = None;
+                recent_outcomes.push(
+                    "Delayed search Enter opened the exact requested article; confirmed in live WebView evidence".into()
+                );
+                if recent_outcomes.len() > 5 { recent_outcomes.remove(0); }
+            }
+        }
         let freshly_observed = true;
 
         // WebView2 may acknowledge a navigation before the destination renders.
@@ -1431,12 +1468,23 @@ pub async fn run_react_loop(
 
         if ok && !requires_post_action_check(&action) && needs_settle_observation(&action) {
             let before = snapshot.clone();
+            let safe_named_search_enter = is_named_search_enter(&goal, &action, &before);
+            if safe_named_search_enter {
+                pending_named_search_enter = Some(before.clone());
+            }
             if let Some((after, changed)) = observe_after_routine_action(
                 &app, &webview_label, &pending_snapshots, &before, &cancel
             ).await {
                 let origin_changed = before.origin != after.origin;
                 snapshot = after;
                 orchestrator.observe(&snapshot);
+                if safe_named_search_enter && check_named_title_search_navigation(
+                    &goal, &initial_origin, &before, &snapshot, &orchestrator.evidence
+                ).is_ok() {
+                    confirmed_named_search_navigation = true;
+                    pending_named_search_enter = None;
+                    outcome.push_str(" | NAMED SEARCH ENTER VERIFIED FROM LIVE ARTICLE");
+                }
                 let _ = app.emit("agent:observation", serde_json::json!({
                     "run_id": run_id, "phase": "post_action",
                     "status": "observed", "changed": changed,
@@ -1703,6 +1751,44 @@ mod production_safety_tests {
         };
         assert!(check_named_title_search_navigation(
             goal, &before.origin, &before, &wrong, &observed).is_err());
+    }
+
+    #[test]
+    fn named_search_enter_requires_a_real_non_sensitive_search_field() {
+        let goal = "On this Wiktionary page, search for photosynthesis and open the corresponding article. Then report its page title.";
+        let mut observed = DomSnapshot {
+            origin: "https://en.wiktionary.org/wiki/Wiktionary:Main_Page".into(),
+            title: "Wiktionary".into(),
+            text_excerpt: "Search the free dictionary by typing a word in the search box.".into(),
+            interactive_nodes: vec![crate::agent::dom_extractor::DomNodeSummary {
+                node_id: "search-input".into(), tag: "input".into(),
+                role: "searchbox".into(), label: "Search Wiktionary".into(),
+                is_submit: false, is_sensitive: false, href: None,
+                checked: None, options: vec![], bbox: None,
+            }],
+        };
+        let enter = BrowserAction::PressKey {
+            node_id: "search-input".into(), key: "Enter".into(),
+        };
+        assert!(is_named_search_enter(goal, &enter, &observed));
+        assert!(!is_named_search_enter(goal, &BrowserAction::PressKey {
+            node_id: "search-input".into(), key: "Escape".into(),
+        }, &observed));
+        assert!(!is_named_search_enter(goal, &BrowserAction::PressKey {
+            node_id: "nonexistent".into(), key: "Enter".into(),
+        }, &observed));
+        assert!(!is_named_search_enter(
+            "Search for photosynthesis and open the article, then purchase a membership and report title",
+            &enter, &observed));
+        observed.interactive_nodes[0].is_sensitive = true;
+        assert!(!is_named_search_enter(goal, &enter, &observed));
+        observed.interactive_nodes[0].is_sensitive = false;
+        observed.interactive_nodes[0].role = "textbox".into();
+        observed.interactive_nodes[0].label = "Credit card".into();
+        assert!(!is_named_search_enter(goal, &enter, &observed));
+        observed.interactive_nodes[0].role = "searchbox".into();
+        observed.interactive_nodes[0].tag = "button".into();
+        assert!(!is_named_search_enter(goal, &enter, &observed));
     }
 
     #[test]

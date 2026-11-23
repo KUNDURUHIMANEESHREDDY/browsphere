@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Fixture Dictionary — Search</title>
+<style>body{font:18px system-ui;margin:40px auto;max-width:800px}input{padding:12px;min-width:340px}button{padding:12px}</style></head>
+<body><main><h1>Fixture Dictionary</h1>
+<p>This disposable local dictionary simulates a real website that navigates directly to a named article when Enter is pressed in its search box. It requires no account and no external request.</p>
+<form action="/nebula.html" method="get">
+  <label for="dictionary-term">Search dictionary</label>
+  <input id="dictionary-term" type="search" role="searchbox" aria-label="Search dictionary" name="term" placeholder="Search dictionary" autocomplete="off">
+</form>
+<p id="status">Enter a subject in the search field to open its reference article.</p>
+</main><script>
+  const input=document.getElementById('dictionary-term');
+  input.addEventListener('input',()=>{document.getElementById('status').textContent='Query: '+input.value});
+</script></body></html>

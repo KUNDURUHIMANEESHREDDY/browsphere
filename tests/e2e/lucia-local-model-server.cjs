@@ -93,6 +93,22 @@ function decideAction(prompt) {
     thought: 'Select the next action from the freshly observed local test page.',
     action
   });
+  if (prompt.includes('Original user goal: On this local dictionary page, search for nebula')) {
+    // Local mock decisions ONLY; the native runner must bind real live controls
+    // and independently verify the resulting article URL, text and title.
+    if (page.includes('Fixture Dictionary article: nebula')) {
+      return reply({type:'complete',summary:'Observed the requested named dictionary article'});
+    }
+    const input = has('Search dictionary');
+    if (page.includes('Query: nebula') && input) {
+      return reply({type:'press_key',node_id:input.node_id,key:'Enter'});
+    }
+    if (input) {
+      return reply({type:'type_text',node_id:input.node_id,
+        text:'nebula',is_sensitive:false});
+    }
+    return reply({type:'scroll',delta_y:100});
+  }
   if (prompt.includes('Original user goal: Open keyboard dialog')) {
     if (page.includes('KEYBOARD_DIALOG_CLOSED'))
       return reply({type:'complete',summary:'Observed dialog closed after Escape'});
@@ -324,7 +340,9 @@ function runFixture(req, res) {
     '/recovery.html':'recovery.html',
     '/generic-controls.html':'generic-controls.html',
     '/generic-document.html':'generic-document.html',
-    '/form-controls.html':'form-controls.html'
+    '/form-controls.html':'form-controls.html',
+    '/named-enter.html':'named-enter.html',
+    '/nebula.html':'nebula.html'
   }[new URL(req.url || '/', 'http://127.0.0.1').pathname];
   if (!exact || req.method !== 'GET') return send(res, 404, 'Not found', 'text/plain');
   try {
