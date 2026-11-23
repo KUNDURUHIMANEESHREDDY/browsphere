@@ -257,7 +257,15 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   }}
   walk(document.body || document.documentElement);
 
-  const visibleText = (document.body?.innerText || "")
+  // Give the actual content/dialog priority over enormous navigation menus,
+  // while retaining a bounded slice of the remaining page for context.
+  const primaryTextRoot = document.querySelector(
+    '[role="dialog"][aria-modal="true"], main, [role="main"], article, #main, #content');
+  const contentText = isVisible(primaryTextRoot)
+    ? (primaryTextRoot.innerText || "") : "";
+  const bodyText = document.body?.innerText || "";
+  const visibleText = [contentText, bodyText]
+    .filter(Boolean).join(" ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, MAX_TEXT);
