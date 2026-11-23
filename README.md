@@ -77,7 +77,7 @@ The first **everyday-browser reliability** update is now implemented:
 
 The agent runner now binds clicks and typing to a fresh live DOM snapshot, uses observed control labels/sensitivity for approvals, stops on cancelled/rejected/expired approvals, blocks unsafe download URLs, and redacts sensitive action traces. Workflow macro action persistence/replay is disabled until it has a safe verified design.
 
-The Rust regression run passed **58 tests, 0 failed, 4 ignored**, and the separate real-local-model intent, specialist-action, and evidence-verifier tests passed. An updated packaged Windows multi-step browser E2E test is **still pending**; this is not a production-ready release.
+The expanded Lucia backend regression run passed **59 tests, 0 failed, 4 ignored**. A real native Windows WebView2 integration test and one end-to-end Ollama/Qwen Browser → Verification workflow both passed against a harmless local website. Separate desktop tests confirmed that rejected and cancelled form approvals never submit the form. An unsigned Windows NSIS installer was also packaged successfully. These limited passes do **not** certify multi-site reliability, installer installation/upgrade, code signing, or production readiness.
 
 See [Lucia production gates](LUCIA_PRODUCTION_GATE.md) for exact implementation details and remaining release requirements.
 
@@ -94,3 +94,15 @@ This milestone fixes the confirmed address-bar regression and adds native privat
 **Validation:** JavaScript browser-state regression tests passed; **58 Rust tests passed** and 4 optional local-model tests were ignored. A separate isolated Windows WebView2 smoke session passed **12/12** navigation/CSP/private-profile checks plus **6/6** additional cookie, popup, and Lucia checks. Both the normal browser and Lucia blocked injected inline scripts; private views could not access normal cookies or localStorage while normal-site data remained available after private mode ended. Development builds compiled successfully.
 
 **Outstanding release gates:** Signed Windows installer/update pipeline; per-origin permissions and controlled popup workflows; production certificate and CSP audit; multi-site cookie/SSO compatibility tests; browser-native back/forward, shortcut handling in child WebViews, and full cross-site desktop regression. These tests are not a proof of Chrome equivalence or comprehensive browser security.
+
+## Site permissions, popup consent, and signed release preparation — 22 November 2026
+
+The browser now has an explicit **lock icon in the address bar** for the current HTTPS site. The site panel shows Camera, Microphone, Location, and Notifications as **Blocked** by default. The user can grant/revoke each permission for that exact top-level HTTPS origin; normal-profile grants are stored in `BrowsphereAI/site-permissions.json`. Insecure origins and other high-risk permission types cannot be granted from these controls. Private tabs remain deny-only and never inherit persistent grants.
+
+External website popups are denied by default. A popup request presents its actual destination and requires the user to select **Open once in new tab**. Browsphere opens the approved link in a normal browser tab rather than automatically creating an uncontrolled external window. **Block** closes the request. This is intentionally conservative: OAuth and SSO websites that require a genuine popup may need additional handling.
+
+**Validation:** `cargo test --workspace --offline` passed **61 tests**, 0 failed, with 4 optional live-model tests ignored. The separately launched Windows WebView2 compatibility suite (`node tests/e2e/browser-compat.mjs`) passed **17/17 checks** across Example Domain, GitHub, Wikipedia, and Hacker News: website loading, host display, permission control/grant/revoke, blocked popup behavior, and explicit tab opening. The live test used a disposable browser profile and no production account credentials.
+
+A separate manual workflow, [Signed Windows installer release](.github/workflows/release-signed-windows.yml), is **implemented but not activated**. It requires a protected GitHub `windows-release` environment and real Authenticode certificate secrets, and refuses to publish unsigned binaries. Read [Release signing guide](RELEASE_SIGNING.md) to configure it. There is no production signing certificate, signed release, or enabled Tauri auto-update mechanism yet.
+
+**Remaining production work:** validate certificate provisioning and an actual signed installer, add origin-aware permission handling for embedded frames (the high-level Tauri callback only supplies the main WebView URL), restore trusted SSO popup compatibility, test site permissions across more websites and operating conditions, and complete installer/security audits. These changes do not establish Chrome-level feature parity.

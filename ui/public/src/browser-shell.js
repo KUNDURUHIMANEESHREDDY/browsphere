@@ -3357,6 +3357,14 @@
       window.browsphereApp = {
         navigate: navigateToUrl,
         newTab: createNewTab,
+        activeTab: function () {
+          var tab = getActiveTab();
+          return {
+            id: tab.id,
+            url: tab.history[tab.historyIndex],
+            private: isPrivateMode || Boolean(tab.privateContext)
+          };
+        },
         toggleChat: function () { togglePopover('aiChatPopover'); },
         openSettings: openSettingsModal,
         toggleTheme: toggleThemeMode
@@ -4687,10 +4695,16 @@
         window.addEventListener('aether:page-loaded', function (event) {
           syncCompletedNativeNavigation(event.detail);
         });
-        window.addEventListener('aether:popup-blocked', function (event) {
+        window.addEventListener('aether:site-permission-denied', function (event) {
           var detail = event.detail || {};
-          if (detail.tabId === activeTabId) {
-            showHudToast('Popup blocked. Browser popup permission controls are not yet available.');
+          if (detail.tabId === activeTabId && detail.permission) {
+            // Keep decisions explicit. Users may open the lock icon to grant
+            // specific site capabilities and reload the webpage.
+            var now = Date.now();
+            if (!window.__lastSitePermissionToast || now - window.__lastSitePermissionToast > 6000) {
+              window.__lastSitePermissionToast = now;
+              showHudToast('Blocked ' + detail.permission + '. Use the lock icon to manage site permissions.');
+            }
           }
         });
         window.addEventListener('aether:browser-error', function (event) {

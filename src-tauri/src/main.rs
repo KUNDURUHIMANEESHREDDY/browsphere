@@ -7,6 +7,7 @@ mod aws_discovery;
 mod automation;
 mod privacy;
 mod router;
+mod site_permissions;
 mod storage;
 mod voice;
 mod voice_system_prompt;
@@ -32,6 +33,7 @@ use automation::engine::{AutomationEngine, AutomationJob, AutomationStep};
 use privacy::downloads::DownloadManager;
 use privacy::itp::{DownloadRecord, ItpEngine, ItpStats};
 use router::model_router::{ChatAnswer, ChatTurn, ModelRouter, RouterConfig};
+use site_permissions::{SitePermissions, SitePolicy};
 use storage::credentials::CredentialStore;
 use storage::sqlite_wal::{AgentRunSummary, BrowserDatabase, HistoryEntry, ItpHostCount, SavedCredentialMeta, WorkflowMacro, MemoryEntry};
 
@@ -920,6 +922,28 @@ async fn set_app_theme(
 }
 
 #[tauri::command]
+fn get_site_permissions(
+    webview: tauri::Webview,
+    state: tauri::State<'_, SitePermissions>,
+    origin: String,
+) -> Result<SitePolicy, String> {
+    if webview.label() != "main" { return Err("Only the browser chrome can manage site permissions".into()); }
+    state.list(&origin)
+}
+
+#[tauri::command]
+fn set_site_permission(
+    webview: tauri::Webview,
+    state: tauri::State<'_, SitePermissions>,
+    origin: String,
+    permission: String,
+    allowed: bool,
+) -> Result<SitePolicy, String> {
+    if webview.label() != "main" { return Err("Only the browser chrome can manage site permissions".into()); }
+    state.update(&origin, &permission, allowed)
+}
+
+#[tauri::command]
 async fn open_or_navigate_tab(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
@@ -982,6 +1006,9 @@ async fn open_or_navigate_tab(
     let itp_for_nav = state.itp.clone();
     let app_for_nav = app.clone();
     let app_for_popups = app.clone();
+    let app_for_permissions = app.clone();
+    let tab_id_for_permissions = tab_id.clone();
+    let private_for_permissions = is_private.unwrap_or(false);
     let tab_id_for_popups = tab_id.clone();
     let app_for_page_load = app.clone();
     let tab_id_for_page_load = tab_id.clone();
@@ -997,16 +1024,35 @@ async fn open_or_navigate_tab(
 
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
         .incognito(is_private.unwrap_or(false))
-        .on_permission_request(|_webview, _permission| {
-            // Until there is a per-origin consent UI, do not silently grant
-            // camera, microphone, geolocation, notifications or device access.
-            tauri::webview::PermissionResponse::Deny
+        .on_permission_request(move |webview, permission| {
+            let location = webview.url().ok();
+            let response = location.as_ref().map(|location| {
+                app_for_permissions
+                    .state::<SitePermissions>()
+                    .response(location, permission, private_for_permissions)
+            }).unwrap_or(tauri::webview::PermissionResponse::Deny);
+            if response != tauri::webview::PermissionResponse::Allow {
+                let _ = app_for_permissions.emit("browser:permission-denied", serde_json::json!({
+                    "tabId": tab_id_for_permissions,
+                    "permission": permission.to_string(),
+                    "url": location.map(|url| url.to_string()).unwrap_or_default()
+                }));
+            }
+            response
         })
         .on_new_window(move |popup_url, _features| {
-            let _ = app_for_popups.emit("browser:popup-blocked", serde_json::json!({
-                "tabId": tab_id_for_popups,
-                "url": popup_url.to_string()
-            }));
+            if matches!(popup_url.scheme(), "https" | "http")
+                && popup_url.host_str().is_some()
+                && popup_url.username().is_empty()
+                && popup_url.password().is_none()
+            {
+                // The external popup is always denied. Only browser-chrome
+                // user interaction may reopen it as an ordinary tab.
+                let _ = app_for_popups.emit("browser:popup-blocked", serde_json::json!({
+                    "tabId": tab_id_for_popups,
+                    "url": popup_url.to_string()
+                }));
+            }
             tauri::webview::NewWindowResponse::Deny
         })
         .initialization_script(&guard_script)
@@ -2278,6 +2324,7 @@ fn main() {
         .init();
 
     let data_dir = resolve_data_dir();
+    let site_permissions = SitePermissions::new(&data_dir);
     write_startup_log(&data_dir, &format!("Data dir: {}", data_dir.to_string_lossy()));
 
     let db_path = data_dir.join("Browsphere.sqlite");
@@ -2353,6 +2400,7 @@ fn main() {
             Ok(())
         })
         .manage(app_state)
+        .manage(site_permissions)
         .invoke_handler(tauri::generate_handler![
             window_close,
             window_minimize,
@@ -2367,6 +2415,8 @@ fn main() {
             fetch_url_preview,
             set_app_theme,
             open_or_navigate_tab,
+            get_site_permissions,
+            set_site_permission,
             switch_tab_webview,
             reload_tab_webview,
             close_tab_webview,

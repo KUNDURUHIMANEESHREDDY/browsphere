@@ -817,6 +817,9 @@
     listen('browser:popup-blocked', (event) => {
       emitUiEvent('aether:popup-blocked', event.payload || {});
     });
+    listen('browser:permission-denied', (event) => {
+      emitUiEvent('aether:site-permission-denied', event.payload || {});
+    });
 
     listen('download:progress', (event) => {
       emitUiEvent('aether:download-progress', event.payload);

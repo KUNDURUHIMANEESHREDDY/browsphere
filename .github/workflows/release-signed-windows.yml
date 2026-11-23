@@ -1,0 +1,147 @@
+name: Signed Windows installer release
+
+# This is deliberately manual and separate from unsigned CI builds.
+# Requires a protected "windows-release" GitHub Environment with configured
+# WINDOWS_CERT_PFX_BASE64 and WINDOWS_CERT_PASSWORD secrets.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (must equal v + src-tauri/tauri.conf.json version)"
+        type: string
+        required: true
+      publish_release:
+        description: "Publish a GitHub release after successful Authenticode verification"
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  signed-installer:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    environment: windows-release
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout trusted main branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate release metadata and signing secrets
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw 'The release tag must use the form v0.1.0.'
+          }
+          $config = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          if ($env:RELEASE_TAG -ne ('v' + $config.version)) {
+            throw 'Release tag must match the app version declared in Tauri configuration.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:PFX_BASE64) -or [string]::IsNullOrWhiteSpace($env:PFX_PASSWORD)) {
+            throw 'Authenticode signing secrets are not configured. An unsigned installer will NOT be published.'
+          }
+          if ($env:PFX_BASE64.Length -lt 256) {
+            throw 'PFX certificate payload looks invalid.'
+          }
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build UI and run JavaScript checks
+        shell: pwsh
+        run: |
+          npm ci --prefix ui --no-audit --no-fund
+          npm --prefix ui run build:css
+          node --check ui/public/src/browser-shell.js
+          node --check ui/public/src/site-controls.js
+          node --check ui/public/src/tauri-bridge.js
+          node tests/browser-state.test.cjs
+
+      - name: Rust regression tests
+        run: cargo test --workspace --locked
+
+      - name: Build Windows NSIS setup executable
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: src-tauri
+          args: --bundles nsis
+
+      - name: Sign and verify Authenticode installer
+        id: signature
+        shell: pwsh
+        env:
+          PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $certificate = Join-Path $env:RUNNER_TEMP 'browsphere-signing-temporary.pfx'
+          try {
+            [System.IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:PFX_BASE64))
+            $kitRoot = Join-Path "${env:ProgramFiles(x86)}" 'Windows Kits\10\bin'
+            $signTool = Get-ChildItem $kitRoot -Recurse -Filter signtool.exe -ErrorAction Stop |
+              Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+              Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+            if (-not $signTool) { throw 'Windows SDK signtool.exe was not found.' }
+            $installers = @(Get-ChildItem 'target/release/bundle/nsis' -Filter '*-setup.exe' -File -ErrorAction Stop)
+            if ($installers.Count -ne 1) { throw 'Expected exactly one Windows NSIS installer.' }
+            foreach ($installer in $installers) {
+              & $signTool sign /fd SHA256 /tr 'http://timestamp.digicert.com' /td SHA256 /f $certificate /p $env:PFX_PASSWORD $installer.FullName
+              if ($LASTEXITCODE -ne 0) { throw 'Authenticode signing failed.' }
+              & $signTool verify /pa $installer.FullName
+              if ($LASTEXITCODE -ne 0) { throw 'Authenticode verification failed.' }
+              $verified = Get-AuthenticodeSignature $installer.FullName
+              if ($verified.Status -ne 'Valid') {
+                throw ("Invalid Authenticode signature status: " + $verified.Status)
+              }
+              Write-Host ("Verified signed installer: " + $installer.Name)
+            }
+          } finally {
+            if (Test-Path $certificate) { Remove-Item $certificate -Force }
+          }
+
+      - name: Upload verified signed installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Browsphere-Signed-Windows-Setup
+          path: target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish signed installer (explicit opt-in)
+        if: ${{ inputs.publish_release }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $remoteTag = git ls-remote --tags origin ("refs/tags/" + $env:RELEASE_TAG)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check existing remote release tags.' }
+          if ($remoteTag) { throw 'Release tag already exists; refusing to overwrite or reuse it.' }
+          if (gh release view $env:RELEASE_TAG 2>$null) {
+            throw 'Release already exists; refusing to overwrite published assets.'
+          }
+          $installer = Get-ChildItem 'target/release/bundle/nsis' -Filter '*-setup.exe' -File | Select-Object -First 1
+          if (-not $installer) { throw 'Verified installer missing.' }
+          gh release create $env:RELEASE_TAG $installer.FullName --target $env:GITHUB_SHA --title ("Browsphere " + $env:RELEASE_TAG) --notes "Signed Windows installer. Authenticode signature verified in CI. Automatic updater is not yet enabled."
+          if ($LASTEXITCODE -ne 0) { throw 'Release publishing failed.' }
