@@ -862,6 +862,10 @@ User text: <text>{}</text>"#,
             Return only JSON: {\"thought\":\"short\",\"action\":{\"type\":\"scroll\",\"delta_y\":240}}.\n"
         );
         for (prefix, limit) in [
+            // Connection probes use a short request rather than the full live-page
+            // prompt. Keep that request or the local model sees no actual task.
+            ("User request:", 450usize),
+            ("The user requests:", 450usize),
             ("Original user goal:", 450usize),
             ("Current specialist:", 100),
             ("Assigned stage objective:", 260),
@@ -1028,6 +1032,15 @@ mod tests {
         assert!(!compact.contains("DO_NOT_REPLAY_STALE"));
         assert!(compact.contains("<untrusted_page_data>"));
         assert!(compact.len() < raw.len() + 450);
+    }
+
+    #[test]
+    fn compact_browser_prompt_preserves_local_connection_probe_goal() {
+        let probe = "User request: open https://example.com/. Output one navigate action to https://example.com/. No DOM elements are observed.";
+        let compact = ModelRouter::compact_browser_action_prompt(probe);
+        assert!(compact.contains("User request: open https://example.com/"));
+        assert!(compact.contains("navigate action"));
+        assert!(!compact.contains("Interactive nodes JSON:"));
     }
 
     #[tokio::test]
