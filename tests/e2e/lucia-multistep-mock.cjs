@@ -81,7 +81,7 @@ async function main() {
       await sleep(300);
     }
     assert.ok(shellReady, 'Native Browsphere UI never became ready');
-    await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');c.ollama_url=" + JSON.stringify(modelUrl) + ";c.ollama_model=" + JSON.stringify(chosenModel) + ";c.litellm_url='http://127.0.0.1:18766/v1/chat/completions';c.litellm_model='lucia-cloud-e2e';c.lucia_cloud_only=" + (process.env.LUCIA_E2E_CLOUD_COMPAT === '1' ? 'true' : 'false') + ";c.prefer_local_for_simple=" + (process.env.LUCIA_E2E_CLOUD_COMPAT === '1' ? 'false' : 'true') + ";c.domain_overrides={};await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaNativeEvents=[];for(const name of ['agent:plan','agent:stage','agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required'])await window.__TAURI__.event.listen(name,e=>window.__luciaNativeEvents.push({event:name,payload:e.payload}));return true})()");
+    await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');c.ollama_url=" + JSON.stringify(modelUrl) + ";c.ollama_model=" + JSON.stringify(chosenModel) + ";c.litellm_url='http://127.0.0.1:18766/v1/chat/completions';c.litellm_model='lucia-cloud-e2e';c.lucia_cloud_only=" + (process.env.LUCIA_E2E_CLOUD_COMPAT === '1' ? 'true' : 'false') + ";c.prefer_local_for_simple=" + (process.env.LUCIA_E2E_CLOUD_COMPAT === '1' ? 'false' : 'true') + ";c.domain_overrides={};await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaNativeEvents=[];for(const name of ['agent:plan','agent:stage','agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required','agent:observation'])await window.__TAURI__.event.listen(name,e=>window.__luciaNativeEvents.push({event:name,payload:e.payload}));return true})()");
     async function openLocal(path) {
       const url = base + path;
       await evaluate('window.browsphereApp.newTab(' + JSON.stringify(url) + ')');
@@ -149,7 +149,9 @@ async function main() {
       }));
       assert.equal(terminal.payload?.status,'completed','Agent run did not finish');
       assert.equal(report?.status,'evidence_checked','Missing independent evidence');
-      return {actions,report};
+      const observations = relevant.filter(x=>x.event==='agent:observation')
+        .map(x=>x.payload);
+      return {actions,report,observations};
     }
 
     // 0. Non-YouTube website: 160 navigation links precede the actual content.
@@ -232,6 +234,24 @@ async function main() {
     assert.ok(docsAfter?.text_excerpt?.includes('GENERIC_DOCS_CONFIRMED'),
       'Generic docs confirmation not observed');
     console.log('PASS native generic website with 180 navigation controls and Enter-only search');
+
+    const delayedInitial = await openLocal('/delayed-docs.html');
+    const delayed = await run(
+      'Load delayed documentation, then open the documentation result after it appears.',
+      delayedInitial,100
+    );
+    const delayedClicks = delayed.actions.filter(a=>a.type==='click' &&
+      ['ok','confirmed'].includes(a.outcome));
+    assert.equal(delayedClicks.length,2,
+      'Slow SPA task clicked a control more than once or failed to open the result');
+    assert.ok(delayed.observations.some(o=>o?.phase==='post_action' && o.changed===true),
+      'No observed page transition from the delayed action');
+    const delayedAfter = await evaluate(snapshotExpression);
+    assert.ok(delayedAfter.origin.includes('/delayed-docs.html?doc=ready'),
+      'Delayed result URL was not observed');
+    assert.ok(delayedAfter.text_excerpt.includes('DELAYED_DOCS_CONFIRMED'),
+      'Delayed result confirmation missing from live DOM');
+    console.log('PASS native delayed SPA updates: settled observation, two grounded clicks and evidence review');
 
     // 3. A cross-control form sequence using the same cloud action schema.
     const controlsInitial = await openLocal('/form-controls.html');

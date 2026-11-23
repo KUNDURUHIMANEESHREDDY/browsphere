@@ -75,6 +75,17 @@ function decideAction(prompt) {
         element_label:'Open keyboard dialog',is_submit:false});
     return reply({type:'scroll',delta_y:0});
   }
+  if (prompt.includes('Original user goal: Load delayed documentation')) {
+    if (page.includes('DELAYED_DOCS_CONFIRMED'))
+      return reply({type:'complete',summary:'Opened documentation after delayed update'});
+    if (has('Open delayed documentation'))
+      return reply({type:'click',node_id:has('Open delayed documentation').node_id,
+        element_label:'Open delayed documentation',is_submit:false});
+    if (has('Load delayed documentation'))
+      return reply({type:'click',node_id:has('Load delayed documentation').node_id,
+        element_label:'Load delayed documentation',is_submit:false});
+    return reply({type:'scroll',delta_y:0});
+  }
   if (page.includes('CONTROLS_FLOW_CONFIRMED')) {
     return reply({type:'complete',summary:'Observed full browser controls confirmation'});
   }
@@ -169,6 +180,11 @@ function verifyEvidence(payload) {
       claim:'Browser dropdown, checkbox, radio, switch and dialog workflow completed'
     },
     {
+      token:'DELAYED_DOCS_CONFIRMED',
+      quote:'DELAYED_DOCS_CONFIRMED. Opened documentation after delayed page update.',
+      claim:'Documentation opened after delayed page update'
+    },
+    {
       token:'GENERIC_DOCS_CONFIRMED',
       quote:'GENERIC_DOCS_CONFIRMED. API reference opened successfully after an Enter-key search.',
       claim:'API reference opened after autonomous documentation search'
@@ -249,6 +265,7 @@ function runFixture(req, res) {
   const exact = {
     '/multistep.html':'multistep.html',
     '/generic-search.html':'generic-search.html',
+    '/delayed-docs.html':'delayed-docs.html',
     '/recovery.html':'recovery.html',
     '/generic-controls.html':'generic-controls.html',
     '/generic-document.html':'generic-document.html',

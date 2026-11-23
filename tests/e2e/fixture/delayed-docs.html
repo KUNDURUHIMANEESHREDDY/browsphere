@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Delayed Documentation Lab</title>
+<style>
+body{font:16px system-ui;margin:30px auto;max-width:670px}
+main{padding:20px;background:#f3f3f3}
+button,a{display:block;margin:15px 0;padding:12px}
+</style>
+</head>
+<body>
+<main>
+<h1>Async Documentation Lab</h1>
+<p>Exercise slow SPA loading and page transition observation.</p>
+<button id="trigger" type="button">Load delayed documentation</button>
+<p id="status" role="status">Waiting for documentation update.</p>
+<a id="result" href="?doc=ready" hidden>Open delayed documentation</a>
+</main>
+<script>
+(function(){
+const trigger=document.getElementById('trigger');
+const result=document.getElementById('result');
+const status=document.getElementById('status');
+trigger.addEventListener('click',()=>{
+  trigger.disabled=true;
+  setTimeout(()=>{
+    trigger.hidden=true;
+    result.hidden=false;
+    status.textContent='Delayed documents are now available.';
+  },820);
+});
+result.addEventListener('click',event=>{
+  event.preventDefault();
+  history.pushState({},'',result.href);
+  result.hidden=true;
+  status.textContent='DELAYED_DOCS_CONFIRMED. Opened documentation after delayed page update.';
+});
+})();
+</script>
+</body>
+</html>
