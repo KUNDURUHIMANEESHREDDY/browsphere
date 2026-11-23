@@ -1,0 +1,62 @@
+name: Lucia Real Qwen Windows E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/lucia-real-qwen.yml'
+      - 'tests/e2e/run-lucia-real-qwen.ps1'
+      - 'tests/e2e/lucia-multistep-mock.cjs'
+  pull_request:
+    paths:
+      - 'src-tauri/src/agent/**'
+      - 'tests/e2e/**'
+      - '.github/workflows/lucia-real-qwen.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-real-qwen:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout application
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build UI assets
+        shell: pwsh
+        working-directory: ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build:css
+
+      - name: Build release Browsphere executable
+        run: cargo build --manifest-path src-tauri/Cargo.toml --locked --release
+
+      - name: Run actual Qwen 2.5 through native Windows WebView2
+        shell: pwsh
+        timeout-minutes: 30
+        run: ./tests/e2e/run-lucia-real-qwen.ps1
+
+      - name: Publish non-sensitive run summary
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "Real Qwen Windows E2E result is the conclusion of the previous step."
+          Write-Host "Fixtures and model are local to this ephemeral runner; no API keys are used."
+          Write-Host "A green deterministic model CI run alone does not certify Qwen/browser reliability."
