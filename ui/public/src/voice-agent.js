@@ -42,9 +42,12 @@
     if ((!state.voiceMode && !force) || state.listening) return false;
     let text = String(message || '').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0,850);
     if (!text) return false;
-    await stop();
-    const current=++state.turn;
+    const stopping = stop();
+    const current = state.turn;
+    await stopping;
+    if (current !== state.turn) return false;
     const cfg=await loadConfig();
+    if (current !== state.turn) return false;
     if (!cfg.speak_replies && !force) return false;
     status('Generating voice…');
     if (invoke) {
@@ -98,17 +101,19 @@
   function finishListening(text, target) {
     state.listening=false;
     for (const btn of document.querySelectorAll('[data-browsphere-voice-talk]')) {
-      btn.disabled = false;
+      btn.disabled = !!btn.form?.querySelector('button[type="submit"]')?.disabled;
       btn.setAttribute('aria-busy', 'false');
       btn.setAttribute('aria-label', 'Dictate and send a query');
     }
     const transcript=String(text||'').trim();
     if (!transcript) {status('No speech detected. Try again.');return;}
-    const form=target?.isConnected?target:
-      (document.getElementById('chatComposerForm')||document.getElementById('newTabChatForm'));
-    if (!form) return;
+    const form = target;
+    if (!form?.isConnected) {
+      status('Chat changed. Please dictate again.');
+      return;
+    }
     const input=form.querySelector('input:not([type=hidden]), textarea');
-    if (!input) return;
+    if (!input || input.disabled) return;
     input.value=transcript;
     status('You said: '+transcript.slice(0,75));
     // Use the exact existing chat/agent submission path and its policy approvals.
@@ -116,9 +121,10 @@
   }
   async function listenAndSend(form) {
     if (state.listening) return;
+    state.listening = true;
     await stop();
     // A microphone press only transcribes and submits a query; it never enables voice mode.
-    state.listening=true;status('Listening for a query…');
+    status('Listening for a query…');
     for (const b of document.querySelectorAll('[data-browsphere-voice-talk]')) {
       b.disabled = true;
       b.setAttribute('aria-busy','true');
@@ -250,26 +256,22 @@
       gear.style.cssText='border-radius:9px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#818ba3;cursor:pointer;';
       const submit=mainForm.querySelector('button[type="submit"]');
       if (submit) {
-        mainForm.insertBefore(gear,submit);
-        mainForm.insertBefore(agent,submit);
-        mainForm.insertBefore(mic,submit);
+        submit.before(gear, agent, mic);
+        mic.disabled = submit.disabled || state.listening;
         bindVoiceButtons(mainForm,mic,gear);
         bindAgentButton(agent);
       }
     }
   }
-  let lastHandled='';
   window.addEventListener('browsphere:assistant-text',e=>{
     if(!state.voiceMode)return;
     const message=String(e.detail?.text||'');
-    if(message===lastHandled)return;
-    lastHandled=message;
     speak(message);
   });
   function boot(){
     installButtons();
     const parent=byId('pageViewport');
-    if(parent){new MutationObserver(()=>installButtons()).observe(parent,{childList:true,subtree:false});}
+    if(parent){new MutationObserver(()=>installButtons()).observe(parent,{childList:true,subtree:true});}
     loadConfig();
   }
   if (document.readyState==='loading') document.addEventListener('DOMContentLoaded',boot,{once:true});else boot();
