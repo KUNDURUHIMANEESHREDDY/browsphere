@@ -56,8 +56,21 @@ async function main(){
     const modelStatus=await fetch('http://127.0.0.1:11434/api/tags',{signal:AbortSignal.timeout(3000)})
       .then(r=>r.json()).catch(()=>({models:[]}));
     const hasQwen=(modelStatus.models||[]).some(m=>['qwen2.5:3b-instruct'].includes(m.name||m.model));
-    console.log('MODEL_AVAILABLE',hasQwen?'qwen2.5:3b-instruct':'none');
-    await evalJs("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');c.prefer_local_for_simple=true;c.lucia_cloud_only=false;c.ollama_url='http://127.0.0.1:11434';c.ollama_model='qwen2.5:3b-instruct';c.domain_overrides={};await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__crossSiteEvents=[];for(const name of ['agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required','agent:stage'])await window.__TAURI__.event.listen(name,e=>window.__crossSiteEvents.push({kind:name,payload:e.payload}));return true})()");
+    const cloudEndpoint=process.env.LUCIA_TEST_CLOUD_ENDPOINT?.trim();
+    const cloudModel=process.env.LUCIA_TEST_CLOUD_MODEL?.trim();
+    if (Boolean(cloudEndpoint)!==Boolean(cloudModel)) throw Error('Cloud testing requires both endpoint and model');
+    const useCloud=Boolean(cloudEndpoint && cloudModel);
+    console.log('MODEL_ROUTE',useCloud ? 'cloud:'+new URL(cloudEndpoint).hostname :
+      (hasQwen ? 'local:qwen2.5:3b-instruct' : 'local:unavailable'));
+    const overrides=useCloud ? {
+      prefer_local_for_simple:false,lucia_cloud_only:true,
+      litellm_url:cloudEndpoint,litellm_model:cloudModel,domain_overrides:{}
+    } : {
+      prefer_local_for_simple:true,lucia_cloud_only:false,
+      ollama_url:'http://127.0.0.1:11434',ollama_model:'qwen2.5:3b-instruct',domain_overrides:{}
+    };
+    await evalJs("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');Object.assign(c,"+
+      JSON.stringify(overrides)+");await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__crossSiteEvents=[];for(const name of ['agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required','agent:stage'])await window.__TAURI__.event.listen(name,e=>window.__crossSiteEvents.push({kind:name,payload:e.payload}));return true})()");
     async function nativeState(){
       // A newly created WebView2 may not have a loaded native snapshot yet.
       // Treat absence as pending, never as a verified page or a JS exception.
@@ -84,7 +97,7 @@ async function main(){
         errors:mine.filter(e=>e.kind==='agent:run_error').map(e=>String(e.payload?.message||'').slice(0,150)),
         verified:mine.some(e=>e.kind==='agent:verification_report' && e.payload?.report?.status==='evidence_checked')};
     }
-    const cases=[
+    const cases=process.env.LUCIA_ONLY_WIKIPEDIA === '1' ? [] : [
       ['Example Domain','open example.com','example.com'],
       ['GitHub','open github.com','github.com'],
       ['Wikipedia','open wikipedia.org','wikipedia.org'],
@@ -107,7 +120,7 @@ async function main(){
           {status:task.status,actualWebView:actual,state,actions:task.actions,errors:task.errors,verified:task.verified});
       }catch(e){record(name+' autonomous open',false,{error:String(e)});}
     }
-    if(hasQwen){
+    if(useCloud || hasQwen){
       try {
         await evalJs("window.browsphereApp.newTab('https://en.wikipedia.org/wiki/Main_Page')");
         let before;
@@ -118,13 +131,18 @@ async function main(){
         }
         if(hostname(before?.observed)!=='en.wikipedia.org')throw Error('Wikipedia starting page unavailable');
         const task=await runTask('On this Wikipedia page, search for Ada Lovelace and open the corresponding article. Then report its page title.','https://en.wikipedia.org/wiki/Main_Page',140);
+        console.log('WIKIPEDIA_ACTION_TRACE', JSON.stringify({status:task.status,actions:task.actions,errors:task.errors,verified:task.verified}).slice(0,9000));
         const after=await nativeState();
+        const selectedRouteSeen=task.actions.some(action=>
+          useCloud ? /(?:^|\s\/\s)(?:groq|litellm):/.test(action.modelRoute||'') :
+            /(?:^|\s\/\s)ollama:/.test(action.modelRoute||''));
         record('Wikipedia real-model search and article',task.status==='completed' &&
           hostname(after.observed)==='en.wikipedia.org' &&
           decodeURIComponent(new URL(after.observed).pathname).toLowerCase().includes('ada_lovelace') &&
-          task.verified,{status:task.status,before,after,actions:task.actions,errors:task.errors,verified:task.verified});
+          task.verified && selectedRouteSeen,
+          {status:task.status,before,after,selectedRouteSeen,actions:task.actions,errors:task.errors,verified:task.verified});
       }catch(e){record('Wikipedia real-model search and article',false,{error:String(e)});}
-    }else record('Wikipedia real-model search and article',false,{reason:'Local Qwen unavailable; no genuine model call attempted'});
+    }else record('Wikipedia real-model search and article',false,{reason:'No configured live model available; no genuine model call attempted'});
   }finally{close();}
   console.log('CROSS_SITE_RESULT',JSON.stringify({passed:result.filter(x=>x.success).length,total:result.length,results:result.map(x=>({name:x.name,success:x.success}))}));
   if(result.some(x=>!x.success))process.exitCode=1;

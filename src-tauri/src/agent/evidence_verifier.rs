@@ -129,7 +129,17 @@ pub fn check_model_verification(
 pub fn check_navigation_result(requested: &str, after: &DomSnapshot) -> Result<(), String> {
     let target = web_url(requested).ok_or("Invalid navigation target")?;
     let actual = web_url(&after.origin).ok_or("Destination has not loaded")?;
-    if target.origin() != actual.origin()
+    // Many public homepages canonicalize a bare host to its www subdomain.
+    // Accept only that exact www/no-www alias with the same scheme, port,
+    // path and query. Do not accept unrelated redirects or lookalike domains.
+    fn normalize_www(host: &str) -> &str {
+        host.strip_prefix("www.").unwrap_or(host)
+    }
+    let same_origin = target.scheme() == actual.scheme()
+        && target.port_or_known_default() == actual.port_or_known_default()
+        && target.host_str().zip(actual.host_str()).is_some_and(|(wanted, got)|
+            normalize_www(wanted) == normalize_www(got));
+    if !same_origin
         || target.path().trim_end_matches('/') != actual.path().trim_end_matches('/')
         || target.query() != actual.query() {
         return Err(format!("Opened {actual}, not the requested destination {target}"));
@@ -152,6 +162,71 @@ pub fn check_navigation_result(requested: &str, after: &DomSnapshot) -> Result<(
     Ok(())
 }
 
+
+/// A deliberately narrow, site-independent result-title request:
+/// "search for X and open ... report its page title". No broad search or
+/// research task can take this deterministic completion path.
+pub fn requested_named_result_title(goal: &str) -> Option<String> {
+    let lowered = goal.to_lowercase();
+    if !lowered.contains("report") || !lowered.contains("title") {
+        return None;
+    }
+    let begin = lowered.find("search for ")? + "search for ".len();
+    let rest = goal.get(begin..)?;
+    let end = rest.to_lowercase().find(" and open")?;
+    let subject = rest.get(..end)?.trim();
+    if !(3..=100).contains(&subject.chars().count()) ||
+        !subject.chars().any(char::is_alphanumeric) {
+        return None;
+    }
+    Some(subject.to_string())
+}
+
+/// A machine-observed URL, page title, and a matching saved WebView snapshot
+/// prove only that a named page was opened and its title was read, NOT the
+/// correctness of the page's claims. Callers must also require an executed
+/// real browser action before using this verification path.
+pub fn verify_observed_named_result_title(
+    goal: &str,
+    starting_origin: &str,
+    after: &DomSnapshot,
+    observations: &[SourceEvidence],
+) -> Result<VerificationReport, String> {
+    let wanted = requested_named_result_title(goal)
+        .ok_or("Not a narrow named-result page-title request")?;
+    let url = web_url(&after.origin).ok_or("Opened page has no valid web URL")?;
+    if after.origin == starting_origin {
+        return Err("The requested result page has not been opened".into());
+    }
+    let expected = normalized(&wanted);
+    let title = normalized(&after.title);
+    let last_path = url.path_segments().and_then(|mut parts| parts.next_back())
+        .ok_or("The destination has no named article path")?
+        .replace('_', " ").replace('-', " ");
+    let slug = normalized(&last_path);
+    if !title.starts_with(&expected) ||
+        !slug.contains(&expected) ||
+        title.contains("search results") || title.contains("search for") ||
+        after.text_excerpt.trim().chars().count() < 40 {
+        return Err("The observed title and article path do not match the requested result".into());
+    }
+    if !observations.iter().any(|record|
+        record.url == after.origin && record.title == after.title &&
+            !record.excerpt.trim().is_empty())
+    {
+        return Err("No independently saved live WebView evidence for the result page".into());
+    }
+    Ok(VerificationReport {
+        status: "evidence_checked",
+        summary: format!("Opened a page titled {}.", after.title.trim()),
+        findings: vec![GroundedFinding {
+            claim: "The named result page was opened in the browser".into(),
+            url: after.origin.clone(),
+            quote: format!("Observed document title: {}", after.title.trim()),
+        }],
+        limitations: "This verifies the observed page URL and title only; it does not fact-check webpage claims.".into(),
+    })
+}
 
 /// A deterministic verifier is more reliable than an LLM quote-generation pass
 /// for the narrow task of opening an explicitly named website.
@@ -351,6 +426,63 @@ mod tests {
         assert!(verify_direct_navigation("https://www.youtube.com/", &DomSnapshot {
             title: "This site can't be reached".into(), text_excerpt: "".into(), ..snapshot
         }).is_err());
+    }
+
+    #[test]
+    fn canonical_www_redirect_needs_exact_host_path_and_page_evidence() {
+        let loaded = dom("https://www.wikipedia.org/",
+            "Wikipedia homepage with language choices and search.");
+        assert!(check_navigation_result("https://wikipedia.org/", &loaded).is_ok());
+        assert!(check_navigation_result("https://www.wikipedia.org/", &dom(
+            "https://wikipedia.org/", "Wikipedia homepage with search.")).is_ok());
+        assert!(check_navigation_result("https://wikipedia.org/", &dom(
+            "https://www.wikipedia.org.evil.test/", "A fake homepage.")).is_err());
+        assert!(check_navigation_result("https://wikipedia.org/", &dom(
+            "https://wiki.pedia.org/", "A different homepage.")).is_err());
+        assert!(check_navigation_result("https://wikipedia.org/", &dom(
+            "http://www.wikipedia.org/", "Insecure redirected homepage.")).is_err());
+        assert!(check_navigation_result("https://wikipedia.org/article", &loaded).is_err());
+        let mut empty = loaded.clone();
+        empty.title.clear();
+        empty.text_excerpt.clear();
+        assert!(check_navigation_result("https://wikipedia.org/", &empty).is_err());
+    }
+
+    #[test]
+    fn named_search_result_title_requires_new_matching_article_and_source() {
+        let goal = "On this documentation site, search for Ada Lovelace and open the corresponding article. Then report its page title.";
+        assert_eq!(requested_named_result_title(goal).as_deref(), Some("Ada Lovelace"));
+        assert!(requested_named_result_title("Search for Ada Lovelace and compare biographies").is_none());
+        let start = "https://en.wikipedia.org/wiki/Main_Page";
+        let article = DomSnapshot {
+            origin: "https://en.wikipedia.org/wiki/Ada_Lovelace".into(),
+            title: "Ada Lovelace - Wikipedia".into(),
+            text_excerpt: "Ada Lovelace was a mathematician. This is an observed example article page with more visible text.".into(),
+            interactive_nodes: vec![],
+        };
+        let sources = vec![SourceEvidence {
+            url: article.origin.clone(),
+            title: article.title.clone(),
+            excerpt: article.text_excerpt.clone(),
+        }];
+        let report = verify_observed_named_result_title(goal, start, &article, &sources).unwrap();
+        assert_eq!(report.status, "evidence_checked");
+        assert_eq!(report.findings[0].url, article.origin);
+        assert!(report.limitations.contains("not fact-check"));
+        assert!(verify_observed_named_result_title(goal, start, &article, &[]).is_err());
+        assert!(verify_observed_named_result_title(goal, article.origin.as_str(), &article, &sources).is_err());
+        let search_listing = DomSnapshot {
+            origin: "https://en.wikipedia.org/w/index.php?search=Ada_Lovelace".into(),
+            title: "Ada Lovelace - Search results".into(),
+            ..article.clone()
+        };
+        assert!(verify_observed_named_result_title(goal, start, &search_listing, &sources).is_err());
+        let other = DomSnapshot {
+            origin: "https://en.wikipedia.org/wiki/Other".into(),
+            title: "Other - Wikipedia".into(),
+            ..article
+        };
+        assert!(verify_observed_named_result_title(goal, start, &other, &sources).is_err());
     }
 
     #[test]

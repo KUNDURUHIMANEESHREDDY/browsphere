@@ -12,7 +12,8 @@ use crate::agent::memory::{can_classify_preference, infer_memories, preference_f
 use crate::agent::orchestrator::{plan_task, Orchestrator, Specialist};
 use crate::agent::evidence_verifier::{
     check_navigation_result, check_submission_result, requires_post_action_check,
-    verify_direct_navigation, verify_observed_youtube_first_result, VerificationReport,
+    verify_direct_navigation, verify_observed_youtube_first_result,
+    verify_observed_named_result_title, requested_named_result_title, VerificationReport,
 };
 use crate::agent::dom_extractor::{request_live_dom_snapshot, DomSnapshot};
 use crate::agent::policy::{
@@ -211,6 +212,15 @@ fn rebind_unambiguous_live_control(
         }
         _ => false,
     }
+}
+
+/// Exactly one model replan is permitted after an invalid live DOM binding.
+fn should_replan_invalid_control(route: &str, action: &BrowserAction) -> bool {
+    let model_selected = ["ollama:", "litellm:", "groq:", "bedrock:"]
+        .iter().any(|prefix| route.starts_with(prefix));
+    model_selected && matches!(action,
+        BrowserAction::Click { .. } | BrowserAction::TypeText { .. } |
+        BrowserAction::PressKey { .. } | BrowserAction::SelectOption { .. })
 }
 
 /// Opening a named search site from a blank tab is a directly authorized
@@ -839,6 +849,28 @@ pub async fn run_react_loop(
         orchestrator.observe(&snapshot);
         let freshly_observed = true;
 
+        // WebView2 may acknowledge a navigation before the destination renders.
+        // Poll only the already-dispatched URL, using fresh native observations.
+        // This avoids spending a model call while the browser is still loading.
+        // Never dispatch the same URL again and never infer success from a timer.
+        if let Some(target) = pending_direct_navigation.as_ref() {
+            if !delayed_navigation_is_verified(target, &snapshot) {
+                for _ in 0..4 {
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Ok("cancelled".into()),
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(700)) => {}
+                    }
+                    if let Some(next) = request_live_dom_snapshot(
+                        &app, &webview_label, &pending_snapshots, 1800
+                    ).await {
+                        snapshot = next;
+                        orchestrator.observe(&snapshot);
+                        if delayed_navigation_is_verified(target, &snapshot) { break; }
+                    }
+                }
+            }
+        }
+
         if freshly_observed {
             if let Some(target) = pending_direct_navigation.as_ref() {
                 if delayed_navigation_is_verified(target, &snapshot) {
@@ -895,7 +927,7 @@ pub async fn run_react_loop(
         // The verification specialist is read-only. It always requests the
         // independent evidence gate rather than asking an action model to
         // decide whether to browse more or produce an unsupported claim.
-        let (thought, mut action, mut model_route) =
+        let (mut thought, mut action, mut model_route) =
             if orchestrator.specialist() == Specialist::Verification {
                 (
                     "Request independent read-only source verification".to_string(),
@@ -923,6 +955,28 @@ pub async fn run_react_loop(
                         summary: "Observed requested video result on a real YouTube watch page".into(),
                     },
                     "observed_video:verified_stage_handoff".to_string(),
+                )
+            } else if freshly_observed
+                && !last_action_failed
+                && matches!(orchestrator.specialist(), Specialist::Browser | Specialist::Research)
+                && recorded_steps.iter().any(|step|
+                    matches!(step, BrowserAction::Click { is_submit: false, .. }))
+                && orchestrator.can_complete(&snapshot).is_ok()
+                && verify_observed_named_result_title(
+                    &goal, &initial_origin, &snapshot, &orchestrator.evidence
+                ).is_ok()
+            {
+                // For the narrow request "search for [name] and open its page;
+                // report the page title", a real click followed by an observed
+                // title+URL match can advance the stage. This is NOT a claim
+                // that the page's content is true. The independent verifier
+                // runs next; other research tasks still use model decisions.
+                (
+                    "The requested named page is visibly open; check its title independently".into(),
+                    BrowserAction::Complete {
+                        summary: "Observed named result page and title; request independent verification".into()
+                    },
+                    "observed_result_title:grounded_stage_handoff".into(),
                 )
             } else if freshly_observed
                 && orchestrator.specialist() == Specialist::Browser
@@ -1022,6 +1076,46 @@ pub async fn run_react_loop(
         }
         let mut action_binding_error =
             bind_action_to_live_dom(&mut action, &snapshot, freshly_observed).err();
+
+        if freshly_observed && action_binding_error.is_some()
+            && should_replan_invalid_control(&model_route, &action)
+        {
+            // The first model response was not executed. Allow one bounded
+            // replan on the SAME freshly observed page, then run the native
+            // binder and policy gate again. Never turn a failed action into
+            // success just because a model claims it is safe.
+            let reason = action_binding_error.as_deref().unwrap_or("invalid control");
+            let repair_prompt = format!(
+                "Previous action outcomes: Native WebView rejected a proposed control: {}. \
+                 Select a DIFFERENT action using an exact currently observed node_id. \
+                 The page has not changed and the previous action did NOT execute.\n{}",
+                reason.chars().take(160).collect::<String>(),
+                prompt_payload
+            );
+            let selected = router.lock().await.clone();
+            let timeout_secs = if selected.get_config().prefer_local_for_simple &&
+                !selected.get_config().lucia_cloud_only { 90 } else { 45 };
+            let retry = tokio::select! {
+                _ = cancel.cancelled() => return Ok("cancelled".into()),
+                result = tokio::time::timeout(
+                    std::time::Duration::from_secs(timeout_secs),
+                    selected.propose_specialist_action(
+                        &snapshot.origin, &repair_prompt,
+                        orchestrator.specialist().instructions(), &creds, voice_mode)
+                ) => result
+            };
+            if let Ok(Ok((new_thought, mut candidate, new_route))) = retry {
+                let _ = rebind_unambiguous_live_control(&mut candidate, &snapshot, &goal);
+                if should_replan_invalid_control(&new_route, &candidate)
+                    && bind_action_to_live_dom(&mut candidate, &snapshot, true).is_ok()
+                {
+                    thought = new_thought;
+                    action = candidate;
+                    model_route = format!("{new_route} / fresh_dom_replan");
+                    action_binding_error = None;
+                }
+            }
+        }
 
         let observed_clicked_watch_url = if model_route.starts_with("first_video_result:observed_dom") {
             match &action {
@@ -1166,6 +1260,18 @@ pub async fn run_react_loop(
                     let result = if let Some(target) = requested_navigation_url(&goal) {
                         verify_direct_navigation(target.as_str(), &snapshot)
                             .map_err(anyhow::Error::msg)
+                    } else if requested_named_result_title(&goal).is_some() {
+                        // Narrow title-only workflow; do not let a model
+                        // invent an article title, URL, or result click.
+                        if !recorded_steps.iter().any(|step|
+                            matches!(step, BrowserAction::Click { is_submit: false, .. }))
+                        {
+                            Err(anyhow::anyhow!("No observed result click occurred"))
+                        } else {
+                            verify_observed_named_result_title(
+                                &goal, &initial_origin, &snapshot, &orchestrator.evidence
+                            ).map_err(anyhow::Error::msg)
+                        }
                     } else if goal.to_ascii_lowercase().starts_with("search youtube for ")
                         && goal.to_ascii_lowercase().contains(" and open the first video result")
                         && recorded_steps.iter().any(|step| matches!(step, BrowserAction::Click { .. }))
@@ -1301,9 +1407,9 @@ pub async fn run_react_loop(
 
         if !ok && navigation_dispatched {
             if let BrowserAction::Navigate { url } = &action {
-                if requested_navigation_url(&goal).is_some_and(|expected| expected.as_str() == url) {
-                    pending_direct_navigation = Some(url.clone());
-                }
+                // Applies to model-selected links too, not only named-site
+                // commands. Recovery still requires the exact observed URL.
+                pending_direct_navigation = Some(url.clone());
             }
         }
 
@@ -1509,6 +1615,21 @@ pub async fn run_react_loop(
 #[cfg(test)]
 mod production_safety_tests {
     use super::*;
+
+    #[test]
+    fn invalid_model_control_can_replan_only_before_execution() {
+        let click = BrowserAction::Click {
+            node_id: "missing".into(), element_label: "Search".into(),
+            is_submit: false,
+        };
+        assert!(should_replan_invalid_control("ollama:qwen2.5", &click));
+        assert!(should_replan_invalid_control("litellm:cloud-model", &click));
+        assert!(!should_replan_invalid_control("direct_navigation:trusted_user_goal", &click));
+        assert!(!should_replan_invalid_control("verification:read_only",
+            &BrowserAction::Complete { summary: "Evidence only".into() }));
+        assert!(!should_replan_invalid_control("groq:cloud-model",
+            &BrowserAction::Navigate { url: "https://example.org".into() }));
+    }
 
     #[test]
     fn delayed_navigation_requires_a_loaded_exact_native_document() {

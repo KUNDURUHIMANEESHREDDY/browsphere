@@ -105,9 +105,17 @@ try {
     const valid = new URL(page.url).host === expectedHost && page.title.trim().length > 0 &&
       (page.ready !== 'loading' || page.headings > 0);
     record(label + ' real WebView2 navigation', valid, {url:match.url.slice(0,100),...page});
-    const chrome = await main.evaluate('({url:window.browsphereApp.activeTab().url,bar:document.getElementById("omnibarInput").value})');
-    record(label + ' address bar sync', new URL(chrome.url).host === new URL(url).host &&
-      chrome.bar.includes(new URL(url).host), chrome);
+    let chrome, synchronized = false;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      chrome = await main.evaluate('({url:window.browsphereApp.activeTab().url,bar:document.getElementById("omnibarInput").value})');
+      synchronized = new URL(chrome.url).host === new URL(url).host &&
+        chrome.bar.includes(new URL(url).host);
+      if (synchronized) break;
+      // The child document can be ready before the main-tab navigation event
+      // updates the visible address bar. Require convergence, not instant sync.
+      await sleep(300);
+    }
+    record(label + ' address bar sync', synchronized, chrome);
   }
 
   await main.evaluate('window.browsphereApp.navigate("https://example.com/")');

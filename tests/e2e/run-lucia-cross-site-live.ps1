@@ -1,12 +1,26 @@
 # Real public-site Lucia/browser tests against the current compiled native app.
 # Runs with a disposable WebView2 profile; never uses personal browser credentials.
-param([string]$ExecutablePath = "", [int]$CdpPort = 9391, [switch]$OnlyCompatibility)
+param([string]$ExecutablePath = "", [int]$CdpPort = 9391, [switch]$OnlyCompatibility, [switch]$OnlyWikipedia, [switch]$UseSavedCloud)
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $ExecutablePath) {
-    $ExecutablePath = Join-Path $env:TEMP "browsphere-native-cross-site-build\release\browsphere-core.exe"
+    $localRelease = Join-Path $root "target\release\browsphere-core.exe"
+    $ExecutablePath = if (Test-Path $localRelease) { $localRelease } else {
+        Join-Path $env:TEMP "browsphere-native-cross-site-build\release\browsphere-core.exe"
+    }
 }
 if (-not (Test-Path $ExecutablePath)) { throw "Executable missing: $ExecutablePath" }
+if ($UseSavedCloud) {
+    # Only copy the public endpoint and model name from saved app settings.
+    # The app reads the provider credential itself from Windows Credential Manager.
+    $savedDb = Join-Path $env:LOCALAPPDATA "BrowsphereAI\Browsphere.sqlite"
+    if (-not (Test-Path $savedDb)) { throw "Saved Browsphere cloud settings not found" }
+    $values = & python (Join-Path $PSScriptRoot "read-saved-cloud-settings.py") $savedDb | ConvertFrom-Json
+    if (-not $values.endpoint -or -not $values.model) { throw "Cloud endpoint/model are not configured" }
+    $env:LUCIA_TEST_CLOUD_ENDPOINT = [string]$values.endpoint
+    $env:LUCIA_TEST_CLOUD_MODEL = [string]$values.model
+    Write-Host "Using saved cloud model with disposable browser profile (API key is never copied)"
+}
 $profile = Join-Path $env:TEMP ("browsphere-cross-site-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force (Join-Path $profile "Roaming"),(Join-Path $profile "Local"),(Join-Path $profile "WebView2") | Out-Null
 $env:APPDATA = Join-Path $profile "Roaming"
@@ -29,9 +43,13 @@ try {
     }
     if (-not $ready) { throw "Native app did not expose an isolated WebView2 CDP target" }
     Set-Location $root
-    Write-Host "=== Real-site WebView2 compatibility ==="
-    & node (Join-Path $root "tests\e2e\browser-compat.mjs")
-    $compatExit=$LASTEXITCODE
+    $compatExit=0
+    if (-not $OnlyWikipedia) {
+        Write-Host "=== Real-site WebView2 compatibility ==="
+        & node (Join-Path $root "tests\e2e\browser-compat.mjs")
+        $compatExit=$LASTEXITCODE
+    }
+    if ($OnlyWikipedia) { $env:LUCIA_ONLY_WIKIPEDIA="1" }
     Write-Host "WEB_COMPAT_EXIT=$compatExit"
     if ($OnlyCompatibility) {
         if ($compatExit -ne 0) { exit 1 }
@@ -48,5 +66,8 @@ try {
     if ($app) { Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue }
     Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
     Remove-Item Env:WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
+    Remove-Item Env:LUCIA_ONLY_WIKIPEDIA -ErrorAction SilentlyContinue
+    Remove-Item Env:LUCIA_TEST_CLOUD_ENDPOINT -ErrorAction SilentlyContinue
+    Remove-Item Env:LUCIA_TEST_CLOUD_MODEL -ErrorAction SilentlyContinue
     Write-Host "Closed isolated Browsphere test instance"
 }
