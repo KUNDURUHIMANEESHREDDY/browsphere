@@ -2055,6 +2055,29 @@ async fn ask_main_tab_ai(
     result
 }
 
+fn is_ninerouter_gateway_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = url::Url::parse(endpoint) else { return false };
+    if url.path() != "/v1/chat/completions" { return false; }
+    (url.host_str() == Some("9router.com") && url.scheme() == "https")
+        || (matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+            && url.scheme() == "http" && url.port() == Some(20128))
+}
+
+#[cfg(test)]
+mod ninerouter_gateway_detection_tests {
+    use super::is_ninerouter_gateway_endpoint;
+    #[test]
+    fn accepts_exact_ninerouter_gateway_endpoints_only() {
+        assert!(is_ninerouter_gateway_endpoint("http://127.0.0.1:20128/v1/chat/completions"));
+        assert!(is_ninerouter_gateway_endpoint("http://localhost:20128/v1/chat/completions"));
+        assert!(is_ninerouter_gateway_endpoint("https://9router.com/v1/chat/completions"));
+        assert!(!is_ninerouter_gateway_endpoint("https://9router.com.evil.test/v1/chat/completions"));
+        assert!(!is_ninerouter_gateway_endpoint("http://9router.com/v1/chat/completions"));
+        assert!(!is_ninerouter_gateway_endpoint("http://127.0.0.1:20129/v1/chat/completions"));
+        assert!(!is_ninerouter_gateway_endpoint("http://127.0.0.1:20128/other"));
+    }
+}
+
 #[derive(Serialize)]
 struct CloudModelsResult {
     endpoint: String,
@@ -2078,9 +2101,14 @@ async fn fetch_cloud_models(
         return Err("Provider changed while fetching models. Try Fetch Models again.".into());
     }
     config.cloud_model_catalogs.insert(endpoint.clone(), models.clone());
-    if !models.contains(&config.litellm_model) {
+    if !models.contains(&config.litellm_model)
+        && !is_ninerouter_gateway_endpoint(&endpoint)
+    {
         config.litellm_model = models[0].clone();
     }
+    // 9Router frequently exposes combo aliases first (including "all").
+    // Never silently select those because a combo might use a paid provider.
+    // The user chooses an explicit model in the fetched-model dropdown.
     // Persist only model IDs and public endpoint data. Secrets stay in Credential Manager.
     state.db.lock().await.save_router_config(&config).map_err(|e| e.to_string())?;
     state.router.lock().await.update_config(config.clone());

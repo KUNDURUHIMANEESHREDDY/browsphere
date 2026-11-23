@@ -6,6 +6,10 @@ use url::Url;
 use crate::agent::policy::BrowserAction;
 use crate::aws::{self, AwsConfig};
 use crate::storage::credentials::CredentialStore;
+/// Sentinel for an explicitly unselected 9Router provider model. Never infer
+/// a model from advertised combo ordering or make paid calls by default.
+pub const NINEROUTER_MODEL_UNSELECTED: &str = "9router/select-model";
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatTurn {
@@ -168,6 +172,14 @@ impl ModelRouter {
         self.config.prefer_local_for_simple && !self.config.lucia_cloud_only
     }
 
+    fn ensure_cloud_model_selected(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.config.litellm_model != NINEROUTER_MODEL_UNSELECTED,
+            "Choose a 9Router model from Fetch Models in Settings > AI & ML before sending requests. Nothing was sent."
+        );
+        Ok(())
+    }
+
     pub fn update_aws_config(&mut self, config: AwsConfig) { self.aws = config; }
 
     pub fn update_config(&mut self, config: RouterConfig) {
@@ -237,6 +249,7 @@ impl ModelRouter {
                 return Ok(format!("Amazon Bedrock model {} responded: {}", self.aws.bedrock_model,
                     answer.chars().take(100).collect::<String>()));
             }
+            self.ensure_cloud_model_selected()?;
             let mut req = client.post(&self.config.litellm_url).json(&json!({
                 "model": self.config.litellm_model,
                 "messages": [{"role":"user","content":"Respond with the word ready."}],
@@ -330,6 +343,7 @@ User text: <text>{}</text>"#,
             if self.aws.bedrock_enabled {
                 return aws::converse_with_system(&self.aws, system_prompt, user_text).await;
             }
+            self.ensure_cloud_model_selected()?;
             let endpoint = Url::parse(&self.config.litellm_url)?;
             let local = matches!(endpoint.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
             anyhow::ensure!(endpoint.scheme() == "https" || (local && endpoint.scheme() == "http"),
@@ -453,6 +467,7 @@ Rules: quote a real sentence fragment from one of the provided observed_web_page
                 .unwrap_or("").trim().to_string();
             (answer, self.config.ollama_model.clone(), "Ollama".to_string())
         } else {
+            self.ensure_cloud_model_selected()?;
             let endpoint = Url::parse(&self.config.litellm_url)?;
             let is_loopback = matches!(endpoint.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
             let key = self.get_provider_api_key(creds)?.filter(|s| !s.is_empty());
@@ -572,6 +587,7 @@ Rules: quote a real sentence fragment from one of the provided observed_web_page
             anyhow::bail!("Bedrock did not produce a valid browser action");
         }
 
+        self.ensure_cloud_model_selected()?;
         let is_groq = is_groq_endpoint(&self.config.litellm_url);
         let route_label = format!(
             "{}:{}",
@@ -702,6 +718,36 @@ Example: {{"thought":"Visit the website requested by the user","action":{{"type"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires a running local 9Router gateway; GET /v1/models only, no inference"]
+    async fn local_ninerouter_model_catalog_is_reachable_without_inference() {
+        let mut cfg = RouterConfig::default();
+        cfg.litellm_url = "http://127.0.0.1:20128/v1/chat/completions".into();
+        cfg.litellm_model = NINEROUTER_MODEL_UNSELECTED.into();
+        let router = ModelRouter::new(cfg);
+        let creds = CredentialStore::new("browsphere-ninerouter-local-catalog-smoke");
+        let models = router.fetch_provider_models(&creds).await
+            .expect("9Router /v1/models should return OpenAI-compatible model IDs");
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|id| !id.trim().is_empty()));
+        println!("Fetched {} 9Router model IDs without inference", models.len());
+    }
+
+    #[test]
+    fn unselected_ninerouter_model_never_reaches_model_inference() {
+        let mut cfg = RouterConfig::default();
+        cfg.litellm_url = "http://127.0.0.1:20128/v1/chat/completions".into();
+        cfg.litellm_model = NINEROUTER_MODEL_UNSELECTED.into();
+        cfg.lucia_cloud_only = true;
+        let router = ModelRouter::new(cfg);
+        assert!(router.ensure_cloud_model_selected().unwrap_err().to_string()
+            .contains("Choose a 9Router model"));
+        let mut selected = router.get_config();
+        selected.litellm_model = "oc/mimo-v2.6-flash-free".into();
+        let router = ModelRouter::new(selected);
+        assert!(router.ensure_cloud_model_selected().is_ok());
+    }
 
     #[test]
     fn lucia_cloud_only_is_opt_in_and_overrides_local_domain_rules() {

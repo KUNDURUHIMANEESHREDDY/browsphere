@@ -14,14 +14,14 @@ vm.runInNewContext(
 const presets = window.browsphereCloudPresets;
 assert.ok(presets && Object.isFrozen(presets), 'Shared provider presets were not loaded');
 assert.deepEqual(Array.from(presets.ninerouter_local), [
-  'http://127.0.0.1:20128/v1/chat/completions', 'cc/claude-sonnet-4-6'
+  'http://127.0.0.1:20128/v1/chat/completions', '9router/select-model'
 ]);
 assert.deepEqual(Array.from(presets.ninerouter_cloud), [
-  'https://9router.com/v1/chat/completions', 'cc/claude-sonnet-4-6'
+  'https://9router.com/v1/chat/completions', '9router/select-model'
 ]);
 const render = endpoint => window.renderMacAiPreferences({
   config: {
-    litellm_url: endpoint, litellm_model: 'cc/claude-sonnet-4-6',
+    litellm_url: endpoint, litellm_model: '9router/select-model',
     prefer_local_for_simple: false, lucia_cloud_only: true
   },
   localModels: [], hasKey: false
@@ -35,7 +35,10 @@ assert.match(cloudHtml, /id="cfgLiteLlmUrl"[^>]*https:\/\/9router\.com\/v1\/chat
 assert.ok(localHtml.includes('Fetch Models'));
 assert.ok(localHtml.includes('Test Lucia reasoning'));
 assert.ok(localHtml.includes('cfgLuciaCloudOnly'));
-assert.ok(localHtml.includes('example model ID'));
+assert.ok(localHtml.includes('No model is selected yet'));
+assert.ok(localHtml.includes('Fetch Models, then choose a model'));
+assert.ok(!localHtml.includes('id="cfgLiteLlmModel" type="text" value="9router/select-model"'));
+assert.ok(!localHtml.includes('cc/claude-sonnet-4-6'));
 assert.ok(render('https://9router.com.evil.test/v1/chat/completions')
   .includes('<option value="custom" selected>Custom / LiteLLM</option>'),
   'Do not treat a lookalike domain as 9Router Cloud');

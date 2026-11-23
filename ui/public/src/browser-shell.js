@@ -3786,7 +3786,11 @@
           ollama_url: (document.getElementById('cfgOllamaUrl')?.value || '').trim() || 'http://127.0.0.1:11434',
           ollama_model: (document.getElementById('cfgOllamaModel')?.value || '').trim() || 'qwen3.5:4b',
           litellm_url: (document.getElementById('cfgLiteLlmUrl')?.value || '').trim() || 'http://127.0.0.1:4000/v1/chat/completions',
-          litellm_model: (document.getElementById('cfgLiteLlmModel')?.value || '').trim() || 'gpt-4o-mini',
+          litellm_model: (document.getElementById('cfgLiteLlmModel')?.value || '').trim() ||
+            (Object.values(window.browsphereCloudPresets || {}).some(function (preset) {
+              return preset[0] === (document.getElementById('cfgLiteLlmUrl')?.value || '').trim()
+                && preset[1] === '9router/select-model';
+            }) ? '9router/select-model' : 'gpt-4o-mini'),
           litellm_api_key: (document.getElementById('cfgLiteLlmKey')?.value || '').trim() || null,
           domain_overrides: Object.assign({}, nativeRouterConfig.domain_overrides || {}),
           prefer_local_for_simple: Boolean(document.getElementById('cfgPreferLocal')?.checked),
@@ -3860,7 +3864,7 @@
           nativeHasLiteLlmKey = await window.aetherBridge.hasLiteLlmKey();
           updateSidebarAiEngine();
           if (activeSettingsPane === 'ai') renderSettingsPane();
-          showCloudFetchStatus(result.models.length + ' models fetched and saved. Select one below.');
+          showCloudFetchStatus(result.models.length + ' models fetched and saved. Select a model below to activate it.');
           showModelTestStatus('Fetched ' + result.models.length + ' model IDs from this provider. Run Test cloud connection to verify the selected model.');
           showHudToast(result.models.length + ' cloud models saved');
         } catch (err) {

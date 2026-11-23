@@ -32,8 +32,8 @@
     openai: ['https://api.openai.com/v1/chat/completions', 'gpt-4o-mini'],
     groq: ['https://api.groq.com/openai/v1/chat/completions', 'llama-3.3-70b-versatile'],
     openrouter: ['https://openrouter.ai/api/v1/chat/completions', 'openai/gpt-4o-mini'],
-    ninerouter_local: ['http://127.0.0.1:20128/v1/chat/completions', 'cc/claude-sonnet-4-6'],
-    ninerouter_cloud: ['https://9router.com/v1/chat/completions', 'cc/claude-sonnet-4-6']
+    ninerouter_local: ['http://127.0.0.1:20128/v1/chat/completions', '9router/select-model'],
+    ninerouter_cloud: ['https://9router.com/v1/chat/completions', '9router/select-model']
   });
   function providerOf(url) {
     try {
@@ -82,13 +82,14 @@
     var suggestions = cloudModels.length ? cloudModels :
       (is9Router ? [] : ['gpt-4o-mini', 'gpt-4.1-mini', 'llama-3.3-70b-versatile', 'openai/gpt-4o-mini']);
     var cloudModel = '<div style="width:100%;max-width:360px">' +
-      input('cfgLiteLlmModel', cfg.litellm_model, 'Choose a model ID') +
+      input('cfgLiteLlmModel', cfg.litellm_model === '9router/select-model' ? '' : cfg.litellm_model,
+        is9Router ? 'Fetch Models, then choose a model' : 'Choose a model ID') +
       '<datalist id="cfgCloudModels">' + suggestions.map(function (id) {
         return '<option value="' + esc(id) + '"></option>';
       }).join('') + '</datalist>' +
       '<div class="mac-ai-model-hint">' +
       (cloudModels.length ? cloudModels.length + ' models fetched for this provider' :
-        is9Router ? 'This is an example model ID. Start/configure 9Router, then Fetch Models and select one actually available to your account.' :
+        is9Router ? 'No model is selected yet. Click Fetch Models, then explicitly choose a model. Some combos may use paid providers.' :
         'Enter a model ID or fetch the provider\'s available models below.') +
       '</div></div>';
     // Link custom model inputs to their suggestions without hiding user-entered IDs.
