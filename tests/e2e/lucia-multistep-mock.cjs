@@ -135,6 +135,11 @@ async function main() {
     const generic = await openLocal('/generic-controls.html');
     const controls = generic.interactive_nodes || [];
     const findLabel = label => controls.find(n => n.label === label);
+    console.log('GENERIC_SITE_CONTROLS', JSON.stringify({
+      firstControls: controls.slice(0,12).map(n=>({tag:n.tag,role:n.role,label:n.label})),
+      controlsObserved:controls.length,
+      mainTextPrefix:generic.text_excerpt.slice(0,125)
+    }));
     assert.ok(generic.text_excerpt.startsWith('INDEPENDENT_SITE_CONTENT:'),
       'Main article content should precede unrelated global navigation');
     assert.ok(findLabel('Robotics reference article'),
