@@ -72,3 +72,11 @@ The first **everyday-browser reliability** update is now implemented:
 **Still pending before Chrome-level maturity:** full native-browser UI regression on diverse websites, engine-native back/forward state and scroll restoration, external-window/popup handling, proper isolated private browsing (cookies/storage currently share the default WebView2 profile), extension hosting, permission management, polished download UX, standards/security review (including CSP), auto-update signing/release pipeline, and performance/accessibility/reliability testing. Some keyboard shortcuts may not work while a child WebView has focus.
 
 **Next priority:** native WebView2 navigation/permissions/private-profile integration and repeatable end-to-end desktop browsing tests. This is a development roadmap, not proof of Chrome/Edge feature parity.
+
+## Lucia production-hardening update — 22 November 2026
+
+The agent runner now binds clicks and typing to a fresh live DOM snapshot, uses observed control labels/sensitivity for approvals, stops on cancelled/rejected/expired approvals, blocks unsafe download URLs, and redacts sensitive action traces. Workflow macro action persistence/replay is disabled until it has a safe verified design.
+
+The Rust regression run passed **58 tests, 0 failed, 4 ignored**, and the separate real-local-model intent, specialist-action, and evidence-verifier tests passed. An updated packaged Windows multi-step browser E2E test is **still pending**; this is not a production-ready release.
+
+See [Lucia production gates](LUCIA_PRODUCTION_GATE.md) for exact implementation details and remaining release requirements.

@@ -33,6 +33,51 @@ pub struct ApprovalRequest {
     pub responder: oneshot::Sender<bool>,
 }
 
+/// Never let a model-provided label or sensitivity flag lower the policy risk.
+/// Only fresh, observed DOM controls are eligible for click/type actions.
+fn bind_action_to_live_dom(
+    action: &mut BrowserAction,
+    snapshot: &DomSnapshot,
+    fresh: bool,
+) -> Result<(), String> {
+    match action {
+        BrowserAction::Click { node_id, element_label, is_submit } => {
+            if !fresh {
+                return Err("Cannot click using a stale DOM snapshot".into());
+            }
+            let node = snapshot.interactive_nodes.iter()
+                .find(|n| n.node_id == *node_id)
+                .ok_or("Click target is not present in the freshly observed DOM")?;
+            if node.label.trim().is_empty() {
+                return Err("Unlabelled click target requires manual interaction".into());
+            }
+            *element_label = node.label.chars().take(160).collect();
+            *is_submit |= node.is_submit;
+        }
+        BrowserAction::TypeText { node_id, is_sensitive, .. } => {
+            if !fresh {
+                return Err("Cannot type using a stale DOM snapshot".into());
+            }
+            let node = snapshot.interactive_nodes.iter()
+                .find(|n| n.node_id == *node_id)
+                .ok_or("Input target is not present in the freshly observed DOM")?;
+            if !matches!(node.tag.to_ascii_lowercase().as_str(), "input" | "textarea")
+                && !node.role.eq_ignore_ascii_case("textbox")
+                && !node.role.eq_ignore_ascii_case("searchbox") {
+                return Err("Selected DOM control is not a text input".into());
+            }
+            *is_sensitive |= node.is_sensitive;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn stop_after_approval_outcome(outcome: &str) -> bool {
+    matches!(outcome, "REJECTED BY USER" | "APPROVAL TIMED OUT"
+        | "ABORTED: approval channel closed" | "ABORTED: task cancelled")
+}
+
 async fn execute_gated_action(
     app: &tauri::AppHandle,
     run_id: Uuid,
@@ -47,7 +92,11 @@ async fn execute_gated_action(
     downloads: &Arc<DownloadManager>,
     db: &Arc<Mutex<BrowserDatabase>>,
     approval_tx: &mpsc::Sender<ApprovalRequest>,
+    cancel: &CancellationToken,
 ) -> (bool, String) {
+    if cancel.is_cancelled() {
+        return (false, "ABORTED: task cancelled".to_string());
+    }
     match decision {
         PolicyDecision::Deny { reason } => (false, format!("DENIED: {reason}")),
         PolicyDecision::RequireApproval { reason } => {
@@ -65,8 +114,19 @@ async fn execute_gated_action(
             if approval_tx.send(req).await.is_err() {
                 (false, "ABORTED: approval channel closed".to_string())
             } else {
-                match res_rx.await.unwrap_or(false) {
-                    true => {
+                let response = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        return (false, "ABORTED: task cancelled".to_string());
+                    }
+                    response = tokio::time::timeout(
+                        std::time::Duration::from_secs(120), res_rx
+                    ) => response,
+                };
+                match response {
+                    Ok(Ok(true)) => {
+                        if cancel.is_cancelled() {
+                            return (false, "ABORTED: task cancelled".to_string());
+                        }
                         let exec = execute_browser_action(
                             app,
                             webview_label,
@@ -84,7 +144,9 @@ async fn execute_gated_action(
                             (false, format!("APPROVED & FAILED: {}", exec.detail))
                         }
                     }
-                    false => (false, "REJECTED BY USER".to_string()),
+                    Ok(Ok(false)) => (false, "REJECTED BY USER".to_string()),
+                    Ok(Err(_)) => (false, "ABORTED: approval channel closed".to_string()),
+                    Err(_) => (false, "APPROVAL TIMED OUT".to_string()),
                 }
             }
         }
@@ -199,6 +261,7 @@ pub async fn run_react_loop(
                     &downloads,
                     &db,
                     &approval_tx,
+                    &cancel,
                 )
                 .await;
 
@@ -231,7 +294,7 @@ pub async fn run_react_loop(
                     },
                 };
                 next_step_index += 1;
-                let _ = trace_tx.send(entry).await;
+                let _ = trace_tx.send(entry.sanitized()).await;
 
                 if !ok {
                     // User refusal and policy blocks are not workflow mistakes.
@@ -331,35 +394,10 @@ pub async fn run_react_loop(
                 .await?
         };
 
-        if let BrowserAction::TypeText {
-            ref node_id,
-            ref mut is_sensitive,
-            ..
-        } = action
-        {
-            if snapshot
-                .interactive_nodes
-                .iter()
-                .any(|n| n.node_id == *node_id && n.is_sensitive)
-            {
-                *is_sensitive = true;
-            }
-        }
-
-        if let BrowserAction::Click {
-            ref node_id,
-            ref mut is_submit,
-            ..
-        } = action
-        {
-            if snapshot
-                .interactive_nodes
-                .iter()
-                .any(|n| n.node_id == *node_id && n.is_submit)
-            {
-                *is_submit = true;
-            }
-        }
+        // Treat the model's element label and flags as untrusted claims.
+        // Bind to a fresh DOM node before the policy engine sees the action.
+        let action_binding_error =
+            bind_action_to_live_dom(&mut action, &snapshot, freshly_observed).err();
 
         let signature = format!("stage:{}|{:?}|{}", orchestrator.current, action, snapshot.origin);
         if !seen_signatures.insert(signature) {
@@ -380,7 +418,7 @@ pub async fn run_react_loop(
                 latency_ms: started.elapsed().as_millis() as u64,
                 outcome: "HALTED: loop guard".to_string(),
             };
-            let _ = trace_tx.send(entry).await;
+            let _ = trace_tx.send(entry.sanitized()).await;
             final_status = "halted".to_string();
             break;
         }
@@ -391,6 +429,11 @@ pub async fn run_react_loop(
             decision = PolicyDecision::Deny {
                 reason: format!("{} cannot perform this action; delegate it to an authorized specialist",
                     orchestrator.specialist().label()),
+            };
+        }
+        if let Some(reason) = action_binding_error {
+            decision = PolicyDecision::Deny {
+                reason: format!("Live DOM action validation failed: {reason}"),
             };
         }
         if let BrowserAction::Complete { .. } = &action {
@@ -455,6 +498,7 @@ pub async fn run_react_loop(
             &downloads,
             &db,
             &approval_tx,
+            &cancel,
         )
         .await;
 
@@ -507,14 +551,9 @@ pub async fn run_react_loop(
         }
 
         if ok {
-            // Never cache sensitive password/secret text in macros
-            let safe_to_cache = !matches!(
-                action,
-                BrowserAction::TypeText {
-                    is_sensitive: true,
-                    ..
-                }
-            );
+            // Model-provided text can include personal information even when
+            // a DOM field is not marked sensitive. Never persist typed values.
+            let safe_to_cache = !matches!(action, BrowserAction::TypeText { .. });
             if safe_to_cache {
                 recorded_steps.push(action.clone());
             }
@@ -548,7 +587,21 @@ pub async fn run_react_loop(
             outcome: outcome.clone(),
         };
 
-        let _ = trace_tx.send(entry).await;
+        let _ = trace_tx.send(entry.sanitized()).await;
+        if stop_after_approval_outcome(&outcome) {
+            // A rejected or expired approval is a terminal decision for this run.
+            // Never ask the model to retry the same sensitive operation.
+            let _ = app.emit("agent:run_error", serde_json::json!({
+                "run_id": run_id,
+                "message": format!("Task stopped: {outcome}. No further actions were attempted.")
+            }));
+            final_status = if cancel.is_cancelled() {
+                "cancelled".to_string()
+            } else {
+                "rejected".to_string()
+            };
+            break;
+        }
         if submission_unconfirmed {
             let _ = app.emit("agent:run_error", serde_json::json!({
                 "run_id": run_id,
@@ -608,18 +661,9 @@ pub async fn run_react_loop(
         }
     }
 
-    // Phase 3: Persist verified workflow macro in SQLite WAL on clean completion
-    if allow_learning && final_status == "completed" && !recorded_steps.is_empty() {
-        let saved_opt = {
-            let mut guard = db.lock().await;
-            guard
-                .upsert_workflow_macro(&initial_origin, &goal, &recorded_steps)
-                .ok()
-        };
-        if let Some(saved_macro) = saved_opt {
-            let _ = app.emit("agent:macro_saved", &saved_macro);
-        }
-    }
+    // Macro replay is disabled pending an independently verified format.
+    // Do not persist executable action sequences in the meantime: even a
+    // navigation URL may contain private paths or authentication parameters.
 
     // Save structured, bounded observations from safe user goals only.
     // No raw page text, form values, or model thoughts are persisted.
@@ -662,3 +706,95 @@ pub async fn run_react_loop(
 }
 
 
+
+#[cfg(test)]
+mod production_safety_tests {
+    use super::*;
+    use crate::agent::dom_extractor::DomNodeSummary;
+
+    fn observed_page() -> DomSnapshot {
+        DomSnapshot {
+            origin: "https://example.org/settings".into(),
+            title: "Account settings".into(),
+            text_excerpt: "Account settings are available for this test website.".into(),
+            interactive_nodes: vec![
+                DomNodeSummary {
+                    node_id: "remove".into(), tag: "button".into(),
+                    role: "button".into(), label: "Delete account".into(),
+                    is_submit: false, is_sensitive: false, bbox: None
+                },
+                DomNodeSummary {
+                    node_id: "password".into(), tag: "input".into(),
+                    role: "textbox".into(), label: "Password".into(),
+                    is_submit: false, is_sensitive: true, bbox: None
+                },
+                DomNodeSummary {
+                    node_id: "submit".into(), tag: "button".into(),
+                    role: "button".into(), label: "Submit application".into(),
+                    is_submit: true, is_sensitive: false, bbox: None
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn cannot_downgrade_dangerous_click_by_spoofing_its_label() {
+        let page = observed_page();
+        let mut action = BrowserAction::Click {
+            node_id: "remove".into(), element_label: "Continue".into(), is_submit: false,
+        };
+        bind_action_to_live_dom(&mut action, &page, true).unwrap();
+        let (risk, decision) = evaluate_policy(&page.origin, &action, &[]);
+        assert_eq!(risk, RiskLevel::Critical);
+        assert!(matches!(decision, PolicyDecision::RequireApproval { .. }));
+        if let BrowserAction::Click { element_label, .. } = action {
+            assert_eq!(element_label, "Delete account");
+        } else { panic!("Expected click"); }
+    }
+
+    #[test]
+    fn observed_submit_and_sensitive_input_override_model_flags() {
+        let page = observed_page();
+        let mut click = BrowserAction::Click {
+            node_id: "submit".into(), element_label: "Next".into(), is_submit: false,
+        };
+        bind_action_to_live_dom(&mut click, &page, true).unwrap();
+        assert!(matches!(click, BrowserAction::Click { is_submit: true, .. }));
+        assert!(matches!(evaluate_policy(&page.origin, &click, &[]).1,
+            PolicyDecision::RequireApproval { .. }));
+
+        let mut input = BrowserAction::TypeText {
+            node_id: "password".into(), text: "test-value".into(), is_sensitive: false,
+        };
+        bind_action_to_live_dom(&mut input, &page, true).unwrap();
+        assert!(matches!(input, BrowserAction::TypeText { is_sensitive: true, .. }));
+        assert!(matches!(evaluate_policy(&page.origin, &input, &[]).1,
+            PolicyDecision::RequireApproval { .. }));
+    }
+
+    #[test]
+    fn refuses_stale_or_nonexistent_dom_controls() {
+        let page = observed_page();
+        let mut action = BrowserAction::Click {
+            node_id: "remove".into(), element_label: "Continue".into(), is_submit: false,
+        };
+        assert!(bind_action_to_live_dom(&mut action, &page, false).is_err());
+        let mut unknown = BrowserAction::Click {
+            node_id: "missing".into(), element_label: "Continue".into(), is_submit: false,
+        };
+        assert!(bind_action_to_live_dom(&mut unknown, &page, true).is_err());
+        let mut wrong_kind = BrowserAction::TypeText {
+            node_id: "remove".into(), text: "hello".into(), is_sensitive: false,
+        };
+        assert!(bind_action_to_live_dom(&mut wrong_kind, &page, true).is_err());
+    }
+
+    #[test]
+    fn rejected_or_expired_approval_is_terminal() {
+        assert!(stop_after_approval_outcome("REJECTED BY USER"));
+        assert!(stop_after_approval_outcome("APPROVAL TIMED OUT"));
+        assert!(stop_after_approval_outcome("ABORTED: approval channel closed"));
+        assert!(!stop_after_approval_outcome("APPROVED & OK: Clicked button"));
+        assert!(!stop_after_approval_outcome("FAILED: stale DOM node"));
+    }
+}

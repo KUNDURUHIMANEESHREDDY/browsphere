@@ -546,6 +546,9 @@ impl BrowserDatabase {
     }
 
     pub fn insert_trace(&mut self, entry: &TraceEntry) -> anyhow::Result<()> {
+        // Defense in depth: never persist raw typed values, model thoughts,
+        // URLs with parameters, or sensitive approval details.
+        let entry = entry.clone().sanitized();
         let now = Utc::now().to_rfc3339();
         let action_json = serde_json::to_string(&entry.action)?;
         let risk_str = serde_json::to_string(&entry.risk)?;
