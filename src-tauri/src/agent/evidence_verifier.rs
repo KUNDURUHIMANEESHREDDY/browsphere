@@ -228,6 +228,41 @@ pub fn verify_observed_named_result_title(
     })
 }
 
+/// For explicitly requested named-article searches, a search control can
+/// navigate without producing a form-submission confirmation message.
+/// This is a *navigation* postcondition and never permits claiming a purchase,
+/// registration, application, or other consequential form was submitted.
+pub fn check_named_search_transition(
+    goal: &str, before: &DomSnapshot, after: &DomSnapshot,
+) -> Result<(), String> {
+    let subject = requested_named_result_title(goal)
+        .ok_or("The user did not request a narrow named-result page title search")?;
+    let from = web_url(&before.origin).ok_or("The search source was not a web page")?;
+    let to = web_url(&after.origin).ok_or("No observed destination URL")?;
+    if from.scheme() != to.scheme()
+        || from.host_str() != to.host_str()
+        || from.port_or_known_default() != to.port_or_known_default()
+        || from.path() == to.path() && from.query() == to.query()
+    {
+        return Err("The search did not navigate to a new page on the observed site".into());
+    }
+    check_navigation_result(to.as_str(), after)?;
+    if after.text_excerpt.trim().chars().count() < 40 {
+        return Err("Search destination has insufficient readable page evidence".into());
+    }
+    let needle = normalized(&subject);
+    let displayed = normalized(&format!("{} {}", after.title, after.text_excerpt));
+    let location = normalized(&format!(
+        "{} {}",
+        to.path().replace('_', " ").replace('-', " "),
+        to.query_pairs().map(|(_, v)| v.into_owned()).collect::<Vec<_>>().join(" ")
+    ));
+    if !displayed.contains(&needle) && !location.contains(&needle) {
+        return Err("The observed destination does not show the requested search subject".into());
+    }
+    Ok(())
+}
+
 /// A deterministic verifier is more reliable than an LLM quote-generation pass
 /// for the narrow task of opening an explicitly named website.
 pub fn verify_direct_navigation(
@@ -483,6 +518,24 @@ mod tests {
             ..article
         };
         assert!(verify_observed_named_result_title(goal, start, &other, &sources).is_err());
+    }
+
+    #[test]
+    fn named_search_transition_requires_real_same_site_result_page() {
+        let goal = "On this Wikipedia page, search for Ada Lovelace and open the corresponding article. Then report its page title.";
+        let before = dom("https://en.wikipedia.org/wiki/Main_Page",
+            "Wikipedia home page with a search bar, article links and languages.");
+        let result = dom("https://en.wikipedia.org/wiki/Ada_Lovelace",
+            "Ada Lovelace was an English mathematician and writer with a famous biography.");
+        assert!(check_named_search_transition(goal, &before, &result).is_ok());
+        assert!(check_named_search_transition(goal, &before, &before).is_err());
+        assert!(check_named_search_transition(goal, &before, &dom(
+            "https://en.wikipedia.org/wiki/Other", "An unrelated encyclopedia article with no requested subject.")).is_err());
+        assert!(check_named_search_transition(goal, &before, &dom(
+            "https://en.wikipedia.org.evil.test/wiki/Ada_Lovelace", "Ada Lovelace is a mathematician in this fake site.")).is_err());
+        assert!(check_named_search_transition("Submit my application form", &before, &result).is_err());
+        assert!(check_named_search_transition(goal, &before, &dom(
+            "https://en.wikipedia.org/wiki/Ada_Lovelace", "")).is_err());
     }
 
     #[test]

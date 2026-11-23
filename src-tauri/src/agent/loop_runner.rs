@@ -11,7 +11,8 @@ use crate::agent::action_executor::{execute_browser_action, ActionResult};
 use crate::agent::memory::{can_classify_preference, infer_memories, preference_from_label, RecoveredFailure};
 use crate::agent::orchestrator::{plan_task, Orchestrator, Specialist};
 use crate::agent::evidence_verifier::{
-    check_navigation_result, check_submission_result, requires_post_action_check,
+    check_navigation_result, check_submission_result, check_named_search_transition,
+    requires_post_action_check,
     verify_direct_navigation, verify_observed_youtube_first_result,
     verify_observed_named_result_title, requested_named_result_title, VerificationReport,
 };
@@ -214,6 +215,28 @@ fn rebind_unambiguous_live_control(
     }
 }
 
+/// Only a freshly observed, non-sensitive search button in an explicit
+/// named-result-title task can use the search-navigation postcondition.
+/// All other submit buttons retain strict form confirmation requirements.
+fn is_named_search_submit_click(
+    goal: &str, action: &BrowserAction, snapshot: &DomSnapshot,
+) -> bool {
+    if requested_named_result_title(goal).is_none() { return false; }
+    let lowered = goal.to_lowercase();
+    if ["checkout", "purchase", "pay ", "apply ", "register", "sign up",
+        "submit ", "send ", "place order", "book "]
+        .iter().any(|term| lowered.contains(term))
+    { return false; }
+    let BrowserAction::Click { node_id, is_submit: true, .. } = action
+        else { return false; };
+    snapshot.interactive_nodes.iter().any(|node|
+        node.node_id == *node_id
+        && node.is_submit && !node.is_sensitive
+        && matches!(node.tag.as_str(), "button" | "input")
+        && node.label.trim().to_ascii_lowercase().starts_with("search")
+    )
+}
+
 /// Exactly one model replan is permitted after an invalid live DOM binding.
 fn should_replan_invalid_control(route: &str, action: &BrowserAction) -> bool {
     let model_selected = ["ollama:", "litellm:", "groq:", "bedrock:"]
@@ -388,6 +411,20 @@ fn evaluate_live_action_policy(
 
 fn delayed_navigation_is_verified(expected: &str, observed: &DomSnapshot) -> bool {
     check_navigation_result(expected, observed).is_ok()
+}
+
+/// A unit-test helper for the full search-to-title postcondition; the
+/// running agent accepts an intermediate results page only as progress.
+#[cfg(test)]
+fn check_named_title_search_navigation(
+    goal: &str,
+    initial_origin: &str,
+    before: &DomSnapshot,
+    after: &DomSnapshot,
+    evidence: &[crate::agent::orchestrator::SourceEvidence],
+) -> Result<(), String> {
+    check_named_search_transition(goal, before, after)?;
+    verify_observed_named_result_title(goal, initial_origin, after, evidence).map(|_| ())
 }
 
 fn should_bootstrap_direct_navigation(goal: &str, specialist: Specialist, already_attempted: bool) -> bool {
@@ -651,6 +688,7 @@ pub async fn run_react_loop(
     let mut snapshot = initial_snapshot;
     let mut seen_signatures: HashSet<String> = HashSet::new();
     let mut recorded_steps: Vec<BrowserAction> = Vec::new();
+    let mut confirmed_named_search_navigation = false;
     let mut next_step_index: u32 = 0;
     let mut recent_outcomes: Vec<String> = Vec::new();
     let mut last_action_failed = false;
@@ -959,8 +997,9 @@ pub async fn run_react_loop(
             } else if freshly_observed
                 && !last_action_failed
                 && matches!(orchestrator.specialist(), Specialist::Browser | Specialist::Research)
-                && recorded_steps.iter().any(|step|
-                    matches!(step, BrowserAction::Click { is_submit: false, .. }))
+                && (confirmed_named_search_navigation
+                    || recorded_steps.iter().any(|step|
+                        matches!(step, BrowserAction::Click { is_submit: false, .. })))
                 && orchestrator.can_complete(&snapshot).is_ok()
                 && verify_observed_named_result_title(
                     &goal, &initial_origin, &snapshot, &orchestrator.evidence
@@ -1263,8 +1302,9 @@ pub async fn run_react_loop(
                     } else if requested_named_result_title(&goal).is_some() {
                         // Narrow title-only workflow; do not let a model
                         // invent an article title, URL, or result click.
-                        if !recorded_steps.iter().any(|step|
-                            matches!(step, BrowserAction::Click { is_submit: false, .. }))
+                        if !confirmed_named_search_navigation
+                            && !recorded_steps.iter().any(|step|
+                                matches!(step, BrowserAction::Click { is_submit: false, .. }))
                         {
                             Err(anyhow::anyhow!("No observed result click occurred"))
                         } else {
@@ -1343,6 +1383,7 @@ pub async fn run_react_loop(
         // Re-observe the live webpage before marking navigation or a submit as
         // successful. An ambiguous submit must NOT be retried automatically.
         let navigation_dispatched = ok && matches!(action, BrowserAction::Navigate { .. });
+        let named_search_submit = is_named_search_submit_click(&goal, &action, &snapshot);
         let mut submission_unconfirmed = false;
         if ok && requires_post_action_check(&action) {
             let before = snapshot.clone();
@@ -1357,12 +1398,22 @@ pub async fn run_react_loop(
                         BrowserAction::Navigate { url } =>
                             check_navigation_result(url, &after),
                         BrowserAction::Click { is_submit: true, .. } =>
-                            check_submission_result(&before, &after),
+                            if named_search_submit {
+                                // This was an actual search-labeled DOM submit
+                                // button in a narrow read-only title lookup.
+                                // Search navigation is *not* transaction success.
+                                check_named_search_transition(&goal, &before, &after)
+                            } else {
+                                check_submission_result(&before, &after)
+                            },
                         _ => Ok(()),
                     };
                     if post_result.is_ok() {
                         snapshot = after;
                         orchestrator.observe(&snapshot);
+                        if named_search_submit {
+                            confirmed_named_search_navigation = true;
+                        }
                         break;
                     }
                 }
@@ -1449,6 +1500,7 @@ pub async fn run_react_loop(
         // fresh, explicit success evidence, advance to independent verification
         // instead of allowing the model to click the same submit control again.
         let confirmed_submit = ok
+            && !named_search_submit
             && matches!(action, BrowserAction::Click { is_submit: true, .. })
             && outcome.starts_with("POSTCONDITION CONFIRMED:")
             && orchestrator.can_complete(&snapshot).is_ok();
@@ -1615,6 +1667,78 @@ pub async fn run_react_loop(
 #[cfg(test)]
 mod production_safety_tests {
     use super::*;
+
+    #[test]
+    fn search_submit_needs_matching_new_article_and_native_source_evidence() {
+        let goal = "On this Wikipedia page, search for Ada Lovelace and open the corresponding article. Then report its page title.";
+        let before = DomSnapshot {
+            origin: "https://en.wikipedia.org/wiki/Main_Page".into(),
+            title: "Wikipedia, the free encyclopedia".into(),
+            text_excerpt: "Search Wikipedia for a named article using the search field.".into(),
+            interactive_nodes: vec![],
+        };
+        let after = DomSnapshot {
+            origin: "https://en.wikipedia.org/wiki/Ada_Lovelace".into(),
+            title: "Ada Lovelace - Wikipedia".into(),
+            text_excerpt: "Ada Lovelace was a mathematician and writer. The article contains readable biographical material.".into(),
+            interactive_nodes: vec![],
+        };
+        let observed = vec![crate::agent::orchestrator::SourceEvidence {
+            url: after.origin.clone(), title: after.title.clone(),
+            excerpt: after.text_excerpt.clone(),
+        }];
+        assert!(check_submission_result(&before, &after).is_err());
+        assert!(check_named_title_search_navigation(
+            goal, &before.origin, &before, &after, &observed).is_ok());
+        assert!(check_named_title_search_navigation(
+            goal, &before.origin, &after, &after, &observed).is_err());
+        assert!(check_named_title_search_navigation(
+            goal, &before.origin, &before, &after, &[]).is_err());
+        assert!(check_named_title_search_navigation(
+            "Submit an application form", &before.origin, &before, &after, &observed).is_err());
+        let wrong = DomSnapshot {
+            origin: "https://en.wikipedia.org/wiki/Other".into(),
+            title: "Unrelated page - Wikipedia".into(),
+            ..after.clone()
+        };
+        assert!(check_named_title_search_navigation(
+            goal, &before.origin, &before, &wrong, &observed).is_err());
+    }
+
+    #[test]
+    fn search_navigation_exception_requires_observed_safe_search_button() {
+        let goal = "On this Wikipedia page, search for Ada Lovelace and open the corresponding article. Then report its page title.";
+        let mut current = DomSnapshot {
+            origin: "https://en.wikipedia.org/wiki/Main_Page".into(),
+            title: "Wikipedia".into(),
+            text_excerpt: "Search Wikipedia to find encyclopedia articles and useful links.".into(),
+            interactive_nodes: vec![crate::agent::dom_extractor::DomNodeSummary {
+                node_id: "n_search".into(), tag: "button".into(), role: "button".into(),
+                label: "Search".into(), is_submit: true, is_sensitive: false,
+                options: vec![], checked: None, href: None, bbox: None,
+            }],
+        };
+        let search = BrowserAction::Click {
+            node_id: "n_search".into(), element_label: "Untrusted".into(), is_submit: true,
+        };
+        assert!(is_named_search_submit_click(goal, &search, &current));
+        assert!(!is_named_search_submit_click("Submit my application form", &search, &current));
+        assert!(!is_named_search_submit_click(
+            "Search for Ada Lovelace and open her article, report title, then purchase a membership",
+            &search, &current));
+        assert!(!is_named_search_submit_click(goal,
+            &BrowserAction::Click {
+                node_id: "not_observed".into(), element_label: "Search".into(), is_submit: true
+            }, &current));
+        current.interactive_nodes[0].is_sensitive = true;
+        assert!(!is_named_search_submit_click(goal, &search, &current));
+        current.interactive_nodes[0].is_sensitive = false;
+        current.interactive_nodes[0].label = "Apply now".into();
+        assert!(!is_named_search_submit_click(goal, &search, &current));
+        current.interactive_nodes[0].label = "Search".into();
+        current.interactive_nodes[0].is_submit = false;
+        assert!(!is_named_search_submit_click(goal, &search, &current));
+    }
 
     #[test]
     fn invalid_model_control_can_replan_only_before_execution() {

@@ -81,18 +81,23 @@ async function main(){
       console.log('ROUTER_BEFORE_TASK',JSON.stringify({goal:goal.slice(0,80),config}));
       const id=await evalJs('window.aetherBridge.startLuciaSpecialistTask('+JSON.stringify(goal)+','+JSON.stringify(initial)+",'Cross-site test')");
       if(!/^[a-f0-9-]{36}$/i.test(String(id||''))) throw Error('No task ID');
-      let events=[], end=null;
+      let events=[], end=null, approvalRequired=false;
       for(let i=0;i<timeoutSeconds;i++){
         await sleep(1000);
         events=(await evalJs('window.__crossSiteEvents.slice(-400)'))||[];
         const mine=events.filter(e=>e.payload?.run_id===id);
-        if(mine.some(e=>e.kind==='agent:approval_required')){await evalJs("window.__TAURI__.core.invoke('cancel_agent_run')");return {status:'approval',events:mine};}
+        if(mine.some(e=>e.kind==='agent:approval_required')){
+          approvalRequired=true;
+          await evalJs("window.__TAURI__.core.invoke('cancel_agent_run')");
+          break;
+        }
         end=mine.find(e=>e.kind==='agent:run_status');
         if(end)break;
       }
-      if(!end)await evalJs("window.__TAURI__.core.invoke('cancel_agent_run')");
+      if(!end && !approvalRequired)await evalJs("window.__TAURI__.core.invoke('cancel_agent_run')");
       const mine=events.filter(e=>e.payload?.run_id===id);
-      return {status:end?.payload?.status||'timeout',actions:mine.filter(e=>e.kind==='agent:trace')
+      return {status:approvalRequired?'approval':(end?.payload?.status||'timeout'),
+        approvalRequired, actions:mine.filter(e=>e.kind==='agent:trace')
         .map(e=>({type:e.payload?.action?.type,outcome:e.payload?.outcome,modelRoute:e.payload?.model_route})),
         errors:mine.filter(e=>e.kind==='agent:run_error').map(e=>String(e.payload?.message||'').slice(0,150)),
         verified:mine.some(e=>e.kind==='agent:verification_report' && e.payload?.report?.status==='evidence_checked')};
@@ -129,7 +134,9 @@ async function main(){
           if(hostname(before.observed)==='en.wikipedia.org' && before.controls>0)break;
           await sleep(400);
         }
-        if(hostname(before?.observed)!=='en.wikipedia.org')throw Error('Wikipedia starting page unavailable');
+        if(hostname(before?.observed)!=='en.wikipedia.org' ||
+            /error|not found|access denied/i.test(before?.title||''))
+          throw Error('Wikipedia starting document unavailable or error page; do not test model planning against an error page');
         const task=await runTask('On this Wikipedia page, search for Ada Lovelace and open the corresponding article. Then report its page title.','https://en.wikipedia.org/wiki/Main_Page',140);
         console.log('WIKIPEDIA_ACTION_TRACE', JSON.stringify({status:task.status,actions:task.actions,errors:task.errors,verified:task.verified}).slice(0,9000));
         const after=await nativeState();
