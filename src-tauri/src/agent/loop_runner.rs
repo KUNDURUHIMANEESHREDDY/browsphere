@@ -266,6 +266,19 @@ fn trusted_named_search_query_input(
     })
 }
 
+/// After typing a user-supplied term into an unambiguous live search field,
+/// press Enter at most once instead of asking a small model to click that
+/// same input again. The native executor independently refuses empty fields.
+fn trusted_named_search_enter(
+    goal: &str, snapshot: &DomSnapshot, specialist: Specialist,
+) -> Option<BrowserAction> {
+    let BrowserAction::TypeText { node_id, .. } =
+        trusted_named_search_query_input(goal, snapshot, specialist)? else { return None; };
+    Some(BrowserAction::PressKey {
+        node_id, key: "Enter".into(),
+    })
+}
+
 /// Some documentation and wiki search forms navigate straight to the exact
 /// named article on Enter. This exception is limited to a real non-sensitive
 /// search input and a narrow read-only page-title task; the post-action URL,
@@ -934,6 +947,10 @@ pub async fn run_react_loop(
     // Transient-only search label and query digest; never written to logs.
     // A repeated identical model typing action should search, not retype.
     let mut last_search_type: Option<(String, u64)> = None;
+    // Only follow up a successful user-requested search text entry, once,
+    // while the browser remains on the page where it was entered.
+    let mut named_search_typed_origin: Option<String> = None;
+    let mut named_search_enter_attempted = false;
     let mut observation_failures: u8 = 0;
     let mut failures_observed: HashSet<RecoveredFailure> = HashSet::new();
     // Lucia delegates the task through real specialist stages; each stage has
@@ -1411,6 +1428,22 @@ pub async fn run_react_loop(
                     "Type the exact user-requested term into the observed search field".into(),
                     action,
                     "search_input:trusted_user_query".into(),
+                )
+            } else if freshly_observed
+                && confirmed_named_search_query
+                && !named_search_enter_attempted
+                && named_search_typed_origin.as_deref() == Some(snapshot.origin.as_str())
+                && trusted_named_search_enter(&goal, &snapshot, orchestrator.specialist()).is_some()
+            {
+                // The previously executed type_text was already acknowledged
+                // by the native browser. Submit only the existing observed
+                // non-sensitive search input, once. No URLs are guessed.
+                named_search_enter_attempted = true;
+                (
+                    "Submit the previously typed user query in the observed search field".into(),
+                    trusted_named_search_enter(&goal, &snapshot, orchestrator.specialist())
+                        .expect("guarded by fresh unique search input"),
+                    "search_enter:after_observed_query_type".into(),
                 )
             } else if let Some(action) =
                 trusted_search_bootstrap(&goal, &snapshot, orchestrator.specialist())
@@ -1915,6 +1948,7 @@ pub async fn run_react_loop(
                 && matches!(action, BrowserAction::TypeText { .. })
             {
                 confirmed_named_search_query = true;
+                named_search_typed_origin = Some(snapshot.origin.clone());
             }
             if let Some(search) = typed_search_candidate {
                 last_search_type = Some(search);
@@ -2241,7 +2275,11 @@ mod production_safety_tests {
         let action = trusted_named_search_query_input(goal, &page, Specialist::Browser);
         assert!(matches!(action, Some(BrowserAction::TypeText { node_id, text, is_sensitive: false })
             if node_id == "live_search" && text == "Ada Lovelace"));
+        assert!(matches!(trusted_named_search_enter(goal, &page, Specialist::Browser),
+            Some(BrowserAction::PressKey { node_id, key })
+            if node_id == "live_search" && key == "Enter"));
         page.interactive_nodes[0].is_sensitive = true;
+        assert!(trusted_named_search_enter(goal, &page, Specialist::Browser).is_none());
         assert!(trusted_named_search_query_input(goal, &page, Specialist::Browser).is_none());
         page.interactive_nodes[0].is_sensitive = false;
         page.interactive_nodes.push(input);
