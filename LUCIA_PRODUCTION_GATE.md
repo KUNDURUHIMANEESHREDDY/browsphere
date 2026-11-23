@@ -34,3 +34,29 @@ Updated: 22 November 2026
 6. Run Windows release/installer smoke tests and GitHub Actions, review security and privacy threat models, and sign/distribute only after all gates pass.
 
 **Release status: NOT PRODUCTION-CERTIFIED.** This pass hardens critical safety/privacy paths; it does not certify unrestricted real-world autonomy.
+
+
+## Autonomous browsing hardening — 23 November 2026 (code implemented; live rerun pending)
+
+The latest `main` includes these changes:
+
+- A named-site search such as **"Search YouTube for NASA Artemis"** can bootstrap its requested public website from an empty native tab. This initial navigation is derived from the user's explicit request; models still decide subsequent search and result actions from observed webpage controls.
+- A dynamic webpage receives unique interactive-node identifiers, reducing collisions after controls appear or disappear.
+- If a small model supplies an invalid/stale node ID, Lucia may rebind only to an **unambiguous, freshly observed** matching control. Search-text rebinding is limited to text explicitly present in the user's request. Unmatched or ambiguous controls still fail closed; observed sensitive flags and approval policy still apply.
+- Native type and click actions refuse detached, disabled, hidden, read-only, or noneditable controls rather than reporting false success.
+- Final review retries **once** when the model emits malformed evidence/quotes, not when evidence is absent, unobserved, or explicitly insufficient. Every final quote and URL remains independently checked.
+- A requested YouTube video-result task cannot claim completion from YouTube's search/results page: it requires a freshly observed video-page URL.
+- Agent traces trigger a native-snapshot reconciliation of the **originating tab's** visible URL, covering SPA history transitions that may not fire a regular WebView2 page-load callback.
+- Windows CI now syntax-checks the manual Lucia native E2E regression scripts.
+
+**Verification boundary:** Earlier live tests confirmed direct `open youtube` navigation and one successful Qwen failure-recovery run. A separate Qwen run reproduced intermittent `unverified` final status, and a real multi-step YouTube search run halted after denied actions. Those results happened **before** the hardening changes above. In this pass the edited JavaScript files parsed successfully and Rust embedded-JS format delimiters were statically inspected, but fresh Windows compilation, actual YouTube search/click E2E, repeated verifier tests, and installed release smoke testing were **not** run after these commits because the authorized desktop connection reached its monthly usage limit.
+
+**Release status remains NOT PRODUCTION-CERTIFIED.** Do not mark GitHub issues #1 (multi-step browsing) or #2 (intermittent verifier) resolved until independent live native regression tests pass.
+
+Recommended validation on the authorized Windows development machine with an isolated local WebView2/CDP profile and configured authorized model:
+
+1. `cargo test --workspace --locked` (includes new DOM/action, authorization, verifier, and video-result postcondition regressions).
+2. `node --check tests/e2e/lucia-youtube-search.cjs` and `node --check tests/e2e/lucia-failure-recovery.cjs`.
+3. Launch the isolated native app + Ollama and run `tests/e2e/lucia-start-page-navigation.cjs`, `tests/e2e/lucia-youtube-search.cjs`, and `tests/e2e/lucia-failure-recovery.cjs` with their documented local ports.
+4. Repeat against external dynamic SPAs and redirects and confirm that the address bar always matches the observed native URL.
+5. Verify the Windows CI installer build, permissions, consent cancellation, and privacy audit before distribution.
