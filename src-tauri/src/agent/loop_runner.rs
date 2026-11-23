@@ -17,7 +17,8 @@ use crate::agent::evidence_verifier::{
 use crate::agent::dom_extractor::{request_live_dom_snapshot, DomSnapshot};
 use crate::agent::policy::{
     evaluate_policy, evaluate_user_navigation_policy, requested_navigation_url,
-    sanitize_untrusted_page_text, BrowserAction, PolicyDecision, RiskLevel,
+    requested_search_entry_url, sanitize_untrusted_page_text,
+    BrowserAction, PolicyDecision, RiskLevel,
     TraceEntry,
 };
 use crate::privacy::downloads::DownloadManager;
@@ -130,6 +131,21 @@ fn rebind_unambiguous_live_control(
         }
         _ => false,
     }
+}
+
+/// Opening a named search site from a blank tab is a directly authorized
+/// navigation, not a model guess. The model still chooses all subsequent
+/// search, click, and reading actions from fresh browser observations.
+fn trusted_search_bootstrap(
+    goal: &str, snapshot: &DomSnapshot, specialist: Specialist,
+) -> Option<BrowserAction> {
+    if snapshot.origin != "about:blank"
+        || !matches!(specialist, Specialist::Browser | Specialist::Research)
+    {
+        return None;
+    }
+    requested_search_entry_url(goal).map(|target|
+        BrowserAction::Navigate { url: target.to_string() })
 }
 
 fn retryable_verifier_format_error(error: &str) -> bool {
@@ -534,6 +550,14 @@ pub async fn run_react_loop(
                     "Navigate to the website explicitly named by the user".to_string(),
                     BrowserAction::Navigate { url: target.to_string() },
                     "direct_navigation:trusted_user_goal".to_string(),
+                )
+            } else if let Some(action) =
+                trusted_search_bootstrap(&goal, &snapshot, orchestrator.specialist())
+            {
+                (
+                    "Navigate to the search website explicitly named by the user".to_string(),
+                    action,
+                    "search_bootstrap:trusted_user_goal".to_string(),
                 )
             } else {
                 let r = router.lock().await;
@@ -1102,6 +1126,25 @@ mod production_safety_tests {
         };
         assert!(!rebind_unambiguous_live_control(
             &mut ambiguous_action, &ambiguous, goal));
+    }
+
+    #[test]
+    fn explicit_site_search_bootstraps_only_from_a_blank_tab() {
+        let blank = DomSnapshot {
+            origin: "about:blank".into(), title: String::new(),
+            text_excerpt: String::new(), interactive_nodes: vec![],
+        };
+        let goal = "Search YouTube for NASA Artemis mission and open a video";
+        assert!(matches!(trusted_search_bootstrap(goal, &blank, Specialist::Browser),
+            Some(BrowserAction::Navigate { url }) if url == "https://www.youtube.com/"));
+        assert!(matches!(trusted_search_bootstrap(goal, &blank, Specialist::Research),
+            Some(BrowserAction::Navigate { .. })));
+        assert!(trusted_search_bootstrap(goal, &blank, Specialist::Verification).is_none());
+        let mut active_site = blank.clone();
+        active_site.origin = "https://www.youtube.com/".into();
+        assert!(trusted_search_bootstrap(goal, &active_site, Specialist::Browser).is_none());
+        assert!(trusted_search_bootstrap("Search somewhere for NASA",
+            &blank, Specialist::Browser).is_none());
     }
 
     #[test]
