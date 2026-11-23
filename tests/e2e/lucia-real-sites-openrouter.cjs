@@ -19,7 +19,10 @@ const cases=[
    host:'en.wiktionary.org',path:/\/wiki\/photosynthesis\/?$/i},
   {name:'GitHub Docs',start:'https://docs.github.com/en',
    goal:'On this GitHub Docs page, search for About repositories and open the corresponding article. Then report its page title.',
-   host:'docs.github.com',path:/\/about-repositories\/?$/i}
+   host:'docs.github.com',path:/\/about-repositories\/?$/i},
+  {name:'YouTube music',start:'https://www.youtube.com/',
+   goal:'Open YouTube and play any song',
+   host:'www.youtube.com',path:/^\/watch$/i,requiresPlayback:true}
 ];
 function safeHost(url){try{return new URL(url).host}catch{return ''}}
 async function targets(){
@@ -71,6 +74,44 @@ async function attach(){
     await sleep(350);
   }
   throw Error('Native WebView2 UI not initialized');
+}
+// Independently check the *actual* native YouTube watch WebView. A watch URL
+// or play-button click alone does not prove audio/video is progressing.
+async function youtubePlaybackEvidence(observedUrl) {
+  let u;
+  try {u=new URL(observedUrl)} catch {return {playing:false,reason:'no_watch_page'}}
+  if(u.hostname!=='www.youtube.com'||u.pathname!=='/watch')
+    return {playing:false,reason:'no_watch_page'};
+  const children=await targets();
+  const page=children.find(p=>p.type==='page'&&p.url===observedUrl);
+  if(!page)return {playing:false,reason:'watch_webview_not_found'};
+  const socket=new WebSocket(page.webSocketDebuggerUrl);
+  await new Promise((yes,no)=>{socket.onopen=yes;socket.onerror=no});
+  let nextId=0;const pending=new Map();
+  socket.onmessage=e=>{const msg=JSON.parse(e.data),item=pending.get(msg.id);
+    if(!item)return;pending.delete(msg.id);msg.error?item.no(Error('CDP playback probe failed')):item.yes(msg.result||{});
+  };
+  const evalMedia=async()=> {
+    const id=++nextId;
+    const expr=`(()=>{const v=[...document.querySelectorAll('video')].find(x=>!x.ended&&Number.isFinite(x.currentTime));return v?{found:true,paused:v.paused,ready:v.readyState>=2,time:v.currentTime,ended:v.ended}:{found:false}})()`;
+    const result=await Promise.race([
+      new Promise((yes,no)=>{pending.set(id,{yes,no});socket.send(JSON.stringify({
+        id,method:'Runtime.evaluate',params:{expression:expr,returnByValue:true}
+      }))}),
+      sleep(6000).then(()=>{throw Error('Playback probe timed out')})
+    ]);
+    pending.delete(id);
+    return result.result?.value;
+  };
+  try {
+    const a=await evalMedia();
+    await sleep(1200);
+    const b=await evalMedia();
+    const playing=Boolean(a?.found&&b?.found&&a.ready&&b.ready&&
+      !a.paused&&!b.paused&&!b.ended&&Number.isFinite(a.time)&&
+      Number.isFinite(b.time)&&b.time>a.time+0.2&&b.time<a.time+10);
+    return {playing,reason:playing?'verified_advancing_media':'media_not_advancing'};
+  } finally {socket.close()}
 }
 async function main(){
   const {evaluate,close}=await attach();
@@ -167,10 +208,13 @@ async function main(){
       else if(/HTTP 401|HTTP 403|No API key saved|authentication or access/i.test(providerErrors))
         stopReason='provider_auth_failed';
       const evaluation=verifiedAgentResult(c,run,after,model);
-      const passed=!error&&evaluation.passed;
+      const media=c.requiresPlayback
+        ? await youtubePlaybackEvidence(after?.url).catch(()=>({playing:false,reason:'probe_failed'}))
+        : null;
+      const passed=!error&&evaluation.passed&&(!c.requiresPlayback||media?.playing===true);
       const record={name:c.name,caseId:c.caseId,attempt:c.attempt,before,after,
         status:run?.status||(String(error||'').includes('site_unavailable:')?'site_unavailable':'not-started'),
-        ...evaluation,passed,
+        ...evaluation,passed,playbackConfirmed:media?.playing??null,playbackReason:media?.reason??null,
         actions:run?.actions||[],errors:run?.errors||[],error,stages:run?.stages||[]};
       console.log('REAL_SITE_RESULT',JSON.stringify(record));
       results.push({name:c.name,caseId:c.caseId,attempt:c.attempt,passed,

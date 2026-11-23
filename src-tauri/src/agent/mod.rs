@@ -7,4 +7,5 @@ pub mod orchestrator;
 pub mod evidence_verifier;
 pub mod intent_router;
 pub mod native_eval;
+pub mod media_verifier;
 pub mod reactive_perception;

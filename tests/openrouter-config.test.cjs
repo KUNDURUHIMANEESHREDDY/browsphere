@@ -46,6 +46,10 @@ test('native OpenRouter real-site suite keeps model-derived browser actions sepa
   assert.match(wrapper, /LUCIA_REAL_REPEATS/);
   assert.match(wrapper, /ValidateRange\(1,5\)/);
   assert.match(runner, /provider_rate_limited/);
+  assert.match(runner, /name:'YouTube music'/);
+  assert.match(runner, /requiresPlayback:true/);
+  assert.match(runner, /youtubePlaybackEvidence\(after\?\.url\)/);
+  assert.match(runner, /!c\.requiresPlayback\|\|media\?\.playing===true/);
   assert.match(runner, /provider_auth_failed/);
   assert.match(wrapper, /https:\/\/openrouter\.ai\/api\/v1\/chat\/completions/);
   assert.match(wrapper, /MISSING_OPENROUTER_KEY/);

@@ -19,7 +19,7 @@ use crate::agent::evidence_verifier::{
 use crate::agent::dom_extractor::{request_live_dom_snapshot, DomSnapshot};
 use crate::agent::policy::{
     evaluate_policy, evaluate_user_navigation_policy, requested_navigation_url,
-    requested_search_entry_url, sanitize_untrusted_page_text,
+    requested_music_entry_url, requested_search_entry_url, sanitize_untrusted_page_text,
     BrowserAction, PolicyDecision, RiskLevel,
     TraceEntry,
 };
@@ -732,6 +732,7 @@ pub async fn run_react_loop(
     // planning call. The LLM still chooses the concrete webpage interactions;
     // live browser actions and independent evidence checks are mandatory.
     let model_plan = if requested_navigation_url(&goal).is_some()
+        || requested_music_entry_url(&goal).is_some()
         || is_simple_named_title_task(&goal)
     {
         plan_task(&goal)
@@ -1089,6 +1090,24 @@ pub async fn run_react_loop(
                     BrowserAction::Complete { summary: "Destination observed and ready for verification".into() },
                     "delayed_navigation:live_dom_confirmed".to_string(),
                 )
+            } else if !direct_navigation_attempted
+                && orchestrator.specialist() == Specialist::Browser
+                && requested_music_entry_url(&goal).is_some()
+                && url::Url::parse(&snapshot.origin).ok()
+                    .and_then(|url| url.host_str().map(str::to_owned))
+                    .as_deref() != Some("www.youtube.com")
+            {
+                // Explicit user-requested music playback can open the chosen
+                // website without spending a cloud planning call. The model
+                // still must select the song, use live observed controls, and
+                // actually play it; the native media checker verifies progress.
+                direct_navigation_attempted = true;
+                let url = requested_music_entry_url(&goal).expect("checked above");
+                (
+                    "Open YouTube as the first step of the user's music request".into(),
+                    BrowserAction::Navigate { url: url.to_string() },
+                    "music_entry:trusted_user_goal".into(),
+                )
             } else if should_bootstrap_direct_navigation(&goal, orchestrator.specialist(), direct_navigation_attempted)
             {
                 // A direct user instruction such as "open youtube" is a
@@ -1334,6 +1353,21 @@ pub async fn run_react_loop(
                 decision = PolicyDecision::Deny {
                     reason: format!("Specialist evidence verification failed: {reason}"),
                 };
+            }
+            // A user asking Lucia to *play* music is not satisfied by a watch
+            // page URL, a model's "completed" claim, or a click acknowledgment.
+            // Check the actual media clock through native WebView2. This check
+            // cannot itself click Play or manufacture progress.
+            if matches!(decision, PolicyDecision::Allow)
+                && requested_music_entry_url(&goal).is_some()
+            {
+                if let Err(reason) = crate::agent::media_verifier::verify_live_playback(
+                    &app, &webview_label, &snapshot.origin
+                ).await {
+                    decision = PolicyDecision::Deny {
+                        reason: format!("Playback has not been confirmed: {reason}"),
+                    };
+                }
             }
         }
         if matches!(action, BrowserAction::Complete { .. }) && last_action_failed {
