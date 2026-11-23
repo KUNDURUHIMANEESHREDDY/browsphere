@@ -7,8 +7,13 @@ const port = Number(process.env.LUCIA_CDP_PORT || 9272);
 const base = 'http://127.0.0.1:18764';
 
 async function connect() {
-  const targets = await (await fetch('http://127.0.0.1:' + port + '/json')).json();
-  const target = targets.find(t => t.type === 'page' && t.url?.includes('tauri.localhost'));
+  let target;
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const targets = await (await fetch('http://127.0.0.1:' + port + '/json')).json();
+    target = targets.find(t => t.type === 'page' && t.url?.includes('tauri.localhost'));
+    if (target) break;
+    await sleep(350);
+  }
   assert.ok(target, 'Native Browsphere main WebView2 target missing');
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((ok,bad) => { ws.onopen = ok; ws.onerror = bad; });
