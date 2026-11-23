@@ -2575,7 +2575,7 @@ async fn start_agent_run(
                     "decision": decision,
                     "model_route": if entry.model_route.contains("macro:") { "macro" } else { "agent_model" },
                     "latency_ms": entry.latency_ms,
-                    "outcome": entry.outcome
+                    "outcome": diagnostics::classify_agent_outcome(&entry.outcome)
                 }));
                 let mut db = db_for_traces.lock().await;
                 let _ = db.insert_trace(&entry);
@@ -2710,6 +2710,11 @@ fn export_diagnostics() -> Result<String, String> {
     Ok(output.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+fn read_lucia_diagnostics() -> Vec<serde_json::Value> {
+    diagnostics::read_lucia_timeline(&resolve_data_dir())
+}
+
 fn main() {
     let data_dir = resolve_data_dir();
     diagnostics::init(&data_dir);
@@ -2811,6 +2816,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             open_diagnostics_folder,
             export_diagnostics,
+            read_lucia_diagnostics,
             record_ui_diagnostic,
             window_close,
             window_minimize,

@@ -236,7 +236,8 @@
     return '<div class="mac-ai" id="macAiSettings">' +
       '<header class="mac-ai-intro"><h2>AI &amp; ML</h2>' +
       '<p>Configure the models Browsphere uses for local and cloud intelligence.</p></header>' +
-      awsConnection + primary + local + cloud + routing + diagnostic + localLogs + footer +
+      awsConnection + primary + local + cloud + routing + diagnostic + localLogs +
+      (window.LuciaDiagnosticsDashboard ? window.LuciaDiagnosticsDashboard.render() : '') + footer +
       '<details class="mac-aws-advanced"><summary>Advanced AWS service settings</summary>' +
       bedrock + s3 + ddb + cognito + lambda + awsSave + '</details></div>';
   };

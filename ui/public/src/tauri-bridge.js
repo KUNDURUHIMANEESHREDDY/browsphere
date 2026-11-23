@@ -600,6 +600,11 @@
       return invoke('export_diagnostics');
     },
 
+    async readLuciaDiagnostics() {
+      if (!invoke) throw new Error('Lucia diagnostics require the desktop application');
+      return invoke('read_lucia_diagnostics');
+    },
+
     async loadRouterConfig() {
       if (!invoke) return null;
       return invoke('get_router_config');

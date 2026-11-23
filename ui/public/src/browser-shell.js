@@ -930,6 +930,15 @@
                 }).catch(function () { showHudToast('Could not export diagnostics'); });
               } else showHudToast('Export requires Browsphere desktop');
               break;
+            case 'lucia-diag-refresh':
+              if (window.LuciaDiagnosticsDashboard) window.LuciaDiagnosticsDashboard.refresh();
+              break;
+            case 'lucia-diag-select':
+              if (window.LuciaDiagnosticsDashboard) window.LuciaDiagnosticsDashboard.select(btn.dataset.runId);
+              break;
+            case 'lucia-diag-filter':
+              if (window.LuciaDiagnosticsDashboard) window.LuciaDiagnosticsDashboard.filter(btn.dataset.filter);
+              break;
             case 'test-model-connection':
               testNativeModelConnection(null);
               break;
@@ -2708,6 +2717,7 @@
           hydrateRouterFromNative();
           hydrateAwsFromNative();
           refreshNativeOllamaModels(false);
+          if (window.LuciaDiagnosticsDashboard) window.LuciaDiagnosticsDashboard.refresh();
         }
         if (pane === 'passwords') hydrateCredentialsFromNative();
       }

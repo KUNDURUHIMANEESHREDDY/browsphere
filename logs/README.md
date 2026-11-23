@@ -27,4 +27,6 @@ The existing SQLite database still stores the ordinary agent trace history for t
 
 In **Settings → AI & ML → Local Logs**, use **Open Logs** to open the live folder. **Export Diagnostics** saves a combined JSONL file under `%LOCALAPPDATA%\BrowsphereAI\diagnostic-exports\`. Export is manual and is not uploaded automatically.
 
+The **Lucia Diagnostics** dashboard directly below Local Logs reads the same locally saved, sanitized metadata. Use **All runs**, **Needs attention**, or **Completed**, select a run, and inspect its action timeline and policy outcomes. **Refresh** reloads the retained logs. The dashboard intentionally omits raw browser content, prompts, exact URLs, arbitrary failure text, and private runs; a precise root cause may therefore be unavailable.
+
 Logs may contain operational metadata even after redaction. Review diagnostic exports before sharing. No keys, passwords, page content, prompts, model responses, full URLs or private browsing agent runs are deliberately persisted by the diagnostics system. Logger failures never block normal browsing.

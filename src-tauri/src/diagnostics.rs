@@ -182,3 +182,151 @@ mod tests {
         assert_eq!(fields["action"], "navigate");
     }
 }
+
+/// Classifies known engine-generated outcomes without storing arbitrary
+/// browser/page/model text that may be embedded in detailed error messages.
+pub fn classify_agent_outcome(outcome: &str) -> &'static str {
+    // TraceEntry::sanitized has already collapsed all untrusted text to these
+    // fixed statuses. Only match them; never inspect a raw browser message.
+    match outcome {
+        "rejected" => "approval_rejected",
+        "timed_out" => "approval_timeout",
+        "unverified" => "unverified",
+        "denied" => "denied",
+        "failed" => "failed",
+        "confirmed" => "verified",
+        "ok" => "success",
+        "stopped_or_unknown" => "unknown",
+        _ => "other",
+    }
+}
+
+/** A strictly sanitized snapshot of Lucia runs for the local diagnostics UI.
+ * Never return raw log lines, page content, goals, model outputs, or arbitrary strings.
+ * Private Browsing runs are not recorded by the event producer.
+ */
+fn public_lucia_event(value: &Value, channel: &str) -> Option<Value> {
+    let name = value.get("event")?.as_str()?;
+    if !match channel {
+        "agent" => matches!(name, "run_started" | "action_trace" | "run_finished"),
+        "errors" => name == "agent_failure",
+        _ => false,
+    } { return None; }
+    if value.get("channel")?.as_str()? != channel { return None; }
+    let fields = value.get("fields")?.as_object()?;
+    let run_id = fields.get("run_id")?.as_str()?;
+    if uuid::Uuid::parse_str(run_id).is_err() { return None; }
+    let timestamp = value.get("timestamp")?.as_str()?;
+    if chrono::DateTime::parse_from_rfc3339(timestamp).is_err() { return None; }
+
+    let fixed = |key: &str, choices: &[&str]| -> Option<&str> {
+        fields.get(key).and_then(Value::as_str).filter(|s| choices.contains(s))
+    };
+    let step = fields.get("step").and_then(Value::as_u64).filter(|n| *n < 100000);
+    let latency_ms = fields.get("latency_ms").and_then(Value::as_u64).filter(|n| *n < 86400000);
+    let trace_id = fields.get("trace_id").and_then(Value::as_str)
+        .filter(|s| uuid::Uuid::parse_str(s).is_ok());
+    Some(json!({
+        "timestamp": timestamp,
+        "event": name,
+        "run_id": run_id,
+        "trace_id": trace_id,
+        "step": step,
+        "latency_ms": latency_ms,
+        "action": fixed("action", &["navigate", "click", "type_text", "scroll", "download", "complete"]),
+        "decision": fixed("decision", &["allow", "deny", "approval"]),
+        "risk": fixed("risk", &["Low", "Medium", "High", "Critical"]),
+        "model_route": fixed("model_route", &["macro", "agent_model"]),
+        "status": fixed("status", &["running", "completed", "complete", "success", "replayed", "unverified", "rejected", "failed", "halted", "cancelled", "canceled", "stopped"]),
+        "outcome": fixed("outcome", &["success", "failed", "failure", "ok", "error", "blocked", "denied", "timeout", "completed", "verified", "unverified", "loop_guard", "approval_rejected", "approval_timeout", "approval_closed", "cancelled", "replay_drift", "unknown", "other"]),
+        "error_kind": if name == "agent_failure" { Some("agent_run") } else { None },
+    }))
+}
+
+/// Reads only bounded, known agent/error JSONL channels, including rotated files.
+/// Returns a timeline ordered oldest first. Corrupt/unknown lines are skipped.
+pub fn read_lucia_timeline(data_dir: &Path) -> Vec<Value> {
+    use std::collections::VecDeque;
+    let root = folder(data_dir);
+    let mut events: VecDeque<Value> = VecDeque::new();
+    for channel in ["agent", "errors"] {
+        for idx in (0..=BACKUPS).rev() {
+            let path = if idx == 0 { root.join(format!("{channel}.jsonl")) }
+                else { root.join(format!("{channel}.{idx}.jsonl")) };
+            if fs::metadata(&path).map(|m| m.len() > MAX_BYTES * 2).unwrap_or(true) {
+                continue;
+            }
+            let Ok(file) = fs::File::open(path) else { continue };
+            for line in BufReader::new(file).lines().map_while(Result::ok) {
+                if line.len() > 4096 { continue; }
+                if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                    if let Some(event) = public_lucia_event(&value, channel) {
+                        if events.len() >= 4000 { events.pop_front(); }
+                        events.push_back(event);
+                    }
+                }
+            }
+        }
+    }
+    let mut result: Vec<Value> = events.into_iter().collect();
+    result.sort_by(|a, b| {
+        a.get("timestamp").and_then(Value::as_str).cmp(
+            &b.get("timestamp").and_then(Value::as_str))
+    });
+    result
+}
+
+#[cfg(test)]
+mod dashboard_tests {
+    use super::*;
+    #[test]
+    fn timeline_rejects_injected_fields_and_invalid_run_ids() {
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let input = json!({"timestamp":"2026-11-23T05:00:00Z", "channel":"agent",
+            "event":"action_trace", "fields":{"run_id":run_id, "step":2,
+                "action":"click","outcome":"privatePassword123","goal":"secret",
+                "trace_id":"not-an-id", "latency_ms":123}});
+        let event = public_lucia_event(&input, "agent").unwrap();
+        assert_eq!(event["action"], "click");
+        assert!(event["outcome"].is_null());
+        assert!(event["trace_id"].is_null());
+        assert!(!event.to_string().contains("secret"));
+        assert!(!event.to_string().contains("privatePassword"));
+        assert!(public_lucia_event(&json!({"timestamp":"2026-11-23T05:00:00Z",
+            "channel":"agent","event":"run_started","fields":{"run_id":"bad-id"}}),
+            "agent").is_none());
+    }
+}
+
+#[cfg(test)]
+mod dashboard_reader_tests {
+    use super::*;
+    #[test]
+    fn classifies_only_sanitized_outcomes() {
+        assert_eq!(classify_agent_outcome("confirmed"), "verified");
+        assert_eq!(classify_agent_outcome("timed_out"), "approval_timeout");
+        assert_eq!(classify_agent_outcome("unverified"), "unverified");
+        assert_eq!(classify_agent_outcome("POSTCONDITION CONFIRMED: secret"), "other");
+        assert_eq!(classify_agent_outcome("secret-token-value"), "other");
+    }
+
+    #[test]
+    fn reads_retained_rotated_logs_without_leaking_unknown_fields() {
+        let root = std::env::temp_dir().join(format!("browsphere-diag-test-{}", uuid::Uuid::new_v4()));
+        let logs = root.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let run = uuid::Uuid::new_v4().to_string();
+        let record = |event: &str| json!({"timestamp":"2026-11-23T05:00:00Z",
+            "channel":"agent", "event":event, "fields":{
+                "run_id":run, "status":"failed", "api_key":"please-do-not-share"}});
+        fs::write(logs.join("agent.1.jsonl"), format!("{}\n", record("run_started"))).unwrap();
+        fs::write(logs.join("agent.jsonl"),
+            format!("not json\n{}\n", record("run_finished"))).unwrap();
+        let result = read_lucia_timeline(&root);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["event"], "run_started");
+        assert_eq!(result[1]["status"], "failed");
+        assert!(!serde_json::to_string(&result).unwrap().contains("please-do-not-share"));
+        fs::remove_dir_all(root).unwrap();
+    }
+}
