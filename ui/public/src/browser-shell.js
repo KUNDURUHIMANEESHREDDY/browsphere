@@ -4551,7 +4551,7 @@
           task.error = payload.message || 'The agent could not complete this step.';
         } else if (kind === 'status') {
           task.status = payload.status === 'completed' && task.verificationReport ? 'Completed' :
-            payload.status === 'cancelled' ? 'Stopped' : 'Not verified';
+            (payload.status === 'cancelled' || payload.status === 'tab_closed') ? 'Stopped' : 'Not verified';
           task.approval = null;
           thread.pending = false;
           // A completed run is not a factual report on its own. The verification
@@ -4560,6 +4560,8 @@
           if (payload.status === 'completed' && task.verificationReport) {
             var completion = task.verificationReport.summary;
             thread.messages.push({role:'assistant',content:completion,model:'Lucia · Source-checked findings'});
+          } else if (payload.status === 'tab_closed') {
+            thread.messages.push({role:'assistant',content:'Lucia stopped because its assigned task tab was closed.'});
           } else if (payload.status === 'completed') {
             thread.messages.push({role:'assistant',content:'The task ended, but no source-backed verification report was delivered. Do not treat this as a verified result.',error:true});
           } else {

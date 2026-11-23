@@ -346,6 +346,8 @@
               'The browser steps finished, but I do not have a final verification summary.';
             appendAgentBubble('Lucia · Task result', esc(completedText));
             speakLucia(completedText);
+          } else if (result.status === 'tab_closed') {
+            appendAgentBubble('Lucia', 'Lucia stopped because its assigned task tab was closed.');
           } else if (result.status === 'cancelled') {
             appendAgentBubble('Lucia', 'The browser task was stopped.');
           } else {

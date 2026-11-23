@@ -344,6 +344,12 @@ pub struct UrlPreview {
     pub excerpt: String,
 }
 
+pub struct ActiveAgentTarget {
+    tab_id: String,
+    run_id: Uuid,
+    tab_closed: CancellationToken,
+}
+
 pub struct AppState {
     pub db: Arc<Mutex<BrowserDatabase>>,
     pub creds: Arc<CredentialStore>,
@@ -361,7 +367,7 @@ pub struct AppState {
     pub pending_snapshots: Arc<Mutex<HashMap<Uuid, oneshot::Sender<DomSnapshot>>>>,
     pub pending_action_results: Arc<Mutex<HashMap<Uuid, oneshot::Sender<ActionResult>>>>,
     pub active_cancel: Arc<Mutex<Option<CancellationToken>>>,
-    pub active_agent_target: Arc<Mutex<Option<(String, Uuid)>>>,
+    pub active_agent_target: Arc<Mutex<Option<ActiveAgentTarget>>>,
     pub pause_tx: watch::Sender<bool>,
 }
 
@@ -1298,10 +1304,12 @@ async fn close_tab_webview(
 ) -> Result<(), String> {
     let closing_run = {
         let target = state.active_agent_target.lock().await;
-        target.as_ref().filter(|(id, _)| id == &tab_id)
-            .map(|(_, run_id)| *run_id)
+        target.as_ref().filter(|target| target.tab_id == tab_id)
+            .map(|target| (target.run_id, target.tab_closed.clone()))
     };
-    if let Some(run_id) = closing_run {
+    if let Some((run_id, closed_signal)) = closing_run {
+        // Give the worker an explicit terminal reason, even if it is paused.
+        closed_signal.cancel();
         if let Some(token) = state.active_cancel.lock().await.as_ref() {
             token.cancel();
         }
@@ -2213,7 +2221,8 @@ async fn set_agent_paused(
     state: tauri::State<'_, Arc<AppState>>,
     paused: bool,
 ) -> Result<(), String> {
-    let _ = state.pause_tx.send(paused);
+    // Persist the pause flag even when the first agent has not subscribed yet.
+    state.pause_tx.send_replace(paused);
     Ok(())
 }
 
@@ -2511,8 +2520,11 @@ async fn start_agent_run(
         }));
     }
     let cancel_token = CancellationToken::new();
+    let tab_closed = CancellationToken::new();
     *state.active_cancel.lock().await = Some(cancel_token.clone());
-    *state.active_agent_target.lock().await = Some((tab_id, run_id));
+    *state.active_agent_target.lock().await = Some(ActiveAgentTarget {
+        tab_id, run_id, tab_closed: tab_closed.clone(),
+    });
 
     let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalRequest>(16);
     let (trace_tx, mut trace_rx) = mpsc::channel::<TraceEntry>(64);
@@ -2627,6 +2639,7 @@ async fn start_agent_run(
         )
         .await;
 
+        let result = close_aware_agent_result(result, tab_closed.is_cancelled());
         let final_status = match result {
             Ok(status) => status,
             Err(err) => {
@@ -2652,7 +2665,7 @@ async fn start_agent_run(
         prune_closed_approvals(&app_for_status, &approvals_for_status).await;
         {
             let mut target = target_for_status.lock().await;
-            if target.as_ref().is_some_and(|(_, id)| *id == run_id) {
+            if target.as_ref().is_some_and(|target| target.run_id == run_id) {
                 *target = None;
             }
         }
@@ -2670,6 +2683,35 @@ async fn start_agent_run(
     });
 
     Ok(run_id)
+}
+
+// A closed assigned task tab must never be reported as a successful or generic
+// cancelled run. Preserve other statuses when the tab remains open.
+fn close_aware_agent_result(
+    result: Result<String, anyhow::Error>,
+    tab_closed: bool,
+) -> Result<String, anyhow::Error> {
+    if tab_closed { Ok("tab_closed".to_owned()) } else { result }
+}
+
+#[cfg(test)]
+mod tab_closed_tests {
+    use super::close_aware_agent_result;
+
+    #[test]
+    fn closing_a_task_tab_overrides_a_cancelled_or_failed_run() {
+        let cancelled = close_aware_agent_result(Ok("cancelled".into()), true).unwrap();
+        assert_eq!(cancelled, "tab_closed");
+        let failed = close_aware_agent_result(Err(anyhow::anyhow!("lost WebView")), true).unwrap();
+        assert_eq!(failed, "tab_closed");
+    }
+
+    #[test]
+    fn switching_tabs_preserves_the_actual_run_status() {
+        let completed = close_aware_agent_result(Ok("completed".into()), false).unwrap();
+        assert_eq!(completed, "completed");
+        assert!(close_aware_agent_result(Err(anyhow::anyhow!("failed")), false).is_err());
+    }
 }
 
 fn write_startup_log(_data_dir: &std::path::Path, msg: &str) {

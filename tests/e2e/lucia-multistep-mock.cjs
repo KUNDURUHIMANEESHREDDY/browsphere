@@ -64,6 +64,14 @@ async function main() {
   const eventsExpression = "window.__luciaNativeEvents.slice(-300)";
   try {
     await command('Runtime.enable');
+    // The CDP endpoint can appear before the chrome's JavaScript is initialized.
+    let shellReady = false;
+    for (let i=0; i<60; i++) {
+      shellReady = await evaluate('Boolean(window.browsphereApp?.newTab && window.aetherBridge?.isNative)').catch(() => false);
+      if (shellReady) break;
+      await sleep(300);
+    }
+    assert.ok(shellReady, 'Native Browsphere UI never became ready');
     await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');c.ollama_url='http://127.0.0.1:18766';c.ollama_model='lucia-local-e2e';c.prefer_local_for_simple=true;c.domain_overrides={};await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaNativeEvents=[];for(const name of ['agent:plan','agent:stage','agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required'])await window.__TAURI__.event.listen(name,e=>window.__luciaNativeEvents.push({event:name,payload:e.payload}));return true})()");
     async function openLocal(path) {
       const url = base + path;
@@ -248,8 +256,8 @@ async function main() {
         if (closedTerminal && closedError) break;
       }
       assert.ok(closedError, 'Closing the assigned tab did not report the cause');
-      assert.equal(closedTerminal?.payload?.status, 'cancelled',
-        'Closing a task tab must stop the run');
+      assert.equal(closedTerminal?.payload?.status, 'tab_closed',
+        'Closing a task tab must stop the run with the correct cause');
       console.log('PASS closing the background task tab cancels with a clear message');
     } finally {
       await evaluate("window.__TAURI__.core.invoke('set_agent_paused',{paused:false})");

@@ -84,7 +84,11 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Lucia multi-step native CLI test failed with exit code $LASTEXITCODE"
     }
-    Write-Host 'PASS: multi-step native browsing, recovery, and evidence checks'
+    & node (Join-Path $root 'tests\e2e\lucia-tab-closure.cjs')
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native Lucia task-tab closure test failed with exit code $LASTEXITCODE"
+    }
+    Write-Host 'PASS: multi-step native browsing, recovery, tab closure, and evidence checks'
 } finally {
     if ($appProcess) { Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue }
     if ($modelProcess) { Stop-Process -Id $modelProcess.Id -Force -ErrorAction SilentlyContinue }
