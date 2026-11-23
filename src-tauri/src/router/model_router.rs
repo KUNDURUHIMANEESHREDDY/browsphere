@@ -92,6 +92,54 @@ fn is_groq_endpoint(endpoint: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Retry only transient cloud inference errors. This never retries a browser
+/// action, user submission, or any rejected/unauthorized provider request.
+fn retryable_inference_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 429 | 502 | 503 | 504)
+}
+
+async fn send_cloud_inference(
+    request: reqwest::RequestBuilder,
+) -> anyhow::Result<reqwest::Response> {
+    for attempt in 0..3usize {
+        let clone = request.try_clone().ok_or_else(|| anyhow::anyhow!(
+            "Cloud model request is not replayable; refusing to retry"
+        ))?;
+        match clone.send().await {
+            Ok(response) => {
+                if attempt < 2 && retryable_inference_status(response.status()) {
+                    let retry_after = response.headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|header| header.to_str().ok())
+                        .and_then(|value| value.parse::<u64>().ok());
+                    // Honor a longer rate limit without hammering the API or
+                    // blocking the browser agent for an unknown number of minutes.
+                    if retry_after.is_some_and(|secs| secs > 3) {
+                        return Ok(response);
+                    }
+                    let delay = retry_after.unwrap_or(if attempt == 0 { 1 } else { 2 });
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        if retry_after.is_some() { delay * 1000 }
+                        else if attempt == 0 { 450 } else { 950 }
+                    )).await;
+                    continue;
+                }
+                return Ok(response);
+            }
+            Err(error) => {
+                if attempt < 2 && (error.is_connect() || error.is_timeout()) {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        if attempt == 0 { 450 } else { 950 }
+                    )).await;
+                    continue;
+                }
+                return Err(error.into());
+            }
+        }
+    }
+    anyhow::bail!("Cloud inference retries exhausted")
+}
+
 fn cloud_action_payload(
     model: &str,
     system: &str,
@@ -162,7 +210,10 @@ impl ModelRouter {
         Self {
             config,
             aws: AwsConfig::default(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("Create cloud model HTTP client"),
         }
     }
 
@@ -285,7 +336,7 @@ impl ModelRouter {
             if let Some(key) = key {
                 req = req.bearer_auth(key);
             }
-            let response = req.send().await?.error_for_status()?;
+            let response = send_cloud_inference(req).await?.error_for_status()?;
             let body: serde_json::Value = response.json().await?;
             let answer = body.pointer("/choices/0/message/content").and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Provider response has no choices[0].message.content"))?;
@@ -379,7 +430,7 @@ User text: <text>{}</text>"#,
                 "max_tokens": 1000
             }));
             if let Some(secret) = key { req = req.bearer_auth(secret); }
-            let response = req.send().await?.error_for_status()?;
+            let response = send_cloud_inference(req).await?.error_for_status()?;
             let body: serde_json::Value = response.json().await?;
             Ok(body.pointer("/choices/0/message/content").and_then(|v| v.as_str())
                 .unwrap_or("").to_string())
@@ -662,7 +713,7 @@ Example: {{"thought":"Visit the website requested by the user","action":{{"type"
         if let Some(secret) = api_key {
             req = req.bearer_auth(secret);
         }
-        let resp = req.send().await.map_err(|e| {
+        let resp = send_cloud_inference(req).await.map_err(|e| {
             anyhow::anyhow!("Could not reach selected browser-action model ({route_label}): {e}")
         })?;
         let status = resp.status();
@@ -844,6 +895,71 @@ mod tests {
             &creds, false).await.unwrap();
         assert!(matches!(action, BrowserAction::Navigate { url } if url == "https://example.org/"));
         assert_eq!(route, "litellm:fixture-cloud-model");
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn transient_cloud_inference_statuses_are_bounded() {
+        for code in [408u16, 429, 502, 503, 504] {
+            assert!(retryable_inference_status(
+                reqwest::StatusCode::from_u16(code).unwrap()));
+        }
+        for code in [200u16, 400, 401, 403, 404, 422, 500] {
+            assert!(!retryable_inference_status(
+                reqwest::StatusCode::from_u16(code).unwrap()));
+        }
+    }
+
+    #[tokio::test]
+    async fn cloud_inference_retries_one_transient_error_then_succeeds() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (status, body) in [
+                ("503 Service Unavailable", "try again"),
+                ("200 OK", "recovered")
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let size = stream.read(&mut request).await.unwrap();
+                assert!(String::from_utf8_lossy(&request[..size]).starts_with("POST /model "));
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build().unwrap();
+        let response = send_cloud_inference(client
+            .post(format!("http://{address}/model")).body("fixture")).await.unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.text().await.unwrap(), "recovered");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cloud_inference_never_retries_unauthorized_requests() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream.write_all(
+                b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            ).await.unwrap();
+            let retry = tokio::time::timeout(std::time::Duration::from_millis(1100),
+                listener.accept()).await;
+            assert!(retry.is_err(), "401 response must never be retried");
+        });
+        let client = reqwest::Client::new();
+        let response = send_cloud_inference(client
+            .post(format!("http://{address}/model")).body("fixture")).await.unwrap();
+        assert_eq!(response.status().as_u16(), 401);
         server.await.unwrap();
     }
 

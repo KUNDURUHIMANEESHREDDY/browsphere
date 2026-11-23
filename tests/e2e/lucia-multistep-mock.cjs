@@ -88,10 +88,12 @@ async function main() {
       for (let i=0;i<40;i++) {
         await sleep(350);
         const observed = await evaluate(snapshotExpression).catch(() => null);
-        if (observed?.origin === url) {
-          assert.ok(observed.interactive_nodes?.length > 0, 'Page has no observed native controls');
+        if (observed?.origin === url &&
+            observed.interactive_nodes?.length > 0) {
           return observed;
         }
+        // A child WebView can expose the destination URL before DOM
+        // hydration finishes. Retry its fresh observation until controls load.
       }
       throw Error('Fixture navigation not observed in native WebView: ' + url);
     }
