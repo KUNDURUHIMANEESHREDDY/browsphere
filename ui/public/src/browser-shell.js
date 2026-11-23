@@ -4763,12 +4763,16 @@
             input.disabled = true;
             input.placeholder = 'Lucia is deciding how to help…';
           }
-          var intent = { mode: 'chat' };
+          var intent = null;
+          var routingFailure = null;
           var originalTabId = getActiveTab()?.id;
           try {
             intent = await window.aetherBridge.routeLuciaIntent(text);
+            if (!intent || (intent.mode !== 'chat' && intent.mode !== 'browser_task')) {
+              throw new Error('The intent model returned an invalid task classification.');
+            }
           } catch (routingError) {
-            console.warn('Lucia intent routing unavailable; falling back to chat:', routingError);
+            routingFailure = String(routingError);
           } finally {
             luciaIntentPending = false;
             if (input) {
@@ -4777,7 +4781,24 @@
             }
           }
           if (getActiveTab()?.id !== originalTabId) return;
-          if (intent?.mode === 'browser_task') {
+          if (routingFailure !== null) {
+            // A failed router must never masquerade as a successful chat
+            // classification. Show the actual failure in the conversation
+            // without calling the text-only chat model or executing a task.
+            var failedThread = createLuciaThread(text);
+            failedThread.messages.push({role:'user',content:text});
+            failedThread.messages.push({
+              role:'assistant',
+              content:'Lucia could not classify this request. No task was started. Check Settings → AI & ML, then retry. Details: ' + routingFailure,
+              error:true
+            });
+            if (input) input.value = '';
+            renderActiveTab();
+            renderNewTabHistoryDrawer();
+            scrollMainTabChatToBottom();
+            return;
+          }
+          if (intent.mode === 'browser_task') {
             await startNewTabAgentTask(text);
             return;
           }
