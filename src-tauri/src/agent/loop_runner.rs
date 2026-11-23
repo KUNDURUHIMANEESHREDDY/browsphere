@@ -132,6 +132,20 @@ fn rebind_unambiguous_live_control(
     }
 }
 
+fn retryable_verifier_format_error(error: &str) -> bool {
+    // A malformed LLM quote/claim may be repaired by a second independent
+    // review. Do not retry missing evidence, unobserved source URLs, or the
+    // model's explicit conclusion that the task is unsupported.
+    [
+        "Verifier did not return valid structured evidence",
+        "Supporting quote does not appear in observed page",
+        "Finding or quote has an invalid length",
+        "Claim is not grounded in the quoted passage",
+        "Claim cites a number missing from the quote",
+        "Duplicate cited finding",
+    ].iter().any(|message| error.contains(message))
+}
+
 fn stop_after_approval_outcome(outcome: &str) -> bool {
     matches!(outcome, "REJECTED BY USER" | "APPROVAL TIMED OUT"
         | "ABORTED: approval channel closed" | "ABORTED: task cancelled")
@@ -667,8 +681,23 @@ pub async fn run_react_loop(
                             .map_err(anyhow::Error::msg)
                     } else {
                         let router = router.lock().await;
-                        router.verify_browser_task(&goal, summary, &orchestrator.evidence,
-                            is_comparison, &creds).await
+                        let first = router.verify_browser_task(&goal, summary, &orchestrator.evidence,
+                            is_comparison, &creds).await;
+                        match first {
+                            Ok(report) => Ok(report),
+                            Err(error) if retryable_verifier_format_error(&error.to_string()) => {
+                                // The retry does not manufacture task success.
+                                // Rust independently validates every quote and
+                                // URL again; missing evidence still fails closed.
+                                let guidance = format!(
+                                    "Retry source review with a contiguous exact quote from the observed page. Previous format/grounding error: {}",
+                                    error.to_string().chars().take(180).collect::<String>()
+                                );
+                                router.verify_browser_task(&goal, &guidance, &orchestrator.evidence,
+                                    is_comparison, &creds).await
+                            }
+                            Err(error) => Err(error),
+                        }
                     };
                     match result {
                         Ok(report) => {
@@ -1073,6 +1102,19 @@ mod production_safety_tests {
         };
         assert!(!rebind_unambiguous_live_control(
             &mut ambiguous_action, &ambiguous, goal));
+    }
+
+    #[test]
+    fn verifier_retry_only_repairs_format_errors_not_missing_evidence() {
+        assert!(retryable_verifier_format_error(
+            "Supporting quote does not appear in observed page: https://example.org/"));
+        assert!(retryable_verifier_format_error(
+            "Verifier did not return valid structured evidence: invalid json"));
+        assert!(!retryable_verifier_format_error(
+            "Verifier found insufficient evidence: task not observed"));
+        assert!(!retryable_verifier_format_error(
+            "Unobserved source URL: https://other.example/"));
+        assert!(!retryable_verifier_format_error("No observed source evidence to verify"));
     }
 
     #[test]
