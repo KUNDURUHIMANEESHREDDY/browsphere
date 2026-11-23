@@ -46,6 +46,8 @@ jobs:
           node --check tests/e2e/lucia-youtube-search.cjs
           node --check tests/e2e/lucia-failure-recovery.cjs
           node --check tests/e2e/lucia-start-page-navigation.cjs
+          node --check tests/e2e/lucia-local-model-server.cjs
+          node --check tests/e2e/lucia-multistep-mock.cjs
           Get-ChildItem tests -Filter *.test.cjs | ForEach-Object { node --test $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
 
       - name: Run Rust safety and regression tests
@@ -56,6 +58,11 @@ jobs:
         with:
           projectPath: src-tauri
           args: --bundles nsis
+
+      - name: Run isolated native Lucia multi-step and recovery E2E
+        shell: pwsh
+        timeout-minutes: 8
+        run: ./tests/e2e/run-lucia-multistep.ps1
 
       - name: Verify installer artifact exists
         shell: pwsh
