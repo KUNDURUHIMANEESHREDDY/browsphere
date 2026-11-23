@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use url::Url;
 
 use crate::agent::policy::BrowserAction;
@@ -175,13 +177,34 @@ fn cloud_inference_error(status: reqwest::StatusCode, retry_after: Option<&str>)
     }
 }
 
-fn require_cloud_success(response: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+/// Interpret a bounded provider error without surfacing its raw content.
+async fn cloud_inference_error_from_response(response: reqwest::Response) -> String {
+    let status = response.status();
+    let retry_after = response.headers().get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok()).map(str::to_string);
+    let limited_body = if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        && response.content_length().is_none_or(|len| len <= 16_384)
+    {
+        response.text().await.ok().filter(|text| text.len() <= 16_384)
+    } else {
+        None
+    };
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        && limited_body.as_ref().is_some_and(|body| {
+            body.contains("FreeUsageLimitError") ||
+            body.to_ascii_lowercase().contains("free usage limit reached")
+        })
+    {
+        return "The selected model's free usage allowance was exhausted (FreeUsageLimitError, HTTP 429). Lucia stopped without switching providers. Check the account's usage in 9Router; the provider did not confirm a reset time.".into();
+    }
+    cloud_inference_error(status, retry_after.as_deref())
+}
+
+async fn require_cloud_success(response: reqwest::Response) -> anyhow::Result<reqwest::Response> {
     if response.status().is_success() {
         return Ok(response);
     }
-    let retry_after = response.headers().get(reqwest::header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok());
-    anyhow::bail!("{}", cloud_inference_error(response.status(), retry_after))
+    anyhow::bail!("{}", cloud_inference_error_from_response(response).await)
 }
 
 fn cloud_action_payload(
@@ -210,6 +233,9 @@ pub struct ModelRouter {
     config: RouterConfig,
     aws: AwsConfig,
     client: reqwest::Client,
+    /// Shared across cloned model routers so sequential Lucia stages and
+    /// other tasks respect the same provider cooldown without rotating keys.
+    cloud_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl ModelRouter {
@@ -258,7 +284,41 @@ impl ModelRouter {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("Create cloud model HTTP client"),
+            cloud_cooldowns: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Respect an upstream rate-limit window across clones of this router.
+    /// No alternate credentials, endpoint or model are ever selected.
+    async fn send_guarded_cloud_inference(
+        &self, request: reqwest::RequestBuilder,
+    ) -> anyhow::Result<reqwest::Response> {
+        let route = format!("{}|{}", self.config.litellm_url, self.config.litellm_model);
+        {
+            let mut cooldowns = self.cloud_cooldowns.lock()
+                .map_err(|_| anyhow::anyhow!("Cloud cooldown state unavailable"))?;
+            if let Some(&deadline) = cooldowns.get(&route) {
+                if deadline > Instant::now() {
+                    let seconds = deadline.saturating_duration_since(Instant::now()).as_secs().max(1);
+                    anyhow::bail!(
+                        "Selected cloud model hit HTTP 429 and is in a short local cooldown (up to {seconds} more seconds). Lucia did not send another provider request or change models."
+                    );
+                }
+                cooldowns.remove(&route);
+            }
+        }
+        let response = send_cloud_inference(request).await?;
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let seconds = response.headers().get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|seconds| seconds.clamp(1, 3600))
+                .unwrap_or(90);
+            let mut cooldowns = self.cloud_cooldowns.lock()
+                .map_err(|_| anyhow::anyhow!("Cloud cooldown state unavailable"))?;
+            cooldowns.insert(route, Instant::now() + Duration::from_secs(seconds));
+        }
+        Ok(response)
     }
 
     /// The explicit cloud-only option takes priority over local defaults and
@@ -380,7 +440,7 @@ impl ModelRouter {
             if let Some(key) = key {
                 req = req.bearer_auth(key);
             }
-            let response = require_cloud_success(send_cloud_inference(req).await?)?;
+            let response = require_cloud_success(self.send_guarded_cloud_inference(req).await?).await?;
             let body: serde_json::Value = response.json().await?;
             let answer = body.pointer("/choices/0/message/content").and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Provider response has no choices[0].message.content"))?;
@@ -474,7 +534,7 @@ User text: <text>{}</text>"#,
                 "max_tokens": 1000
             }));
             if let Some(secret) = key { req = req.bearer_auth(secret); }
-            let response = require_cloud_success(send_cloud_inference(req).await?)?;
+            let response = require_cloud_success(self.send_guarded_cloud_inference(req).await?).await?;
             let body: serde_json::Value = response.json().await?;
             Ok(body.pointer("/choices/0/message/content").and_then(|v| v.as_str())
                 .unwrap_or("").to_string())
@@ -772,7 +832,7 @@ Example: {{"thought":"Visit the website requested by the user","action":{{"type"
             if let Some(secret) = api_key.as_ref() {
                 req = req.bearer_auth(secret);
             }
-            let resp = send_cloud_inference(req).await.map_err(|e| {
+            let resp = self.send_guarded_cloud_inference(req).await.map_err(|e| {
                 anyhow::anyhow!("Could not reach selected browser-action model ({route_label}): {e}")
             })?;
             let status = resp.status();
@@ -780,11 +840,9 @@ Example: {{"thought":"Visit the website requested by the user","action":{{"type"
                 // Avoid returning raw provider text, which could contain
                 // copied webpage content or credentials. Distinguish quota
                 // failures from errors in Lucia's actual browser controls.
-                let retry_after = resp.headers().get(reqwest::header::RETRY_AFTER)
-                    .and_then(|value| value.to_str().ok());
                 anyhow::bail!(
                     "Browser-action request failed for {route_label}: {}",
-                    cloud_inference_error(status, retry_after)
+                    cloud_inference_error_from_response(resp).await
                 );
             }
             let val = resp.json::<serde_json::Value>().await.map_err(|_| {
@@ -1182,6 +1240,45 @@ mod tests {
             assert_eq!(response.status().as_u16(), 429);
             server.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn exhausted_free_model_is_paused_across_cloned_router_without_more_requests() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = r#"{"error":{"type":"FreeUsageLimitError","message":"Free usage limit reached; private-token-must-not-leak"}}"#;
+            let response = format!(
+                "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            let unexpected = tokio::time::timeout(
+                Duration::from_millis(400), listener.accept()
+            ).await;
+            assert!(unexpected.is_err(), "Router clone sent another quota-limited request");
+        });
+        let mut config = RouterConfig::default();
+        config.litellm_url = format!("http://{address}/v1/chat/completions");
+        config.litellm_model = "oc/hy4-flash-free".into();
+        let router = ModelRouter::new(config);
+        let client = reqwest::Client::new();
+        let request = || client.post(format!("http://{address}/v1/chat/completions"))
+            .body("synthetic-test-request");
+        let first = router.send_guarded_cloud_inference(request()).await.unwrap();
+        assert_eq!(first.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        let explanation = cloud_inference_error_from_response(first).await;
+        assert!(explanation.contains("FreeUsageLimitError"));
+        assert!(!explanation.contains("private-token-must-not-leak"));
+        let retry = router.clone().send_guarded_cloud_inference(request())
+            .await.expect_err("Cloned router must honor shared cooldown");
+        assert!(retry.to_string().contains("local cooldown"));
+        assert!(retry.to_string().contains("did not send another provider request"));
+        server.await.unwrap();
     }
 
     #[tokio::test]
