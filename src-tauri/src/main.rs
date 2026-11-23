@@ -2340,7 +2340,7 @@ async fn start_agent_run(
     // native website WebView2. Agent actions need a real child tab to control.
     // The older end-to-end test created that child manually, so it missed this
     // normal first-run path. Only an explicit user navigation may bootstrap it.
-    let agent_label = state.tabs.active_webview_label().await;
+    let mut agent_label = state.tabs.active_webview_label().await;
     let no_visible_site = app.get_webview(&agent_label).is_none()
         || state.tabs.bounds.lock().await.hidden;
     if no_visible_site {
