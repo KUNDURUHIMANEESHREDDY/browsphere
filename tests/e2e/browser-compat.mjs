@@ -58,6 +58,13 @@ try {
   if (!app) throw Error('Browsphere main view not found; launch the native test instance');
   main = new CDP(app.webSocketDebuggerUrl);
   await main.open();
+  let shellReady = false;
+  for (let attempt = 0; attempt < 75; attempt++) {
+    shellReady = await main.evaluate('Boolean(window.aetherBridge?.isNative && window.browsphereApp?.navigate && window.browsphereSiteControls?.openCurrentSite)').catch(() => false);
+    if (shellReady) break;
+    await sleep(300);
+  }
+  if (!shellReady) throw Error('Native Browsphere shell initialization timed out');
   const initial = await main.evaluate('({native:window.aetherBridge?.isNative,controls:!!window.browsphereSiteControls,lock:!!document.getElementById("sitePermissionsButton")})');
   record('Native UI and site controls load', initial.native && initial.controls && initial.lock, initial);
 
@@ -83,14 +90,20 @@ try {
     child?.close();
     child = new CDP(match.webSocketDebuggerUrl);
     await child.open();
-    let page = await child.evaluate('({title:document.title,ready:document.readyState,headings:document.querySelectorAll("h1").length})');
-    for (let attempt = 0; attempt < 10 && page.ready === 'loading'; attempt++) {
+    const observedPage = '({url:location.href,title:document.title,ready:document.readyState,headings:document.querySelectorAll("h1").length})';
+    const expectedHost = new URL(url).host;
+    let page = await child.evaluate(observedPage);
+    for (let attempt = 0; attempt < 25; attempt++) {
+      // The CDP target URL can update before the renderer's old document is replaced.
+      // Do not treat a previous website's title/content as the new site's evidence.
+      const arrived = new URL(page.url).host === expectedHost;
+      if (arrived && page.title.trim().length > 0 &&
+          (page.ready !== 'loading' || page.headings > 0)) break;
       await sleep(350);
-      page = await child.evaluate('({title:document.title,ready:document.readyState,headings:document.querySelectorAll("h1").length})');
+      page = await child.evaluate(observedPage);
     }
-    // Some large sites stream resources indefinitely; require real page content and
-    // a real title rather than treating an early CDP attach as a load failure.
-    const valid = page.title.trim().length > 0 && (page.ready !== 'loading' || page.headings > 0);
+    const valid = new URL(page.url).host === expectedHost && page.title.trim().length > 0 &&
+      (page.ready !== 'loading' || page.headings > 0);
     record(label + ' real WebView2 navigation', valid, {url:match.url.slice(0,100),...page});
     const chrome = await main.evaluate('({url:window.browsphereApp.activeTab().url,bar:document.getElementById("omnibarInput").value})');
     record(label + ' address bar sync', new URL(chrome.url).host === new URL(url).host &&
