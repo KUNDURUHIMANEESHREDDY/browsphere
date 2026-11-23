@@ -1515,7 +1515,7 @@ mod model_controls_tests {
         DomNodeSummary {
             node_id: id.into(), label: label.into(), tag: tag.into(),
             role: tag.into(), href: None,
-            is_submit: false, is_sensitive: false, bbox: None,
+            is_submit: false, is_sensitive: false, options: vec![], checked: None, bbox: None,
         }
     }
 
