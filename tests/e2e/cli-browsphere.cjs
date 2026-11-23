@@ -80,8 +80,14 @@ async function main() {
   }
   if(action==='test'){
     const program=path.join(__dirname,'lucia-multistep-mock.cjs');
+    // CPU-only Qwen needs a different test deadline from the deterministic
+    // mock. This test budget never overrides browser-action policy or runtime
+    // cancellation; an earlier 240-second wrapper timeout hid real test data.
+    const realModel = Boolean(process.env.LUCIA_E2E_REAL_MODEL);
+    const timeoutMs = realModel ? 1200000 : 240000;
     const result=spawnSync(process.execPath,[program],{
-      encoding:'utf8',timeout:240000,env:process.env,windowsHide:true
+      encoding:'utf8',timeout:timeoutMs,env:process.env,windowsHide:true,
+      maxBuffer:1024*1024
     });
     return output({exitCode:result.status,stdout:(result.stdout||'').slice(-13000),
       stderr:(result.stderr||'').slice(-8000),error:result.error?.message||null,
