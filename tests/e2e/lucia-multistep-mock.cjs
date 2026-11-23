@@ -156,6 +156,10 @@ async function main() {
     assert.ok(failedAt>=0,'Test did not observe a genuine failed click');
     assert.ok(recovery.actions.slice(failedAt+1).some(x=>x.type==='click'
       && ['ok','confirmed'].includes(x.outcome)),'No successful fallback click');
+    const finalVerification=recovery.actions.filter(x=>x.type==='complete'
+      && x.route?.includes('Verification Agent')).at(-1);
+    assert.equal(finalVerification?.outcome,'ok',
+      'Verifier audit trace must report success even when its summary mentions a previous failed click');
     const afterRecovery=await evaluate(snapshotExpression);
     assert.ok(afterRecovery.text_excerpt.includes('Recovery complete: fallback button succeeded'),
       'Recovery confirmation not visible');

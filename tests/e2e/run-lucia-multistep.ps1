@@ -26,6 +26,12 @@ New-Item -ItemType Directory -Force $env:APPDATA, $env:LOCALAPPDATA, $env:WEBVIE
 
 $modelProcess = $null
 $appProcess = $null
+# WebView2 150+ ignores CDP environment flags in elevated host processes.
+# GitHub Windows runners are elevated, so set a temporary machine-level
+# policy for this one executable in the ephemeral CI worker only.
+$cdpPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+$cdpPolicyName = [IO.Path]::GetFileName($ExecutablePath)
+$createdCdpPolicy = $false
 $serverOut = Join-Path $profile 'mock-model.stdout.log'
 $serverErr = Join-Path $profile 'mock-model.stderr.log'
 
@@ -41,6 +47,16 @@ function Wait-ForLoopback($url, $tries = 35) {
 }
 
 try {
+    if ($env:GITHUB_ACTIONS -eq 'true') {
+        New-Item -Path $cdpPolicyPath -Force | Out-Null
+        $preexisting = Get-ItemProperty -Path $cdpPolicyPath -Name $cdpPolicyName -ErrorAction SilentlyContinue
+        if ($null -ne $preexisting) {
+            throw "Refusing to overwrite an existing WebView2 policy for $cdpPolicyName"
+        }
+        New-ItemProperty -Path $cdpPolicyPath -Name $cdpPolicyName -PropertyType String -Value $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS | Out-Null
+        $createdCdpPolicy = $true
+        Write-Host "Configured temporary CI-only WebView2 debugging policy for $cdpPolicyName"
+    }
     $serverScript = Join-Path $root 'tests\e2e\lucia-local-model-server.cjs'
     $modelProcess = Start-Process -FilePath 'node' -ArgumentList @('"' + $serverScript + '"') -WorkingDirectory $root -PassThru -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr
 
@@ -49,11 +65,24 @@ try {
 
     Write-Host 'Starting isolated Browsphere native WebView2 fixture tests'
     $appProcess = Start-Process -FilePath $ExecutablePath -WorkingDirectory $root -PassThru
-    Wait-ForLoopback 'http://127.0.0.1:9272/json' 55
+    try {
+        Wait-ForLoopback 'http://127.0.0.1:9272/json' 55
+    } catch {
+        $appProcess.Refresh()
+        Write-Host "Native app exited: $($appProcess.HasExited)"
+        if ($appProcess.HasExited) { Write-Host "Native app exit code: $($appProcess.ExitCode)" }
+        $webviews = @(Get-Process -Name 'msedgewebview2' -ErrorAction SilentlyContinue)
+        Write-Host "WebView2 processes observed: $($webviews.Count)"
+        Write-Host 'Windows CI browser debugging port was not opened; this is a startup/CDP failure, not a passed agent test'
+        throw
+    }
 
-    & node (Join-Path $root 'tests\e2e\lucia-multistep-mock.cjs')
+    $cli = Join-Path $root 'tests\e2e\cli-browsphere.cjs'
+    & node $cli --json doctor
+    if ($LASTEXITCODE -ne 0) { throw 'Native Browsphere test dependencies failed CLI health checks' }
+    & node $cli --json test
     if ($LASTEXITCODE -ne 0) {
-        throw "Lucia multi-step native E2E failed with exit code $LASTEXITCODE"
+        throw "Lucia multi-step native CLI test failed with exit code $LASTEXITCODE"
     }
     Write-Host 'PASS: multi-step native browsing, recovery, and evidence checks'
 } finally {
@@ -63,6 +92,10 @@ try {
     if (Test-Path $serverErr) {
         $errors = Get-Content $serverErr -Tail 25
         if ($errors) { Write-Warning ($errors -join [Environment]::NewLine) }
+    }
+    if ($createdCdpPolicy) {
+        Remove-ItemProperty -Path $cdpPolicyPath -Name $cdpPolicyName -ErrorAction SilentlyContinue
+        Write-Host "Removed temporary CI-only WebView2 policy for $cdpPolicyName"
     }
     Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
 }

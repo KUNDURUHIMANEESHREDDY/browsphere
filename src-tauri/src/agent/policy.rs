@@ -84,14 +84,24 @@ impl TraceEntry {
                 PolicyDecision::Deny { reason: "Blocked by policy".into() },
             other => other,
         };
-        let status = self.outcome.to_ascii_uppercase();
-        self.outcome = if status.contains("REJECTED") { "rejected" }
-            else if status.contains("TIMED OUT") { "timed_out" }
-            else if status.contains("UNVERIFIED") { "unverified" }
-            else if status.contains("DENIED") { "denied" }
-            else if status.contains("FAILED") || status.contains("ABORTED") { "failed" }
-            else if status.contains("CONFIRMED") { "confirmed" }
-            else if status.contains("OK") || status.contains("COMPLETED") { "ok" }
+        let status = self.outcome.trim().to_ascii_uppercase();
+        // Only the trusted execution STATUS prefix determines the audit result.
+        // Browser content and verifier summaries are untrusted free text: a
+        // successful report that mentions an earlier "failed click" must not
+        // be logged as a failed verifier action.
+        self.outcome = if status.starts_with("REJECTED") { "rejected" }
+            else if status.starts_with("APPROVAL TIMED OUT") { "timed_out" }
+            else if status.starts_with("UNVERIFIED") { "unverified" }
+            else if status.starts_with("DENIED") { "denied" }
+            else if status.starts_with("FAILED")
+                || status.starts_with("ABORTED")
+                || status.starts_with("HALTED")
+                || status.starts_with("APPROVED BUT FAILED")
+                || status.starts_with("REPLAY DRIFT") { "failed" }
+            else if status.starts_with("POSTCONDITION CONFIRMED") { "confirmed" }
+            else if status.starts_with("OK:")
+                || status.starts_with("APPROVED & OK:")
+                || status.starts_with("COMPLETED:") { "ok" }
             else { "stopped_or_unknown" }.into();
         self
     }
@@ -359,6 +369,36 @@ pub fn evaluate_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_outcome_reads_execution_status_not_untrusted_summary_words() {
+        let entry = |outcome: &str| TraceEntry {
+            trace_id: Uuid::nil(),
+            run_id: Uuid::nil(),
+            step_index: 0,
+            active_origin: "https://example.org/private?q=never-log".into(),
+            thought: "Do not persist model rationale".into(),
+            action: BrowserAction::Complete { summary: "Untrusted summary".into() },
+            risk: RiskLevel::Low,
+            decision: PolicyDecision::Allow,
+            model_route: "test".into(),
+            latency_ms: 0,
+            outcome: outcome.into(),
+        };
+        assert_eq!(entry("OK: COMPLETED: Recovery succeeded after the first click failed")
+            .sanitized().outcome, "ok");
+        assert_eq!(entry("OK: Clicked button labelled rejected request")
+            .sanitized().outcome, "ok");
+        assert_eq!(entry("POSTCONDITION CONFIRMED: OK: Navigation acknowledged")
+            .sanitized().outcome, "confirmed");
+        assert_eq!(entry("FAILED: WebView2 action result unavailable")
+            .sanitized().outcome, "failed");
+        assert_eq!(entry("DENIED: Blocked by policy")
+            .sanitized().outcome, "denied");
+        assert_eq!(entry("APPROVAL TIMED OUT").sanitized().outcome, "timed_out");
+        assert_eq!(entry("UNVERIFIED ACTION EFFECT: No snapshot")
+            .sanitized().outcome, "unverified");
+    }
 
     #[test]
     fn blocks_non_web_navigation() {
