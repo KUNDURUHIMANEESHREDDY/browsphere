@@ -62,6 +62,13 @@ async function main() {
   const compactSnapshot = "(async()=>{const s=await window.__TAURI__.core.invoke('capture_live_snapshot');return {origin:s?.origin,title:s?.title,searchControls:(s?.interactive_nodes||[]).filter(n=>/search/i.test(n.label)).map(n=>({id:n.node_id,label:n.label,tag:n.tag,role:n.role})).slice(0,10)}})()";
   try {
     await command('Runtime.enable');
+    let shellReady = false;
+    for (let attempt = 0; attempt < 65; attempt++) {
+      shellReady = await evaluate('Boolean(window.browsphereApp?.newTab && window.aetherBridge?.startLuciaSpecialistTask)').catch(() => false);
+      if (shellReady) break;
+      await sleep(350);
+    }
+    assert.ok(shellReady, 'Native Browsphere shell did not initialize before Lucia test');
     await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');c.prefer_local_for_simple=true;c.ollama_url='http://127.0.0.1:11434';c.ollama_model='qwen2.5:3b-instruct';await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaYoutubeEvents=[];for(const event of ['agent:trace','agent:stage','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required'])await window.__TAURI__.event.listen(event,e=>window.__luciaYoutubeEvents.push({event,payload:e.payload}));window.browsphereApp.newTab('browsphere://start');return true})()");
     await sleep(400);
     const openRun = await evaluate("window.aetherBridge.startLuciaSpecialistTask('open youtube','browsphere://start','New Tab')");

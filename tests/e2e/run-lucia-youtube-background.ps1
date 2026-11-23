@@ -36,6 +36,10 @@ try {
         Start-Sleep -Milliseconds 450
     }
     if (-not $ready) { throw 'Isolated native browser WebView2 did not become ready.' }
+    & node (Join-Path $root 'tests\e2e\lucia-local-fallback-ui.cjs')
+    if ($LASTEXITCODE -ne 0) {
+        throw "Local Lucia model recovery UI test failed (exit $LASTEXITCODE)."
+    }
     & node (Join-Path $root 'tests\e2e\lucia-youtube-search.cjs')
     if ($LASTEXITCODE -ne 0) {
         throw "Live YouTube background navigation test failed (exit $LASTEXITCODE)."

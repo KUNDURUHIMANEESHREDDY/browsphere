@@ -194,6 +194,27 @@ impl ModelRouter {
 
     /// Send a real, small inference request using the currently selected backend.
     pub async fn test_connection(&self, creds: &CredentialStore, backend: Option<&str>) -> anyhow::Result<String> {
+        if backend == Some("local-agent") {
+            // Check Lucia's actual JSON action contract, not just a generic text response.
+            // This call stays on the configured local Ollama endpoint.
+            let mut probe = self.clone();
+            probe.config.prefer_local_for_simple = true;
+            probe.config.lucia_cloud_only = false;
+            probe.client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(50))
+                .build()?;
+            let (_, action, route) = probe.propose_specialist_action(
+                "about:blank",
+                "User request: open https://example.com/. Output one navigate action to https://example.com/. No DOM elements are observed.",
+                "Test Lucia's browser-action JSON only. Do not browse or invent click targets.",
+                creds, false,
+            ).await?;
+            anyhow::ensure!(
+                matches!(action, BrowserAction::Navigate { ref url } if url == "https://example.com/"),
+                "Local model {route} replied but did not produce the required navigation action"
+            );
+            return Ok(format!("{route} returned valid Lucia browser-action JSON"));
+        }
         if backend == Some("cloud-agent") {
             // Explicit button only: one small provider call, never a browser
             // action. Verify the model produces Lucia's actual JSON schema,

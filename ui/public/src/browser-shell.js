@@ -941,6 +941,9 @@
             case 'test-local-model':
               testNativeModelConnection('local');
               break;
+            case 'use-local-lucia-fallback':
+              useInstalledLocalModelForLucia();
+              break;
             case 'test-cloud-model':
               testNativeModelConnection('cloud');
               break;
@@ -3778,6 +3781,57 @@
         } else {
           setNativeAiPreferred(wasLocal ? 'ollama' : 'litellm');
           showModelTestStatus('Could not switch the engine. Check the settings and try again.');
+        }
+      }
+
+      async function useInstalledLocalModelForLucia() {
+        if (!window.aetherBridge || !window.aetherBridge.isNative) {
+          showModelTestStatus('Local Lucia requires the Windows app.');
+          return;
+        }
+        var button = document.querySelector('[data-action="use-local-lucia-fallback"]');
+        if (button && button.disabled) return;
+        if (button) button.disabled = true;
+        var original = null;
+        var switched = false;
+        try {
+          showModelTestStatus('Checking installed Ollama models...');
+          var installed = await window.aetherBridge.listLocalModels();
+          if (!Array.isArray(installed) || !installed.length) {
+            throw new Error('No installed Ollama models. Start Ollama and refresh its models first.');
+          }
+          // Prefer the model verified with the native Lucia browser flow.
+          var model = installed.includes('qwen2.5:3b-instruct') ? 'qwen2.5:3b-instruct' :
+            (installed.includes(nativeRouterConfig.ollama_model) ? nativeRouterConfig.ollama_model :
+              installed.find(function (name) { return /qwen|llama|mistral|deepseek|gemma/i.test(name); }));
+          if (!model) throw new Error('No supported text model detected. Install a Qwen, Llama, Mistral, DeepSeek, or Gemma model.');
+          original = Object.assign({}, nativeRouterConfig, { litellm_api_key: null });
+          var localConfig = Object.assign({}, original, {
+            ollama_url: 'http://127.0.0.1:11434',
+            ollama_model: model,
+            prefer_local_for_simple: true,
+            lucia_cloud_only: false,
+            litellm_api_key: null
+          });
+          await window.aetherBridge.saveRouterConfig(localConfig);
+          switched = true;
+          showModelTestStatus('Testing Lucia browser actions with ' + model + '...');
+          await window.aetherBridge.testModelConnection('local-agent');
+          nativeRouterConfig = localConfig;
+          nativeOllamaModels = installed;
+          updateSidebarAiEngine();
+          renderSettingsPane();
+          showModelTestStatus('Connected: Lucia uses ' + model + ' locally. Cloud keys were kept.');
+          showHudToast('Lucia local model verified and enabled');
+        } catch (err) {
+          if (switched && original) {
+            try { await window.aetherBridge.saveRouterConfig(original); }
+            catch (_) { showHudToast('Could not restore previous AI settings; review AI & ML.'); }
+          }
+          showModelTestStatus('Connection failed: ' + String(err));
+        } finally {
+          var current = document.querySelector('[data-action="use-local-lucia-fallback"]');
+          if (current) current.disabled = false;
         }
       }
 

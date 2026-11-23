@@ -309,6 +309,28 @@ fn trusted_first_youtube_video_result(
     })
 }
 
+/// When a clicked first video link leaves a SPA on its results URL, follow
+/// only the exact watch URL still visible in a new native DOM capture.
+/// This avoids re-clicking the same control and triggering the loop guard.
+fn trusted_youtube_watch_link_followup(
+    goal: &str, snapshot: &DomSnapshot, specialist: Specialist, clicked_url: &str,
+) -> Option<BrowserAction> {
+    if !matches!(specialist, Specialist::Browser | Specialist::Research)
+        || !crate::agent::orchestrator::requested_youtube_video_page(goal)
+    { return None; }
+    let current = url::Url::parse(&snapshot.origin).ok()?;
+    let target = url::Url::parse(clicked_url).ok()?;
+    if current.scheme() != "https" || current.host_str() != Some("www.youtube.com")
+        || current.path() != "/results" || target.scheme() != "https"
+        || target.host_str() != Some("www.youtube.com") || target.path() != "/watch"
+        || !target.query_pairs().any(|(key, value)| key == "v" && !value.is_empty())
+        || !snapshot.interactive_nodes.iter().any(|node| {
+            node.tag == "a" && !node.is_sensitive && node.href.as_deref() == Some(clicked_url)
+        })
+    { return None; }
+    Some(BrowserAction::Navigate { url: clicked_url.to_string() })
+}
+
 fn retryable_verifier_format_error(error: &str) -> bool {
     // A malformed LLM quote/claim may be repaired by a second independent
     // review. Do not retry missing evidence, unobserved source URLs, or the
@@ -499,6 +521,8 @@ pub async fn run_react_loop(
     let mut next_step_index: u32 = 0;
     let mut recent_outcomes: Vec<String> = Vec::new();
     let mut last_action_failed = false;
+    // Retry a delayed watch-page transition only through a freshly observed same-site link.
+    let mut pending_observed_youtube_watch: Option<String> = None;
     // Never force the same deterministic navigation after it fails. The
     // specialist model must inspect the fresh state and choose recovery.
     let mut direct_navigation_attempted = false;
@@ -687,6 +711,10 @@ pub async fn run_react_loop(
             }
         }
 
+        if freshly_observed && crate::agent::orchestrator::observed_youtube_video_page(&snapshot.origin) {
+            pending_observed_youtube_watch = None;
+        }
+
         let safe_excerpt = sanitize_untrusted_page_text(&snapshot.text_excerpt, 2400);
 
         // Include only relevant user-saved notes, scoped to the current site or global.
@@ -788,6 +816,21 @@ pub async fn run_react_loop(
                     "youtube_search:trusted_user_query".to_string(),
                 )
             } else if freshly_observed
+                && pending_observed_youtube_watch.as_ref().is_some_and(|target| {
+                    trusted_youtube_watch_link_followup(
+                        &goal, &snapshot, orchestrator.specialist(), target).is_some()
+                })
+            {
+                // A prior click was acknowledged but the observed page still
+                // shows results. Follow the exact link in this NEW DOM, not a
+                // guessed URL, and never repeat the same click indefinitely.
+                let target = pending_observed_youtube_watch.take().expect("validated above");
+                (
+                    "The clicked result is still visible; follow its observed watch link".to_string(),
+                    BrowserAction::Navigate { url: target },
+                    "first_video_result:observed_href_fallback".to_string(),
+                )
+            } else if freshly_observed
                 && trusted_first_youtube_video_result(
                     &goal, &snapshot, orchestrator.specialist()).is_some()
             {
@@ -836,6 +879,15 @@ pub async fn run_react_loop(
         }
         let mut action_binding_error =
             bind_action_to_live_dom(&mut action, &snapshot, freshly_observed).err();
+
+        let observed_clicked_watch_url = if model_route.starts_with("first_video_result:observed_dom") {
+            match &action {
+                BrowserAction::Click { node_id, .. } => snapshot.interactive_nodes.iter()
+                    .find(|node| &node.node_id == node_id)
+                    .and_then(|node| node.href.clone()),
+                _ => None,
+            }
+        } else { None };
 
         // A stale/disabled control after a successful action may mean the page
         // already advanced. Do not retry the disabled control. Hand off to
@@ -1097,6 +1149,9 @@ pub async fn run_react_loop(
         }
 
         if ok {
+            if let Some(target) = observed_clicked_watch_url {
+                pending_observed_youtube_watch = Some(target);
+            }
             // Model-provided text can include personal information even when
             // a DOM field is not marked sensitive. Never persist typed values.
             let safe_to_cache = !matches!(action, BrowserAction::TypeText { .. });
@@ -1649,6 +1704,29 @@ mod first_youtube_result_tests {
                 in_viewport: visible
             }),
         }
+    }
+
+    #[test]
+    fn delayed_first_video_click_uses_only_still_observed_same_site_link() {
+        let goal = "Search YouTube for NASA Artemis mission and open the first video result, then report the observed video page.";
+        let target = "https://www.youtube.com/watch?v=demo123";
+        let mut page = DomSnapshot {
+            origin: "https://www.youtube.com/results?search_query=NASA+Artemis+mission".into(),
+            title: "Results".into(), text_excerpt: "NASA Artemis video results".into(),
+            interactive_nodes: vec![result_node("first", target, true)],
+        };
+        let follow = trusted_youtube_watch_link_followup(goal, &page, Specialist::Browser, target);
+        assert!(matches!(follow, Some(BrowserAction::Navigate { url }) if url == target));
+        assert!(trusted_youtube_watch_link_followup(goal, &page, Specialist::Verification, target).is_none());
+        assert!(trusted_youtube_watch_link_followup(goal, &page, Specialist::Browser,
+            "https://attacker.example/watch?v=demo123").is_none());
+        assert!(trusted_youtube_watch_link_followup(goal, &page, Specialist::Browser,
+            "https://www.youtube.com/watch?v=unobserved").is_none());
+        page.interactive_nodes[0].is_sensitive = true;
+        assert!(trusted_youtube_watch_link_followup(goal, &page, Specialist::Browser, target).is_none());
+        page.interactive_nodes[0].is_sensitive = false;
+        page.origin = target.into();
+        assert!(trusted_youtube_watch_link_followup(goal, &page, Specialist::Browser, target).is_none());
     }
 
     #[test]
