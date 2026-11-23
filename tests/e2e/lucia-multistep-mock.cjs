@@ -75,10 +75,10 @@ async function main() {
     }
 
     async function run(goal, initial, limit=60) {
-      const id = await evaluate(
-        'window.__TAURI__.core.invoke("start_agent_run",{' +
-        'goal:' + JSON.stringify(goal) + ',snapshot:' + JSON.stringify(initial) +
-        ',allowedDomains:["127.0.0.1"],maxSteps:20,allowLearning:false,isPrivate:true,voiceMode:false})');
+      // Exercise the real UI-to-Rust bridge, including run-to-tab registration.
+      const id = await evaluate('window.aetherBridge.startLuciaSpecialistTask(' +
+        JSON.stringify(goal) + ',' + JSON.stringify(initial.origin) + ',' +
+        JSON.stringify(initial.title) + ')');
       assert.ok(id,'Native agent run failed to start');
       let terminal, events = [];
       for(let i=0;i<limit;i++){
