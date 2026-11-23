@@ -417,6 +417,35 @@ async function main() {
       assert.equal(counts.ollama,0,'Local Ollama requests occurred during cloud-only test');
       console.log('PASS cloud-only planner, browser actions, and verifier; no local fallback',
         JSON.stringify(counts));
+
+      // Use the actual Rust cloud-agent connection probe against simulated
+      // provider errors. Never infer a successful action from HTTP 200 alone.
+      async function providerFailure(model) {
+        return evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');" +
+          "c.litellm_model=" + JSON.stringify(model) +
+          ";await window.__TAURI__.core.invoke('update_router_config',{config:c});" +
+          "try{await window.__TAURI__.core.invoke('test_model_connection',{backend:'cloud-agent'});" +
+          "return 'UNEXPECTED_SUCCESS'}catch(e){return String(e)}})()");
+      }
+      try {
+        assert.match(await providerFailure('lucia-cloud-reject-401'),/HTTP 401/,
+          'Auth failure was not surfaced from the selected cloud provider');
+        assert.match(await providerFailure('lucia-cloud-limit-429'),/HTTP 429/,
+          'Cloud provider rate limit was not surfaced');
+        assert.match(await providerFailure('lucia-cloud-unavailable-503'),/HTTP 503/,
+          'Cloud provider outage was not surfaced');
+        assert.match(await providerFailure('lucia-cloud-invalid-json'),
+          /not a valid browser action/,
+          'Invalid cloud browser-action JSON was not rejected');
+      } finally {
+        await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');" +
+          "c.litellm_model='lucia-cloud-e2e';" +
+          "await window.__TAURI__.core.invoke('update_router_config',{config:c});return true})()");
+      }
+      const afterFailures=await (await fetch(modelUrl+'/stats')).json();
+      assert.equal(afterFailures.ollama,0,
+        'Cloud provider failures unexpectedly triggered local Ollama fallback');
+      console.log('PASS cloud provider HTTP 401/429/503 and invalid-action fail closed without Ollama');
     }
 
     // 5. The user-facing View task tab control must open the assigned tab.
