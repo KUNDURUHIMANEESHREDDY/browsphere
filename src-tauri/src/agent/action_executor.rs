@@ -136,6 +136,9 @@ fn build_type_script(request_id: Uuid, node_id: &str, text: &str) -> String {
       el.textContent = VALUE;
       el.dispatchEvent(new InputEvent("input", {{ bubbles: true, data: VALUE, inputType: "insertText" }}));
       el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+      if (el.textContent !== VALUE) {{
+        return postResult(false, `Editable control ${{TARGET_ID}} rejected the requested value`);
+      }}
       return postResult(true, `Typed into contenteditable (${{TARGET_ID}})`);
       return;
     }}
@@ -331,7 +334,9 @@ mod failure_recovery_execution_tests {
         assert!(script.contains("el.tagName !== \"INPUT\""));
         assert!(script.contains("el.value !== VALUE"));
         assert!(script.find("el.value !== VALUE").unwrap()
-            < script.find("return postResult(true, `Typed").unwrap());
+            < script.rfind("return postResult(true, `Typed").unwrap());
+        assert!(script.find("el.textContent !== VALUE").unwrap()
+            < script.find("return postResult(true, `Typed into contenteditable").unwrap());
     }
 
     #[test]
