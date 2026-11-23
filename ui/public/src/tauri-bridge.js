@@ -859,6 +859,12 @@
       emitUiEvent('aether:agent-stage', event.payload || {});
     });
 
+    // Readable progress only. The backend never sends hidden model reasoning
+    // or raw page contents in these phase updates.
+    listen('agent:activity', (event) => {
+      emitUiEvent('aether:agent-activity', event.payload || {});
+    });
+
     listen('agent:run_error', (event) => {
       emitUiEvent('aether:agent-error', event.payload || {});
     });

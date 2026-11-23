@@ -883,6 +883,11 @@ pub async fn run_react_loop(
         }
 
         let started = Instant::now();
+        // UI-only progress; never emit raw prompts, page text, typed values,
+        // private model reasoning, or secret-bearing URLs.
+        let _ = app.emit("agent:activity", serde_json::json!({
+            "run_id": run_id, "phase": "observing", "step_index": step
+        }));
 
         // Never spend another cloud call on stale or unavailable page data.
         let Some(live) =
@@ -916,6 +921,10 @@ pub async fn run_react_loop(
         observation_failures = 0;
         snapshot = live;
         orchestrator.observe(&snapshot);
+        let _ = app.emit("agent:activity", serde_json::json!({
+            "run_id": run_id, "phase": "observed", "step_index": step,
+            "controls": snapshot.interactive_nodes.len()
+        }));
         if let Some(before) = pending_named_search_enter.as_ref() {
             if check_named_title_search_navigation(
                 &goal, &initial_origin, before, &snapshot, &orchestrator.evidence
@@ -1005,6 +1014,13 @@ pub async fn run_react_loop(
                 .unwrap_or_default()
         );
 
+        let _ = app.emit("agent:activity", serde_json::json!({
+            "run_id": run_id,
+            "phase": if orchestrator.specialist() == Specialist::Verification {
+                "verifying"
+            } else { "deciding" },
+            "step_index": step
+        }));
         // The verification specialist is read-only. It always requests the
         // independent evidence gate rather than asking an action model to
         // decide whether to browse more or produce an unsupported claim.
@@ -1403,6 +1419,9 @@ pub async fn run_react_loop(
             }
         }
         let trace_id = Uuid::new_v4();
+        let _ = app.emit("agent:activity", serde_json::json!({
+            "run_id": run_id, "phase": "acting", "step_index": step
+        }));
 
         let (mut ok, mut outcome) = execute_gated_action(
             &app,
@@ -1428,6 +1447,9 @@ pub async fn run_react_loop(
         let navigation_dispatched = ok && matches!(action, BrowserAction::Navigate { .. });
         let named_search_submit = is_named_search_submit_click(&goal, &action, &snapshot);
         let mut submission_unconfirmed = false;
+        let _ = app.emit("agent:activity", serde_json::json!({
+            "run_id": run_id, "phase": "checking", "step_index": step
+        }));
         if ok && requires_post_action_check(&action) {
             let before = snapshot.clone();
             let mut post_result: Result<(), String> =

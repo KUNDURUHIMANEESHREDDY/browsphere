@@ -4251,7 +4251,7 @@
         window.addEventListener('aether:downloads-updated', hydrateDownloadsFromNative);
         window.addEventListener('aether:itp-updated', hydrateItpFromNative);
         window.addEventListener('aether:traces-updated', hydrateTracesFromNative);
-        ['plan','stage','trace','approval','status','error','verification'].forEach(function (type) {
+        ['plan','stage','activity','trace','approval','status','error','verification'].forEach(function (type) {
           window.addEventListener('aether:agent-' + type, function (event) {
             applyLuciaAgentEvent(type, event.detail || {});
           });
@@ -4480,6 +4480,7 @@
           var task = thread.agentTask;
           var stages = task.plan?.stages || [];
           var labels = {pending:'Pending', active:'Working', completed:'Done'};
+          var liveLog = Array.isArray(task.activityLog) ? task.activityLog : [];
           messagesHtml += '<section class="main-chat-agent-progress" aria-label="Lucia task progress">' +
             '<div class="main-chat-agent-heading"><strong>Lucia · Specialist Task</strong>' +
             '<span class="main-chat-agent-status">' + esc(task.status) + '</span></div>' +
@@ -4490,6 +4491,25 @@
                 '<small>' + esc(stage.objective) + '</small></div>' +
                 '<span class="main-chat-stage-status">' + esc(labels[stage.status] || stage.status) + '</span></div>';
             }).join('') + '</div>' +
+            '<div class="main-chat-agent-activity" aria-label="Lucia live activity">' +
+            '<div class="main-chat-activity-heading"><strong>Live activity</strong>' +
+            '<small>Actions and decision summaries, not private internal reasoning</small></div>' +
+            '<div class="main-chat-activity-current" role="status">' +
+              (task.status === 'Running' ? '<span class="main-chat-activity-dot"></span>' : '') +
+              esc(task.liveActivity || 'Preparing the browser task…') + '</div>' +
+            '<ol class="main-chat-activity-log">' +
+            liveLog.slice(-60).reverse().map(function (item) {
+              return '<li class="main-chat-activity-item" data-result="' + esc(item.status || 'unknown') + '">' +
+                '<span class="main-chat-activity-step">' + (item.step ? 'Step ' + item.step : 'Live') + '</span>' +
+                '<div class="main-chat-activity-content"><strong>' + esc(item.label || '') + '</strong>' +
+                (item.kind === 'action' ? '<small>' + esc(item.outcomeLabel || 'Not confirmed') + '</small>' : '') +
+                '<p>' + esc(item.explanation || '') + '</p>' +
+                (item.kind === 'action' ? '<span class="main-chat-activity-meta">' +
+                esc([item.model, item.source, item.latency].filter(Boolean).join(' · ')) + '</span>' : '') +
+                '</div></li>';
+            }).join('') +
+            (liveLog.length ? '' : '<li class="main-chat-activity-empty">Waiting for live page observations…</li>') +
+            '</ol></div>' +
             '<div class="main-chat-agent-footer"><span>' + (task.actions || 0) +
             ' browser steps · ' + (task.evidence || 0) + ' observed sources</span>' +
             (task.tabId && !task.tabClosed && tabs.some(function (tab) { return tab.id === task.tabId; }) ?
@@ -4612,8 +4632,13 @@
         } else if (kind === 'verification' && payload.report?.status === 'evidence_checked') {
           task.verificationReport = payload.report;
           task.verificationSummary = payload.report.summary;
+        } else if (kind === 'activity') {
+          window.BrowsphereLuciaActivity?.append(
+            task, window.BrowsphereLuciaActivity.activity(payload));
         } else if (kind === 'trace') {
           task.actions = (task.actions || 0) + 1;
+          window.BrowsphereLuciaActivity?.append(
+            task, window.BrowsphereLuciaActivity.trace(payload));
         } else if (kind === 'approval') {
           task.approval = payload;
         } else if (kind === 'error') {
@@ -4694,7 +4719,8 @@
         thread.pending = true;
         thread.agentTask = {
           runId: null, status:'Running', plan:{stages:[]},
-          actions:0, evidence:0, approval:null, error:'', tabId:null, tabClosed:false
+          actions:0, evidence:0, approval:null, error:'', tabId:null, tabClosed:false,
+          activityLog:[], liveActivity:'Starting the browser task…'
         };
         if (input) input.value = '';
         renderActiveTab();

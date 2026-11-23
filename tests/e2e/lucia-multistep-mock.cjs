@@ -91,7 +91,7 @@ async function main() {
       ";c.litellm_url=" + JSON.stringify(cloudEndpoint) +
       ";c.litellm_model='lucia-cloud-e2e';c.lucia_cloud_only=" + String(cloudCompat) +
       ";c.prefer_local_for_simple=" + String(!cloudCompat) +
-      ";c.domain_overrides={};await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaNativeEvents=[];for(const name of ['agent:plan','agent:stage','agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required','agent:observation'])await window.__TAURI__.event.listen(name,e=>window.__luciaNativeEvents.push({event:name,payload:e.payload}));return true})()");
+      ";c.domain_overrides={};await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaNativeEvents=[];for(const name of ['agent:plan','agent:stage','agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required','agent:observation','agent:activity'])await window.__TAURI__.event.listen(name,e=>window.__luciaNativeEvents.push({event:name,payload:e.payload}));return true})()");
     async function openLocal(path) {
       const url = base + path;
       await evaluate('window.browsphereApp.newTab(' + JSON.stringify(url) + ')');
@@ -156,6 +156,14 @@ async function main() {
       const report=relevant.find(x=>x.event==='agent:verification_report')?.payload?.report;
       const errors=relevant.filter(x=>x.event==='agent:run_error')
         .map(x=>x.payload?.message);
+      const phases=relevant.filter(x=>x.event==='agent:activity')
+        .map(x=>x.payload?.phase);
+      assert.ok(phases.includes('observing') && phases.includes('observed') &&
+        phases.includes('deciding') && phases.includes('acting') &&
+        phases.includes('checking'), 'Native Lucia did not publish each live task phase');
+      assert.ok(relevant.filter(x=>x.event==='agent:activity').every(x=>
+        !Object.keys(x.payload||{}).some(k=>['thought','text','prompt','url','token'].includes(k))),
+        'Live task phases must not expose page content, prompts, or model reasoning');
       console.log('AGENT_RUN',JSON.stringify({
         status:terminal.payload?.status,actions,reportStatus:report?.status,errors
       }));
