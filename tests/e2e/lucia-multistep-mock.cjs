@@ -172,13 +172,21 @@ async function main() {
       if (cloudCompat) {
         const modelActions=actions.filter(a=>a.route?.includes('Browser Agent') &&
           a.type !== 'complete' && a.outcome !== 'stopped_or_unknown');
-        assert.ok(modelActions.some(a=>a.route?.includes('litellm:lucia-cloud-e2e')),
-          'No browser actions were proposed through the cloud API');
-        // A uniquely identified live-DOM result click is a deterministic
-        // recovery step, not a claim that the cloud model proposed it.
+        const narrowTitleLookup = /search for .+ and open .+report.*title/i.test(goal);
+        const trustedNamedTitleSequence = narrowTitleLookup &&
+          modelActions.some(a=>a.type==='type_text' &&
+            a.route?.includes('search_input:trusted_user_query')) &&
+          modelActions.some(a=>a.type==='press_key' &&
+            a.route?.includes('search_enter:after_observed_query_type'));
+        assert.ok(modelActions.some(a=>a.route?.includes('litellm:lucia-cloud-e2e')) ||
+          trustedNamedTitleSequence,
+          'No cloud-model action or approved native named-title workflow was observed');
+        // The named-title and unique first-result actions are strict,
+        // live-DOM-bound recoveries, never a local-model fallback.
         assert.ok(modelActions.every(a=>a.route?.includes('litellm:lucia-cloud-e2e') ||
           (a.type==='click' && a.route?.includes('first_result:unique_live_dom')) ||
-          (a.type==='type_text' && a.route?.includes('search_input:trusted_user_query'))),
+          (a.type==='type_text' && a.route?.includes('search_input:trusted_user_query')) ||
+          (a.type==='press_key' && a.route?.includes('search_enter:after_observed_query_type'))),
           'Browser action used an unexpected provider or ungrounded route');
         assert.ok(actions.every(a=>!a.route?.includes('ollama:')),
           'Cloud-only task unexpectedly fell back to Ollama');
@@ -274,13 +282,13 @@ async function main() {
       const providerAfter = await (await fetch(modelUrl+'/stats')).json();
       assert.equal(providerAfter.planner-providerBefore.planner,0,
         'Simple title lookup unexpectedly spent a cloud model request on planning');
-      // The explicitly requested search term can be entered through a
-      // trusted, live-DOM-bound input action. Enter still needs a real model
-      // decision, so one cloud action request is the minimum here.
-      assert.ok(providerAfter.actions-providerBefore.actions>=1,
-        'Browser action decisions did not use the cloud-compatible model');
+      // A narrow read-only named-title lookup now types the exact supplied
+      // query and submits once through a native, observed searchbox. No
+      // cloud action inference is needed for these two deterministic steps.
+      assert.equal(providerAfter.actions-providerBefore.actions,0,
+        'Named-title lookup unexpectedly used cloud action inference');
     }
-    console.log('PASS native model-selected Enter -> named article, independent evidence, no redundant cloud plan');
+    console.log('PASS native grounded search Enter -> named article, independent evidence, no unnecessary cloud calls');
 
     // 2. Generic website: heavy navigation chrome hides real controls unless
     // the DOM reader prioritizes main content; search works only on Enter.
