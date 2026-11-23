@@ -51,9 +51,12 @@ try {
     $appProcess = Start-Process -FilePath $ExecutablePath -WorkingDirectory $root -PassThru
     Wait-ForLoopback 'http://127.0.0.1:9272/json' 55
 
-    & node (Join-Path $root 'tests\e2e\lucia-multistep-mock.cjs')
+    $cli = Join-Path $root 'tests\e2e\cli-browsphere.cjs'
+    & node $cli --json doctor
+    if ($LASTEXITCODE -ne 0) { throw 'Native Browsphere test dependencies failed CLI health checks' }
+    & node $cli --json test
     if ($LASTEXITCODE -ne 0) {
-        throw "Lucia multi-step native E2E failed with exit code $LASTEXITCODE"
+        throw "Lucia multi-step native CLI test failed with exit code $LASTEXITCODE"
     }
     Write-Host 'PASS: multi-step native browsing, recovery, and evidence checks'
 } finally {
