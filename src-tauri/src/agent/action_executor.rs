@@ -57,6 +57,21 @@ fn build_click_script(request_id: Uuid, node_id: &str) -> String {
         || el.getAttribute("aria-disabled") === "true") {{
       return postResult(false, `Control ${{TARGET_ID}} is detached or disabled`);
     }}
+    // Never dispatch an empty site-search form. Small local models may click
+    // Search before filling its observed query input; avoid a blank navigation
+    // while preserving ordinary search-openers (buttons without a form).
+    const form = el.form || el.closest('form');
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    const submit = (el.tagName === 'BUTTON' && (type === 'submit' || (type === '' && !!form)))
+      || (el.tagName === 'INPUT' && (type === 'submit' || type === 'image'));
+    if (submit && form) {{
+      const searchFields = Array.from(form.querySelectorAll(
+        'input[type="search"], input[role="searchbox"], input[name="search"], input[name="search_query"], input[aria-label*="Search"], input[placeholder*="Search"]'
+      )).filter(field => !field.disabled && field.type !== 'hidden');
+      if (searchFields.length && searchFields.every(field => !String(field.value || '').trim())) {{
+        return postResult(false, 'Search form has no query; enter the requested search text first');
+      }}
+    }}
     const style = getComputedStyle(el);
     const bounds = el.getBoundingClientRect();
     if (style.display === "none" || style.visibility === "hidden"
@@ -210,6 +225,9 @@ fn build_key_script(node_id: &str, key: &str) -> String {
             return fail("Restricted input");
           if (role !== "searchbox" && role !== "combobox" && kind !== "search" &&
               !hint.includes("search")) return fail("Not a search field");
+          // A synthetic Enter must never submit a blank search query.
+          if (!String(el.value || el.textContent || "").trim())
+            return fail("Search field is empty; enter the requested query first");
           const form = el.closest("form");
           if (form) {{
             if (form.querySelector('input[type="password"],input[autocomplete^="cc-"],input[name*="secret"]'))
@@ -529,6 +547,26 @@ pub async fn execute_browser_action(
 #[cfg(test)]
 mod failure_recovery_execution_tests {
     use super::*;
+
+    #[test]
+    fn click_script_blocks_blank_search_forms_before_dispatch() {
+        let script = build_click_script(Uuid::new_v4(), "search_submit");
+        assert!(script.contains("if (submit && form)"));
+        assert!(script.contains("input[name=\"search\"]"));
+        assert!(script.contains("searchFields.every(field => !String(field.value || '').trim())"));
+        assert!(script.contains("Search form has no query; enter the requested search text first"));
+        assert!(script.find("Search form has no query").unwrap()
+            < script.find("el.click()").unwrap());
+    }
+
+    #[test]
+    fn enter_script_rejects_blank_search_before_request_submit() {
+        let script = build_key_script("search_input", "Enter");
+        let blank = script.find("Search field is empty; enter the requested query first").unwrap();
+        let submission = script.find("form.requestSubmit()").unwrap();
+        assert!(blank < submission);
+        assert!(script.contains("!String(el.value || el.textContent || \"\").trim()"));
+    }
 
     #[test]
     fn type_script_refuses_noneditable_or_readonly_controls() {

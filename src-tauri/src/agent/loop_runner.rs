@@ -15,7 +15,8 @@ use crate::agent::evidence_verifier::{
     requires_post_action_check,
     verify_direct_navigation, verify_observed_youtube_first_result,
     verify_observed_named_result_title, requested_named_result_title,
-    verify_observed_named_link_title, requested_named_link_title, VerificationReport,
+    verify_observed_named_link_title, requested_named_link_title,
+    GroundedFinding, VerificationReport,
 };
 use crate::agent::dom_extractor::{request_live_dom_snapshot, DomSnapshot};
 use crate::agent::policy::{
@@ -93,7 +94,10 @@ fn bind_action_to_live_dom(
                 return Err("Unlabelled click target requires manual interaction".into());
             }
             *element_label = node.label.chars().take(160).collect();
-            *is_submit |= node.is_submit;
+            // A model can mislabel a Search opener link as a form submission.
+            // Submission semantics come exclusively from the live DOM, never
+            // from the model's untrusted is_submit claim in either direction.
+            *is_submit = node.is_submit;
         }
         BrowserAction::SetChecked { node_id, checked, element_label } => {
             if !fresh { return Err("Cannot toggle a control using a stale DOM".into()); }
@@ -236,6 +240,30 @@ fn is_named_search_submit_click(
         && matches!(node.tag.as_str(), "button" | "input")
         && node.label.trim().to_ascii_lowercase().starts_with("search")
     )
+}
+
+/// For an explicitly requested read-only named article lookup, place the
+/// user's exact term into one uniquely observed non-sensitive search field.
+/// This is never a guessed input or an LLM-invented value. No general form,
+/// account field, or ambiguous set of search inputs qualifies.
+fn trusted_named_search_query_input(
+    goal: &str, snapshot: &DomSnapshot, specialist: Specialist,
+) -> Option<BrowserAction> {
+    if !is_simple_named_title_task(goal)
+        || !matches!(specialist, Specialist::Browser | Specialist::Research)
+    { return None; }
+    let subject = requested_named_result_title(goal)?;
+    let candidates: Vec<_> = snapshot.interactive_nodes.iter().filter(|node|
+        !node.is_sensitive
+        && matches!(node.tag.to_ascii_lowercase().as_str(), "input" | "textarea")
+        && (node.role.eq_ignore_ascii_case("searchbox")
+            || node.label.to_ascii_lowercase().contains("search"))
+    ).collect();
+    if candidates.len() != 1 { return None; }
+    Some(BrowserAction::TypeText {
+        node_id: candidates[0].node_id.clone(),
+        text: subject, is_sensitive: false,
+    })
 }
 
 /// Some documentation and wiki search forms navigate straight to the exact
@@ -430,6 +458,182 @@ fn evaluate_live_action_policy(
 
 fn delayed_navigation_is_verified(expected: &str, observed: &DomSnapshot) -> bool {
     check_navigation_result(expected, observed).is_ok()
+}
+
+/// For a multi-step request to OPEN a search result, merely typing a query
+/// or observing a results list is not enough to hand off to verification.
+/// Require a non-submitting click and an independently observed destination
+/// URL change. The final evidence verifier still checks the actual goal.
+fn requested_open_result(goal: &str) -> bool {
+    let lower = goal.to_ascii_lowercase();
+    (lower.contains("open ") || lower.contains("click ") || lower.contains("select "))
+        && (lower.contains(" result") || lower.contains(" results"))
+}
+
+fn result_opening_observed(
+    goal: &str,
+    initial_origin: &str,
+    current: &DomSnapshot,
+    successful_steps: &[BrowserAction],
+) -> bool {
+    !requested_open_result(goal) || (
+        current.origin != initial_origin
+            && current.origin.starts_with("http")
+            && successful_steps.iter().any(|step| matches!(step,
+                BrowserAction::Click { is_submit: false, .. }))
+    )
+}
+
+/// The user explicitly asked for the first search result. A small model may
+/// keep repeating Search after the results have loaded. Click ONLY a unique
+/// non-sensitive, non-submitting result whose observed label overlaps the
+/// requested subject. Ambiguous results remain a model decision.
+fn observed_first_result_followup(
+    goal: &str,
+    snapshot: &DomSnapshot,
+    specialist: Specialist,
+    executed_steps: &[BrowserAction],
+) -> Option<BrowserAction> {
+    if !matches!(specialist, Specialist::Browser | Specialist::Research)
+        || !requested_open_result(goal)
+        || !goal.to_ascii_lowercase().contains("first")
+        || !snapshot.text_excerpt.to_ascii_lowercase().contains("search results")
+        || !executed_steps.iter().any(|step| matches!(step,
+            BrowserAction::Click { element_label, .. } if element_label.to_ascii_lowercase().contains("search"))
+            || matches!(step, BrowserAction::PressKey { key, .. } if key == "Enter"))
+    { return None; }
+    let ignored = ["search", "first", "result", "results", "current", "local", "website",
+        "please", "then", "into", "click", "open", "from", "with", "this", "that",
+        "type", "field", "report", "opened", "details", "page"];
+    let subject_terms: Vec<String> = goal.split(|c: char| !c.is_ascii_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|part| part.len() >= 4 && !ignored.contains(&part.as_str()))
+        .collect();
+    if subject_terms.is_empty() { return None; }
+    let candidates: Vec<_> = snapshot.interactive_nodes.iter().filter(|node| {
+        if node.is_sensitive || node.is_submit || node.label.trim().is_empty()
+            || !matches!(node.tag.as_str(), "a" | "button")
+                && !matches!(node.role.as_str(), "link" | "button")
+        { return false; }
+        let label = node.label.to_ascii_lowercase();
+        !label.contains("search") && !label.contains("purchase")
+            && !label.contains("checkout") && !label.contains("submit")
+            && subject_terms.iter().any(|term| label.contains(term))
+    }).collect();
+    if candidates.len() != 1 { return None; }
+    let node = candidates[0];
+    Some(BrowserAction::Click {
+        node_id: node.node_id.clone(), element_label: node.label.clone(), is_submit: false,
+    })
+}
+
+/// Independent native verification for the narrow read-only request to open
+/// the FIRST search result. This proves only navigation and observed content,
+/// never the truth of the opened page's claims. No model-written citations.
+fn verify_first_result_opened(
+    goal: &str,
+    initial_origin: &str,
+    current: &DomSnapshot,
+    steps: &[BrowserAction],
+    evidence: &[crate::agent::orchestrator::SourceEvidence],
+) -> Result<VerificationReport, String> {
+    let lower = goal.to_ascii_lowercase();
+    if !requested_open_result(goal) || !lower.contains("first")
+        || ["compare", "purchase", "buy ", "pay ", "book ", "submit", "apply ",
+            "register", "sign up", "checkout", "order ", "download"].iter()
+            .any(|word| lower.contains(word))
+    {
+        return Err("Not a simple read-only first-result navigation request".into());
+    }
+    if !result_opening_observed(goal, initial_origin, current, steps) {
+        return Err("No observed destination after a successful result click".into());
+    }
+    check_navigation_result(&current.origin, current)?;
+    if current.text_excerpt.trim().chars().count() < 40 {
+        return Err("Opened result has insufficient visible page content".into());
+    }
+    let topic_terms: Vec<String> = goal.split(|c: char| !c.is_ascii_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|term| term.len() >= 4 && ![
+            "search", "first", "result", "results", "current", "local", "website",
+            "please", "then", "into", "click", "open", "from", "with", "this",
+            "that", "type", "field", "report", "opened", "details", "page",
+        ].contains(&term.as_str()))
+        .collect();
+    let page_text = format!("{} {}", current.title, current.text_excerpt).to_ascii_lowercase();
+    let opened_label = steps.iter().filter_map(|step| match step {
+        BrowserAction::Click { element_label, is_submit: false, .. } => {
+            let label = element_label.to_ascii_lowercase();
+            if label.contains("search") || label.contains("checkout") || label.contains("submit") {
+                None
+            } else if topic_terms.iter().any(|term| label.contains(term) && page_text.contains(term)) {
+                Some(element_label.as_str())
+            } else { None }
+        }
+        _ => None,
+    }).last().ok_or("No observed, topic-matching result click")?;
+    let recorded = evidence.iter().find(|source|
+        source.url == current.origin && source.title == current.title
+            && !source.excerpt.trim().is_empty()
+            && current.text_excerpt.starts_with(source.excerpt.chars().take(80).collect::<String>().as_str()))
+        .ok_or("Missing independently recorded native evidence of opened result")?;
+    let quote: String = recorded.excerpt.trim().chars().take(150).collect();
+    Ok(VerificationReport {
+        status: "evidence_checked",
+        summary: format!("Opened the observed result '{}'. The destination page is loaded and its contents were captured by the browser.",
+            opened_label.chars().take(120).collect::<String>()),
+        findings: vec![GroundedFinding {
+            claim: "The clicked search result opened a readable browser page".into(),
+            url: current.origin.clone(), quote,
+        }],
+        limitations: "Confirms browser navigation and visible page evidence only; does not fact-check page claims or prove media playback.".into(),
+    })
+}
+
+/// When a small model tries to enter the identical query a second time in
+/// the same search field, prefer one unambiguous, freshly observed Search
+/// button. Never invent controls or submit a sensitive/ambiguous form.
+fn search_followup_on_duplicate_text(
+    goal: &str,
+    candidate: &BrowserAction,
+    snapshot: &DomSnapshot,
+    last_search: Option<&(String, u64)>,
+) -> Option<BrowserAction> {
+    if !goal.to_ascii_lowercase().contains("search") { return None; }
+    let (previous_label, previous_hash) = last_search?;
+    let BrowserAction::TypeText { node_id, text, is_sensitive } = candidate else { return None; };
+    if *is_sensitive { return None; }
+    let input = snapshot.interactive_nodes.iter().find(|node|
+        node.node_id == *node_id && !node.is_sensitive
+        && (node.role.eq_ignore_ascii_case("searchbox")
+            || node.label.to_ascii_lowercase().contains("search")))?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    if input.label.to_ascii_lowercase() != *previous_label || hasher.finish() != *previous_hash {
+        return None;
+    }
+    let buttons: Vec<_> = snapshot.interactive_nodes.iter().filter(|node|
+        !node.is_sensitive && node.node_id != input.node_id
+        && (node.tag == "button" || node.role == "button")
+        && node.label.trim().eq_ignore_ascii_case("search")
+    ).collect();
+    if buttons.len() == 1 {
+        return Some(BrowserAction::Click {
+            node_id: buttons[0].node_id.clone(),
+            element_label: buttons[0].label.clone(),
+            is_submit: buttons[0].is_submit,
+        });
+    }
+    // A page with multiple Search buttons is ambiguous: fail closed instead
+    // of selecting one by DOM position.
+    if buttons.is_empty() && (input.role.eq_ignore_ascii_case("searchbox")
+        || input.label.to_ascii_lowercase().contains("search"))
+    {
+        return Some(BrowserAction::PressKey {
+            node_id: input.node_id.clone(), key: "Enter".into(),
+        });
+    }
+    None
 }
 
 /// A strict check for direct search-to-article navigation. An observed safe
@@ -708,6 +912,9 @@ pub async fn run_react_loop(
     let mut seen_signatures: HashSet<String> = HashSet::new();
     let mut recorded_steps: Vec<BrowserAction> = Vec::new();
     let mut confirmed_named_search_navigation = false;
+    // The explicit search term is typed only once after a successful native
+    // input action, never assumed from an LLM's click or a stale page.
+    let mut confirmed_named_search_query = false;
     // Enter on a search field may navigate after the initial post-action poll.
     // Only a fresh matching native article can clear this pending observation;
     // this never retries the form or invents its destination.
@@ -724,6 +931,9 @@ pub async fn run_react_loop(
     // Only a later, fresh and exact native page observation may recover it.
     let mut pending_direct_navigation: Option<String> = None;
     let mut duplicate_retries: u8 = 0;
+    // Transient-only search label and query digest; never written to logs.
+    // A repeated identical model typing action should search, not retype.
+    let mut last_search_type: Option<(String, u64)> = None;
     let mut observation_failures: u8 = 0;
     let mut failures_observed: HashSet<RecoveredFailure> = HashSet::new();
     // Lucia delegates the task through real specialist stages; each stage has
@@ -1099,6 +1309,19 @@ pub async fn run_react_loop(
                     "observed_result_title:grounded_stage_handoff".into(),
                 )
             } else if freshly_observed
+                && matches!(orchestrator.specialist(), Specialist::Browser | Specialist::Research)
+                && requested_open_result(&goal)
+                && result_opening_observed(&goal, &initial_origin, &snapshot, &recorded_steps)
+                && orchestrator.can_complete(&snapshot).is_ok()
+            {
+                (
+                    "An opened search-result destination is confirmed by the live native page".into(),
+                    BrowserAction::Complete {
+                        summary: "Observed result navigation; request independent verification".into(),
+                    },
+                    "result_navigation:observed_stage_handoff".into(),
+                )
+            } else if freshly_observed
                 && orchestrator.specialist() == Specialist::Browser
                 && requested_navigation_url(&goal).is_some()
                 && orchestrator.can_complete(&snapshot).is_ok()
@@ -1177,6 +1400,18 @@ pub async fn run_react_loop(
                     action,
                     "first_video_result:observed_dom".to_string(),
                 )
+            } else if freshly_observed
+                && !confirmed_named_search_query
+                && trusted_named_search_query_input(&goal, &snapshot, orchestrator.specialist()).is_some()
+            {
+                let action = trusted_named_search_query_input(
+                    &goal, &snapshot, orchestrator.specialist()
+                ).expect("guarded by fresh unique search input");
+                (
+                    "Type the exact user-requested term into the observed search field".into(),
+                    action,
+                    "search_input:trusted_user_query".into(),
+                )
             } else if let Some(action) =
                 trusted_search_bootstrap(&goal, &snapshot, orchestrator.specialist())
             {
@@ -1184,6 +1419,14 @@ pub async fn run_react_loop(
                     "Navigate to the search website explicitly named by the user".to_string(),
                     action,
                     "search_bootstrap:trusted_user_goal".to_string(),
+                )
+            } else if let Some(action) = observed_first_result_followup(
+                &goal, &snapshot, orchestrator.specialist(), &recorded_steps
+            ) {
+                (
+                    "Select the only safely identifiable result in the observed search results".into(),
+                    action,
+                    "first_result:unique_live_dom".into(),
                 )
             } else {
                 // Never hold the shared model-router mutex during inference.
@@ -1204,6 +1447,19 @@ pub async fn run_react_loop(
                         ))??
                 }
             };
+
+        // If the model repeats exactly the same search text, use the fresh,
+        // unambiguous Search control rather than typing the same query again.
+        // This recovery never guesses a result or bypasses native policy.
+        if freshly_observed {
+            if let Some(followup) = search_followup_on_duplicate_text(
+                &goal, &action, &snapshot, last_search_type.as_ref()
+            ) {
+                thought = "Use the observed search control after duplicate typing".into();
+                action = followup;
+                model_route.push_str(" / duplicate_search_text_recovery");
+            }
+        }
 
         // Treat the model's element label and flags as untrusted claims.
         // Bind to a fresh DOM node before the policy engine sees the action.
@@ -1275,6 +1531,7 @@ pub async fn run_react_loop(
             && matches!(action, BrowserAction::Click { .. })
             && orchestrator.specialist() != Specialist::Verification
             && orchestrator.can_complete(&snapshot).is_ok()
+            && result_opening_observed(&goal, &initial_origin, &snapshot, &recorded_steps)
         {
             action = BrowserAction::Complete {
                 summary: "Observed live page after a successful action; verify the result independently".into(),
@@ -1294,6 +1551,7 @@ pub async fn run_react_loop(
             let evidence_completion = if freshly_observed
                 && orchestrator.specialist() != Specialist::Verification
                 && orchestrator.can_complete(&snapshot).is_ok()
+                && result_opening_observed(&goal, &initial_origin, &snapshot, &recorded_steps)
             {
                 let comparison = orchestrator.plan.stages.iter()
                     .any(|s| s.specialist == Specialist::Comparison);
@@ -1375,6 +1633,13 @@ pub async fn run_react_loop(
                     reason: format!("Specialist evidence verification failed: {reason}"),
                 };
             }
+            if matches!(decision, PolicyDecision::Allow)
+                && !result_opening_observed(&goal, &initial_origin, &snapshot, &recorded_steps)
+            {
+                decision = PolicyDecision::Deny {
+                    reason: "Requested result was not opened: no observed destination after a successful result click".into(),
+                };
+            }
             // A user asking Lucia to *play* music is not satisfied by a watch
             // page URL, a model's "completed" claim, or a click acknowledgment.
             // Check the actual media clock through native WebView2. This check
@@ -1450,6 +1715,20 @@ pub async fn run_react_loop(
                         verify_observed_youtube_first_result(
                             &goal, &snapshot, &orchestrator.evidence)
                             .map_err(anyhow::Error::msg)
+                    } else if requested_open_result(&goal)
+                        && goal.to_ascii_lowercase().contains("first")
+                        && !["compare", "purchase", "buy ", "pay ", "book ", "submit",
+                            "apply ", "register", "sign up", "checkout", "order ",
+                            "download", "summarize", "extract", "explain"].iter()
+                            .any(|word| goal.to_ascii_lowercase().contains(word))
+                    {
+                        // Result-opening-only requests can be verified from
+                        // a recorded result click plus the new native URL and
+                        // saved destination text. No model-generated citations.
+                        verify_first_result_opened(
+                            &goal, &initial_origin, &snapshot, &recorded_steps,
+                            &orchestrator.evidence,
+                        ).map_err(anyhow::Error::msg)
                     } else {
                         let router = router.lock().await.clone();
                         let first = router.verify_browser_task(&goal, summary, &orchestrator.evidence,
@@ -1490,6 +1769,20 @@ pub async fn run_react_loop(
             "run_id": run_id, "phase": "acting", "step_index": step
         }));
 
+        let typed_search_candidate = match &action {
+            BrowserAction::TypeText { node_id, text, is_sensitive: false } => {
+                snapshot.interactive_nodes.iter().find(|node|
+                    node.node_id == *node_id && !node.is_sensitive
+                    && (node.role.eq_ignore_ascii_case("searchbox")
+                        || node.label.to_ascii_lowercase().contains("search")))
+                    .map(|node| {
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        text.hash(&mut hasher);
+                        (node.label.to_ascii_lowercase(), hasher.finish())
+                    })
+            }
+            _ => None,
+        };
         let (mut ok, mut outcome) = execute_gated_action(
             &app,
             run_id,
@@ -1618,6 +1911,16 @@ pub async fn run_react_loop(
         }
 
         if ok {
+            if model_route.starts_with("search_input:trusted_user_query")
+                && matches!(action, BrowserAction::TypeText { .. })
+            {
+                confirmed_named_search_query = true;
+            }
+            if let Some(search) = typed_search_candidate {
+                last_search_type = Some(search);
+            } else if !matches!(action, BrowserAction::Complete { .. }) {
+                last_search_type = None;
+            }
             if let Some(target) = observed_clicked_watch_url {
                 pending_observed_youtube_watch = Some(target);
             }
@@ -1922,6 +2225,33 @@ mod production_safety_tests {
     }
 
     #[test]
+    fn named_read_only_search_types_exact_user_query_into_unique_observed_input() {
+        use crate::agent::dom_extractor::DomNodeSummary;
+        let goal = "On this Wikipedia page, search for Ada Lovelace and open the corresponding article. Then report its page title.";
+        let input = DomNodeSummary {
+            node_id: "live_search".into(), tag: "input".into(), role: "searchbox".into(),
+            label: "Search Wikipedia".into(), href: None, is_submit: false,
+            is_sensitive: false, options: vec![], checked: None, bbox: None,
+        };
+        let mut page = DomSnapshot {
+            origin: "https://en.wikipedia.org/wiki/Main_Page".into(),
+            title: "Wikipedia".into(), text_excerpt: "Search encyclopedia articles".into(),
+            interactive_nodes: vec![input.clone()],
+        };
+        let action = trusted_named_search_query_input(goal, &page, Specialist::Browser);
+        assert!(matches!(action, Some(BrowserAction::TypeText { node_id, text, is_sensitive: false })
+            if node_id == "live_search" && text == "Ada Lovelace"));
+        page.interactive_nodes[0].is_sensitive = true;
+        assert!(trusted_named_search_query_input(goal, &page, Specialist::Browser).is_none());
+        page.interactive_nodes[0].is_sensitive = false;
+        page.interactive_nodes.push(input);
+        assert!(trusted_named_search_query_input(goal, &page, Specialist::Browser).is_none());
+        page.interactive_nodes.pop();
+        assert!(trusted_named_search_query_input(goal, &page, Specialist::Verification).is_none());
+        assert!(trusted_named_search_query_input("Search for Ada Lovelace and send my application", &page, Specialist::Browser).is_none());
+    }
+
+    #[test]
     fn invalid_model_control_can_replan_only_before_execution() {
         let click = BrowserAction::Click {
             node_id: "missing".into(), element_label: "Search".into(),
@@ -2040,6 +2370,14 @@ mod production_safety_tests {
         assert!(matches!(click, BrowserAction::Click { is_submit: true, .. }));
         assert!(matches!(evaluate_policy(&page.origin, &click, &[]).1,
             PolicyDecision::RequireApproval { .. }));
+
+        // A model's incorrect claim that a regular link/button is a submit
+        // must not make a Search opener trigger the submission postcondition.
+        let mut opener = BrowserAction::Click {
+            node_id: "remove".into(), element_label: "Mislabelled".into(), is_submit: true,
+        };
+        bind_action_to_live_dom(&mut opener, &page, true).unwrap();
+        assert!(matches!(opener, BrowserAction::Click { is_submit: false, .. }));
 
         let mut input = BrowserAction::TypeText {
             node_id: "password".into(), text: "test-value".into(), is_sensitive: false,
@@ -2210,6 +2548,119 @@ mod live_loop_recovery_tests {
                 checked: Some(checked), options: vec![], bbox: None,
             }],
         }
+    }
+
+    #[test]
+    fn opening_a_result_needs_a_real_result_click_and_changed_destination() {
+        let goal = "Search the current website for robotics and open the first result";
+        let mut page = sample_observed_page("x", false, "Robotics search results are shown");
+        let initial = page.origin.clone();
+        assert!(!result_opening_observed(goal, &initial, &page, &[]));
+        let search_click = BrowserAction::Click {
+            node_id: "search".into(), element_label: "Search".into(), is_submit: false,
+        };
+        assert!(!result_opening_observed(goal, &initial, &page, &[search_click.clone()]));
+        page.origin = "https://docs.example.test/article-opened".into();
+        assert!(!result_opening_observed(goal, &initial, &page, &[]));
+        assert!(result_opening_observed(goal, &initial, &page, &[search_click]));
+        assert!(result_opening_observed("Read the current page", &initial, &page, &[]));
+    }
+
+    #[test]
+    fn native_result_verification_requires_destination_matching_click_and_saved_page() {
+        use crate::agent::orchestrator::SourceEvidence;
+        let goal = "Search for robotics video and open the first result";
+        let page = DomSnapshot {
+            origin: "https://example.org/search?video=robotics-demo".into(),
+            title: "Robotics video details".into(),
+            text_excerpt: "Robotics video details were opened in this page after clicking the first search result.".into(),
+            interactive_nodes: vec![],
+        };
+        let initial = "https://example.org/search";
+        let source = SourceEvidence {
+            url: page.origin.clone(), title: page.title.clone(), excerpt: page.text_excerpt.clone(),
+        };
+        let steps = vec![
+            BrowserAction::Click { node_id: "search".into(), element_label: "Search".into(), is_submit: false },
+            BrowserAction::Click { node_id: "result".into(), element_label: "Open robotics video".into(), is_submit: false },
+        ];
+        let report = verify_first_result_opened(goal, initial, &page, &steps, &[source.clone()]).unwrap();
+        assert_eq!(report.status, "evidence_checked");
+        assert_eq!(report.findings[0].url, page.origin);
+        assert!(verify_first_result_opened(goal, initial, &page, &steps, &[]).is_err());
+        assert!(verify_first_result_opened(goal, &page.origin, &page, &steps, &[source.clone()]).is_err());
+        assert!(verify_first_result_opened(goal, initial, &page, &steps[..1], &[source.clone()]).is_err());
+        assert!(verify_first_result_opened("Book a train and open the first result", initial,
+            &page, &steps, &[source]).is_err());
+    }
+
+    #[test]
+    fn first_result_recovery_requires_visible_results_unique_subject_and_prior_search() {
+        use crate::agent::dom_extractor::DomNodeSummary;
+        let goal = "Search for robotics video and open the first result";
+        let mut page = DomSnapshot {
+            origin: "https://example.org/search".into(), title: "Results".into(),
+            text_excerpt: "Robotics video search results are now visible".into(),
+            interactive_nodes: vec![DomNodeSummary {
+                node_id: "result_1".into(), tag: "button".into(), role: "button".into(),
+                label: "Open robotics video".into(), href: None,
+                is_submit: false, is_sensitive: false, checked: None, options: vec![], bbox: None,
+            }],
+        };
+        let searched = BrowserAction::Click {
+            node_id: "search".into(), element_label: "Search".into(), is_submit: false,
+        };
+        assert!(observed_first_result_followup(goal, &page, Specialist::Browser, &[]).is_none());
+        assert!(matches!(observed_first_result_followup(goal, &page,
+            Specialist::Browser, &[searched.clone()]),
+            Some(BrowserAction::Click { node_id, .. }) if node_id == "result_1"));
+        page.interactive_nodes[0].is_sensitive = true;
+        assert!(observed_first_result_followup(goal, &page, Specialist::Browser,
+            &[searched.clone()]).is_none());
+        page.interactive_nodes[0].is_sensitive = false;
+        page.interactive_nodes.push(page.interactive_nodes[0].clone());
+        assert!(observed_first_result_followup(goal, &page, Specialist::Browser,
+            &[searched.clone()]).is_none());
+        page.interactive_nodes.truncate(1);
+        page.text_excerpt = "Search form is awaiting a query".into();
+        assert!(observed_first_result_followup(goal, &page, Specialist::Browser,
+            &[searched]).is_none());
+    }
+
+    #[test]
+    fn duplicate_search_typing_uses_only_an_unambiguous_observed_control() {
+        use crate::agent::dom_extractor::DomNodeSummary;
+        let input = DomNodeSummary {
+            node_id: "input".into(), tag: "input".into(), role: "searchbox".into(),
+            label: "Search".into(), href: None, is_submit: false, is_sensitive: false,
+            checked: None, options: vec![], bbox: None,
+        };
+        let button = DomNodeSummary {
+            node_id: "button".into(), tag: "button".into(), role: "button".into(),
+            label: "Search".into(), href: None, is_submit: false, is_sensitive: false,
+            checked: None, options: vec![], bbox: None,
+        };
+        let mut page = DomSnapshot {
+            origin: "https://example.org/search".into(), title: "Search".into(),
+            text_excerpt: "Find the robotics video".into(),
+            interactive_nodes: vec![input, button],
+        };
+        let typed = BrowserAction::TypeText {
+            node_id: "input".into(), text: "robotics video".into(), is_sensitive: false,
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "robotics video".hash(&mut hasher);
+        let previous = ("search".to_string(), hasher.finish());
+        let goal = "Search the site for robotics video and open the first result";
+        assert!(matches!(search_followup_on_duplicate_text(goal, &typed, &page, Some(&previous)),
+            Some(BrowserAction::Click { node_id, .. }) if node_id == "button"));
+        page.interactive_nodes.push(page.interactive_nodes[1].clone());
+        assert!(search_followup_on_duplicate_text(goal, &typed, &page, Some(&previous)).is_none());
+        page.interactive_nodes.truncate(1);
+        assert!(matches!(search_followup_on_duplicate_text(goal, &typed, &page, Some(&previous)),
+            Some(BrowserAction::PressKey { key, .. }) if key == "Enter"));
+        page.interactive_nodes[0].is_sensitive = true;
+        assert!(search_followup_on_duplicate_text(goal, &typed, &page, Some(&previous)).is_none());
     }
 
     #[test]
