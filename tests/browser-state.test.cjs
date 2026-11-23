@@ -9,10 +9,14 @@ function storage() {
     data
   };
 }
-const { validAddress, addressOrSearch, canPersistAddress,
+const { validAddress, addressOrSearch, displayAddress, canPersistAddress,
   saveSession, saveLibrary, load, SESSION_KEY } = browser;
 
 assert.equal(validAddress('example.com/a?b=c'), 'https://example.com/a?b=c');
+assert.equal(displayAddress('https://example.com/path?x=1', false), 'example.com');
+assert.equal(displayAddress('https://example.com/path?x=1', true), 'https://example.com/path?x=1');
+assert.equal(displayAddress('http://localhost:4000/a', true), 'http://localhost:4000/a');
+assert.equal(displayAddress('browsphere://start', true), 'browsphere://start');
 assert.equal(validAddress('http://localhost:3000/'), 'http://localhost:3000/');
 assert.equal(validAddress('browsphere://start'), 'browsphere://start');
 assert.equal(validAddress('javascript:alert(1)'), null);

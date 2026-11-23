@@ -167,10 +167,17 @@
     stream.scrollTop = stream.scrollHeight;
   }
 
+  function closeApprovalBanner(approvalId) {
+    if (approvalId && approvalId !== activeApprovalId) return;
+    activeApprovalId = null;
+    document.getElementById('tauriApprovalCard')?.remove();
+  }
+
   function showApprovalBanner(req) {
-    activeApprovalId = req.approval_id;
     const stream = document.getElementById('chatMessagesStream');
     if (!stream) return;
+    closeApprovalBanner();
+    activeApprovalId = req.approval_id;
     const existing = document.getElementById('tauriApprovalCard');
     if (existing) existing.remove();
 
@@ -187,20 +194,20 @@
     stream.appendChild(card);
     stream.scrollTop = stream.scrollHeight;
 
-    document.getElementById('tauriApproveBtn').addEventListener('click', async () => {
-      if (invoke && activeApprovalId) {
-        await invoke('resolve_approval', { approvalId: activeApprovalId, approved: true });
+    const approvalId = req.approval_id;
+    async function decide(approved) {
+      if (!invoke || activeApprovalId !== approvalId) return;
+      card.querySelectorAll('button').forEach(btn => { btn.disabled = true; });
+      try {
+        await invoke('resolve_approval', { approvalId, approved });
+      } catch (err) {
+        appendAgentBubble('Lucia · Approval expired', esc(String(err)));
+      } finally {
+        closeApprovalBanner(approvalId);
       }
-      activeApprovalId = null;
-      card.remove();
-    });
-    document.getElementById('tauriRejectBtn').addEventListener('click', async () => {
-      if (invoke && activeApprovalId) {
-        await invoke('resolve_approval', { approvalId: activeApprovalId, approved: false });
-      }
-      activeApprovalId = null;
-      card.remove();
-    });
+    }
+    document.getElementById('tauriApproveBtn').addEventListener('click', () => decide(true));
+    document.getElementById('tauriRejectBtn').addEventListener('click', () => decide(false));
   }
 
   window.aetherBridge = {
@@ -733,6 +740,7 @@
     });
 
     listen('agent:run_status', (event) => {
+      closeApprovalBanner();
       emitUiEvent('aether:agent-status', event.payload);
       emitUiEvent('aether:traces-updated', event.payload);
       emitUiEvent('aether:macros-updated', event.payload);
@@ -793,6 +801,11 @@
         showApprovalBanner(event.payload);
       }
     });
+    listen('agent:approval_closed', (event) => {
+      const closed = event.payload || {};
+      closeApprovalBanner(closed.approval_id);
+      emitUiEvent('aether:agent-approval-closed', closed);
+    });
 
     listen('itp:blocked', (event) => {
       emitUiEvent('aether:itp-updated', event.payload || {});
@@ -800,6 +813,9 @@
 
     listen('browser:page-loaded', (event) => {
       emitUiEvent('aether:page-loaded', event.payload || {});
+    });
+    listen('browser:popup-blocked', (event) => {
+      emitUiEvent('aether:popup-blocked', event.payload || {});
     });
 
     listen('download:progress', (event) => {

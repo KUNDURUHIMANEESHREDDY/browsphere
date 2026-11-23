@@ -67,9 +67,9 @@ The first **everyday-browser reliability** update is now implemented:
 - **Safer input and history:** the omnibar preserves HTTP and HTTPS URLs, searches ordinary text, rejects unsupported URL schemes, and avoids saving common OAuth/token URL parameters in browser history. Private navigation skips history insertion.
 - **Honest UI state:** Empty Page is blank; unavailable native website rendering no longer displays simulated website/article content; navigation failures show an error; fabricated password records and nonfunctional pre-enabled extension listings were removed. The Extensions pane now explains that extension hosting is not available.
 
-**Tests:** Run `node tests/browser-state.test.cjs` for session, bookmark, URL and privacy filtering checks, and `cargo test --workspace --offline` for the Rust test suite. Tests validate implementation paths but do not prove real-world site compatibility or full private-browsing isolation.
+**Tests:** Run `node tests/browser-state.test.cjs` for session, bookmark, URL and privacy filtering checks, and `cargo test --workspace --offline` for the Rust test suite. Tests validate implementation paths but do not prove real-world site compatibility; a separate desktop smoke test now verifies cookie and localStorage separation between ordinary and private WebView2 sessions.
 
-**Still pending before Chrome-level maturity:** full native-browser UI regression on diverse websites, engine-native back/forward state and scroll restoration, external-window/popup handling, proper isolated private browsing (cookies/storage currently share the default WebView2 profile), extension hosting, permission management, polished download UX, standards/security review (including CSP), auto-update signing/release pipeline, and performance/accessibility/reliability testing. Some keyboard shortcuts may not work while a child WebView has focus.
+**Still pending before Chrome-level maturity:** full native-browser UI regression on diverse websites, engine-native back/forward state and scroll restoration, user-controlled popup and per-site permission handling (currently denied by default), extension hosting, polished download UX, a broader privacy/security audit, signed auto-update releases, and performance/accessibility/reliability testing. Some keyboard shortcuts may not work while a child WebView has focus.
 
 **Next priority:** native WebView2 navigation/permissions/private-profile integration and repeatable end-to-end desktop browsing tests. This is a development roadmap, not proof of Chrome/Edge feature parity.
 
@@ -80,3 +80,17 @@ The agent runner now binds clicks and typing to a fresh live DOM snapshot, uses 
 The Rust regression run passed **58 tests, 0 failed, 4 ignored**, and the separate real-local-model intent, specialist-action, and evidence-verifier tests passed. An updated packaged Windows multi-step browser E2E test is **still pending**; this is not a production-ready release.
 
 See [Lucia production gates](LUCIA_PRODUCTION_GATE.md) for exact implementation details and remaining release requirements.
+
+## Navigation, privacy, and security hardening — 22 November 2026
+
+This milestone fixes the confirmed address-bar regression and adds native private browsing isolation in the Windows application.
+
+- **Address-bar reliability:** Both active-tab renders and Settings refresh use the same URL formatter. Full-address mode preserves `https://` or `http://` and the complete path; compact mode shows the host. Explicit navigation and tab changes refresh the display even if the address input previously had focus.
+- **Private WebView2 profiles:** Private mode opens a separate set of private tabs using Tauri's `.incognito(true)` WebView2 option. Closing private mode closes those native WebViews and restores the regular tab group. Native history and download-history recording remain disabled for private tabs.
+- **Default-deny sensitive site capabilities:** External webpages cannot silently obtain permission for camera, microphone, location, notifications, or other WebView2 permission requests. Popups are blocked and reported in the UI until controlled per-site permission and popup workflows are developed. These protections can prevent some sign-in or video-call flows until a permission UI exists.
+- **Content Security Policy:** The main browser and Lucia CSS/JavaScript have been moved into versioned local assets, allowing a CSP that blocks inline JavaScript and third-party scripts. Inline CSS remains allowed for existing UI styling. The CSP applies to app pages; external websites retain their own web security policies.
+- **Release updates:** The unsigned auto-updater check has been disabled instead of configuring a dummy signing key. Signed automatic updates must be enabled only after the publisher configures a real public verification key, a securely managed signing secret, and a validated release manifest.
+
+**Validation:** JavaScript browser-state regression tests passed; **58 Rust tests passed** and 4 optional local-model tests were ignored. A separate isolated Windows WebView2 smoke session passed **12/12** navigation/CSP/private-profile checks plus **6/6** additional cookie, popup, and Lucia checks. Both the normal browser and Lucia blocked injected inline scripts; private views could not access normal cookies or localStorage while normal-site data remained available after private mode ended. Development builds compiled successfully.
+
+**Outstanding release gates:** Signed Windows installer/update pipeline; per-origin permissions and controlled popup workflows; production certificate and CSP audit; multi-site cookie/SSO compatibility tests; browser-native back/forward, shortcut handling in child WebViews, and full cross-site desktop regression. These tests are not a proof of Chrome equivalence or comprehensive browser security.

@@ -237,17 +237,9 @@ async fn run_policy_load_test(
 }
 
 #[tauri::command]
-async fn check_for_updates(app: tauri::AppHandle) -> Result<String, String> {
-    use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater().map_err(|e| e.to_string())?;
-    match updater.check().await {
-        Ok(Some(update)) => Ok(format!(
-            "Update available: v{} ({})",
-            update.version, update.date.map(|d| d.to_string()).unwrap_or_default()
-        )),
-        Ok(None) => Ok("Browsphere is up to date.".to_string()),
-        Err(e) => Err(format!("Updater check failed: {e}")),
-    }
+async fn check_for_updates() -> Result<String, String> {
+    // Never advertise or fetch unverified updates without a real publisher key.
+    Ok("Secure automatic updates are disabled until release signing is configured.".into())
 }
 
 #[tauri::command]
@@ -989,11 +981,14 @@ async fn open_or_navigate_tab(
 
     let itp_for_nav = state.itp.clone();
     let app_for_nav = app.clone();
+    let app_for_popups = app.clone();
+    let tab_id_for_popups = tab_id.clone();
     let app_for_page_load = app.clone();
     let tab_id_for_page_load = tab_id.clone();
     let itp_for_dl = state.itp.clone();
     let dl_mgr_for_dl = state.downloads.clone();
     let db_for_dl = state.db.clone();
+    let private_download = is_private.unwrap_or(false);
     let app_for_dl = app.clone();
 
     let guard_script = state.itp.build_network_guard_script();
@@ -1001,6 +996,19 @@ async fn open_or_navigate_tab(
     let theme_script = build_theme_sync_script(is_dark);
 
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
+        .incognito(is_private.unwrap_or(false))
+        .on_permission_request(|_webview, _permission| {
+            // Until there is a per-origin consent UI, do not silently grant
+            // camera, microphone, geolocation, notifications or device access.
+            tauri::webview::PermissionResponse::Deny
+        })
+        .on_new_window(move |popup_url, _features| {
+            let _ = app_for_popups.emit("browser:popup-blocked", serde_json::json!({
+                "tabId": tab_id_for_popups,
+                "url": popup_url.to_string()
+            }));
+            tauri::webview::NewWindowResponse::Deny
+        })
         .initialization_script(&guard_script)
         .initialization_script(&theme_script)
         .on_page_load(move |_webview, payload| {
@@ -1057,11 +1065,13 @@ async fn open_or_navigate_tab(
                         error: None,
                     };
                     let _ = app_for_dl.emit("download:progress", &rec);
-                    let db_clone = db_for_dl.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let mut guard = db_clone.lock().await;
-                        let _ = guard.upsert_download(&rec);
-                    });
+                    if !private_download {
+                        let db_clone = db_for_dl.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let mut guard = db_clone.lock().await;
+                            let _ = guard.upsert_download(&rec);
+                        });
+                    }
                 }
                 DownloadEvent::Finished { url, path, success } => {
                     let saved = path
@@ -1099,11 +1109,13 @@ async fn open_or_navigate_tab(
                         "download:failed"
                     };
                     let _ = app_for_dl.emit(evt, &rec);
-                    let db_clone = db_for_dl.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let mut guard = db_clone.lock().await;
-                        let _ = guard.upsert_download(&rec);
-                    });
+                    if !private_download {
+                        let db_clone = db_for_dl.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let mut guard = db_clone.lock().await;
+                            let _ = guard.upsert_download(&rec);
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -1857,6 +1869,7 @@ async fn get_traces_filtered(
 
 #[tauri::command]
 async fn resolve_approval(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
     approval_id: Uuid,
     approved: bool,
@@ -1864,11 +1877,35 @@ async fn resolve_approval(
     let sender = {
         let mut map = state.pending_approvals.lock().await;
         map.remove(&approval_id)
-    };
-    if let Some(tx) = sender {
-        let _ = tx.send(approved);
-    }
+    }.ok_or_else(|| "This approval is no longer pending".to_string())?;
+    sender.send(approved)
+        .map_err(|_| "This approval has expired or its task was cancelled".to_string())?;
+    let _ = app.emit("agent:approval_closed", serde_json::json!({
+        "approval_id": approval_id,
+        "reason": if approved { "approved" } else { "rejected" }
+    }));
     Ok(())
+}
+
+/// Remove approvals whose receivers were dropped when a task was cancelled,
+/// completed, or timed out. A closed sender must never remain actionable.
+async fn prune_closed_approvals(
+    app: &tauri::AppHandle,
+    pending: &Arc<Mutex<HashMap<Uuid, oneshot::Sender<bool>>>>,
+) {
+    let expired = {
+        let mut map = pending.lock().await;
+        let expired: Vec<Uuid> = map.iter()
+            .filter(|(_, tx)| tx.is_closed())
+            .map(|(id, _)| *id).collect();
+        for id in &expired { map.remove(id); }
+        expired
+    };
+    for approval_id in expired {
+        let _ = app.emit("agent:approval_closed", serde_json::json!({
+            "approval_id": approval_id, "reason": "task_finished_or_expired"
+        }));
+    }
 }
 
 #[tauri::command]
@@ -2163,6 +2200,7 @@ async fn start_agent_run(
 
     let db_for_status = state.db.clone();
     let app_for_status = app.clone();
+    let approvals_for_status = state.pending_approvals.clone();
     tokio::spawn(async move {
         let result = run_react_loop(
             app_for_loop,
@@ -2199,6 +2237,9 @@ async fn start_agent_run(
                 "failed".to_string()
             }
         };
+        // run_react_loop has returned, dropping any unresolved approval
+        // receivers. Close the corresponding pending UI controls immediately.
+        prune_closed_approvals(&app_for_status, &approvals_for_status).await;
         if !private_mode {
             let mut db = db_for_status.lock().await;
             let _ = db.update_agent_run_status(&run_id.to_string(), &final_status);
@@ -2288,7 +2329,6 @@ fn main() {
     let auto_for_sched = automation;
 
             match tauri::Builder::default()
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();

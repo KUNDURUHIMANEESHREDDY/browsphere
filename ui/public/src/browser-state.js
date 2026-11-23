@@ -36,6 +36,15 @@
     if (/^[a-z][\w+.-]*:/i.test(value)) return null;
     return (SEARCH_ENGINES[engine] || SEARCH_ENGINES.Google) + encodeURIComponent(value);
   }
+  function displayAddress(address, showFull) {
+    if (address === START || address === 'about:blank') return address;
+    const url = validAddress(address);
+    if (!url) return String(address || '');
+    try {
+      const parsed = new URL(url);
+      return showFull ? parsed.href : parsed.host;
+    } catch (_) { return url; }
+  }
   function canPersistAddress(address) {
     const url = validAddress(address);
     if (!url) return false;
@@ -127,6 +136,6 @@
       return true;
     } catch (_) { return false; }
   }
-  return { validAddress, addressOrSearch, canPersistAddress, cleanedTabs,
+  return { validAddress, addressOrSearch, displayAddress, canPersistAddress, cleanedTabs,
            load, saveSession, saveLibrary, SESSION_KEY, LIBRARY_KEY };
 });
