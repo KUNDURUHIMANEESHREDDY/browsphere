@@ -103,6 +103,7 @@ pub struct SourceEvidence {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GeneratedStage {
     specialist: Specialist,
     objective: String,
@@ -110,6 +111,7 @@ struct GeneratedStage {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GeneratedPlan {
     stages: Vec<GeneratedStage>,
 }
@@ -117,11 +119,20 @@ struct GeneratedPlan {
 /// Validate the model's proposed work before it can run. The model cannot
 /// introduce new tools or bypass the existing action policy.
 pub fn parse_generated_plan(goal: &str, raw: &str) -> anyhow::Result<TaskPlan> {
-    let cleaned = raw.trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
+    anyhow::ensure!(raw.len() <= 16_384, "Specialist plan exceeds maximum response size");
+    let trimmed = raw.trim().trim_start_matches('\u{feff}').trim();
+    // Models sometimes wrap otherwise valid JSON in a Markdown code fence.
+    // Strip only a complete fence, not arbitrary prose or a second JSON object.
+    let cleaned = if let Some(fenced) = trimmed.strip_prefix("```") {
+        let (_, body) = fenced.split_once('\n')
+            .ok_or_else(|| anyhow::anyhow!("Specialist plan has an incomplete JSON code fence"))?;
+        body.trim().strip_suffix("```")
+            .ok_or_else(|| anyhow::anyhow!("Specialist plan has an unclosed JSON code fence"))?
+            .trim()
+    } else {
+        trimmed
+    };
+    anyhow::ensure!(cleaned.starts_with('{'), "Specialist plan must be one JSON object");
     let generated: GeneratedPlan = serde_json::from_str(cleaned)
         .map_err(|e| anyhow::anyhow!("The model did not return a valid specialist plan: {e}"))?;
     anyhow::ensure!(
@@ -501,6 +512,27 @@ mod tests {
         assert_eq!(plan.stages[2].specialist, Specialist::Verification);
         assert!(parse_generated_plan("Demo", r#"{"stages":[{"specialist":"shell","objective":"run","success_criteria":"done"}]}"#).is_err());
         assert!(parse_generated_plan("Demo", r#"{"stages":[]}"#).is_err());
+    }
+
+    #[test]
+    fn planner_accepts_complete_fences_but_rejects_extra_json_and_unknown_fields() {
+        let valid = r#"{"stages":[{"specialist":"browser","objective":"Open the requested page","success_criteria":"Page observed"}]}"#;
+        let fenced = format!("```json\n{valid}\n```");
+        let plan = parse_generated_plan("Open page", &fenced).unwrap();
+        assert_eq!(plan.stages.len(), 2);
+        assert_eq!(plan.stages[1].specialist, Specialist::Verification);
+        assert!(parse_generated_plan("Open page", &format!("{valid}{valid}"))
+            .unwrap_err().to_string().contains("trailing characters"));
+        assert!(parse_generated_plan("Open page", &format!("{valid}\nexplanation"))
+            .is_err());
+        assert!(parse_generated_plan("Open page", &format!("```json\n{valid}"))
+            .is_err());
+        assert!(parse_generated_plan("Open page", &valid.replace(
+            "\"objective\":", "\"command\":\"shell\",\"objective\":"))
+            .is_err());
+        assert!(parse_generated_plan("Open page", &valid.replace(
+            "\"stages\":", "\"tools\":[],\"stages\":"))
+            .is_err());
     }
 
     #[test]
