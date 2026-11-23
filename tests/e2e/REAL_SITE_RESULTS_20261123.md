@@ -49,3 +49,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/e2e/run-real-public-si
 ## Next validation gate
 
 Once the selected 9Router model is usable again, test multiple genuinely distinct sites with **observed model-selected interactions** and independently checked final browser state. Repeat each scenario for reliability. Do not certify unrestricted autonomy from deterministic URL opening, browser-only click tests, or the earlier single-site Wikipedia result.
+
+## Reliability patch and retest — 23 November 2026
+
+- Router: A hosted-model HTTP 429 is no longer automatically retried when `Retry-After` is absent, zero, or greater than three seconds. A short explicit 1–3-second retry window can still be honored; transient 408/502/503/504 and connection failures retain bounded retries. This does **not** bypass provider limits or silently use another model.
+- Real-site native CDP harness: task launches now return to the CDP event loop immediately while an asynchronous native start settles. A late start result is observed without submitting a second task. CDP commands have cleared timers and reject immediately on WebSocket closure; an unresponsive CDP session ends the run rather than contaminating later site results.
+- Cross-site reporting: on HTTP 429 or fatal CDP loss, remaining sites are classified as **not attempted**, not failed. The suite retains a nonzero exit code and prints a stop reason and attempted/skipped counts.
+- Backend regression: `cargo test --workspace --locked --quiet` **123 passed, 5 ignored, 0 failed**; new loopback regression asserts that a quota 429 with absent or long `Retry-After` is not replayed.
+- JavaScript regression: `node --test tests/lucia-*.test.cjs tests/browser-state.test.cjs` **16/16 passed** and the new live-site harness passed syntax validation.
+- Windows debug build: `cargo build --locked --quiet` **passed**.
+- Real public-site retest: Python Docs loaded in actual Windows WebView2 (78 native controls). The `oc/hy4-flash-free` task launched and returned a genuine run ID, but the 9Router gateway returned **429 before any model action**. The run correctly reported `failed`, 0 verified actions, and `provider_rate_limited`; **no real-model autonomy success** may be claimed from it.
+- Separate native cloud-compatible simulated-model regression exercised multi-step search, SPA transitions, forms, recovery, assigned-tab behavior and independent evidence checks, and **passed**. It does not count as real 9Router inference.
+
+**Remaining gate:** When 9Router's quota actually permits a series of model calls, perform repeated complete agent-driven search/inspect/verify workflows on more than one external site. Record observed action traces and destination URLs. Until then unrestricted website autonomy remains unverified. Run tests in isolated profiles and preserve the approval checks for consequential actions.

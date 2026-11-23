@@ -39,11 +39,23 @@ async function attach(){
   ws.onmessage=e=>{const m=JSON.parse(e.data),p=pending.get(m.id);if(!p)return;
     pending.delete(m.id);m.error?p.err(Error(JSON.stringify(m.error))):p.ok(m.result||{});
   };
+  ws.onclose=()=>{for(const [id,p] of pending){
+    pending.delete(id);p.err(Error('Native WebView2 CDP connection closed'));
+  }};
   async function call(method,params={}){
     const id=++seq;
-    const p=new Promise((ok,err)=>{pending.set(id,{ok,err});ws.send(JSON.stringify({id,method,params}));});
-    try{return await Promise.race([p,sleep(16000).then(()=>{throw Error('CDP timeout '+method)})])}
-    finally{pending.delete(id)}
+    return new Promise((ok,err)=>{
+      const timer=setTimeout(()=>{
+        pending.delete(id);
+        err(Error('CDP timeout '+method+'; abort this native browser session'));
+      },30000);
+      pending.set(id,{
+        ok:value=>{clearTimeout(timer);ok(value)},
+        err:error=>{clearTimeout(timer);err(error)}
+      });
+      try{ws.send(JSON.stringify({id,method,params}))}
+      catch(e){pending.delete(id);clearTimeout(timer);err(e)}
+    });
   }
   async function evaluate(expression){
     const res=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true,userGesture:true});
@@ -72,7 +84,24 @@ async function main(){
       return evaluate("(async()=>{const s=await window.__TAURI__.core.invoke('capture_live_snapshot');return {url:s?.origin||'',title:(s?.title||'').slice(0,150),controls:s?.interactive_nodes?.length||0,excerptLength:s?.text_excerpt?.length||0,tabUrl:window.browsphereApp.activeTab()?.url}})()");
     }
     async function liveTask(c,timeoutSeconds=130){
-      const id=await evaluate('window.aetherBridge.startLuciaSpecialistTask('+JSON.stringify(c.goal)+','+JSON.stringify(c.start)+",'Real public website')");
+      // Schedule the asynchronous native start without holding a CDP evaluation
+      // open while WebView2 captures the initial page. Do not repeat the start
+      // on timeout: a second launch could cancel or duplicate an active task.
+      const startExpr = '(()=>{window.__siteLaunch={state:"pending"};'+
+        'Promise.resolve().then(()=>window.aetherBridge.startLuciaSpecialistTask('+
+        JSON.stringify(c.goal)+','+JSON.stringify(c.start)+',"Real public website"))'+
+        '.then(id=>window.__siteLaunch={state:"ready",id})'+
+        '.catch(e=>window.__siteLaunch={state:"error",message:String(e).slice(0,180)});return true})()';
+      await evaluate(startExpr);
+      let launch;
+      for(let wait=0;wait<90;wait++){
+        launch=await evaluate('window.__siteLaunch');
+        if(launch?.state==='ready'||launch?.state==='error')break;
+        await sleep(500);
+      }
+      if(launch?.state==='error')throw Error('Native task start failed: '+launch.message);
+      if(launch?.state!=='ready')throw Error('Native task launch did not settle; not safe to start another task');
+      const id=launch.id;
       if(!/^[a-f\d-]{36}$/i.test(String(id||'')))throw Error('No valid task UUID');
       console.log('SITE_TASK_STARTED',JSON.stringify({name:c.name,runId:id}));
       let seen=[],terminal=null,approval=false;
@@ -100,6 +129,7 @@ async function main(){
       };
     }
     const results=[];
+    let stopReason=null;
     const selected=process.env.LUCIA_REAL_SITE ? cases.filter(x=>x.name.toLowerCase().includes(process.env.LUCIA_REAL_SITE.toLowerCase())) : cases;
     if(selected.length===0)throw Error('LUCIA_REAL_SITE did not match any case');
     for(const c of selected){
@@ -116,7 +146,14 @@ async function main(){
         console.log('LIVE_SITE_START',JSON.stringify({name:c.name,before}));
         run=await liveTask(c);
         after=await state();
-      }catch(e){error=String(e);}
+      }catch(e){
+        error=String(e);
+        if(/CDP timeout|Native task launch did not settle|WebSocket.*closed/i.test(error))
+          stopReason='native_cdp_unresponsive';
+      }
+      if(/HTTP 429|rate_limit_exceeded|Too Many Requests/i.test(
+        (run?.errors||[]).join(' ')+' '+(error||'')))
+        stopReason='provider_rate_limited';
       const parsed=(()=>{try{return new URL(after?.url)}catch{return null}})();
       const observedDestination=!!parsed&&parsed.host===c.host&&c.path.test(parsed.pathname);
       const modelUsed=run?.actions?.some(x=>(x.route||'').includes('litellm:oc/hy4-flash-free'))||false;
@@ -127,9 +164,16 @@ async function main(){
         actions:run?.actions||[],errors:run?.errors||[],error,stages:run?.stages||[]};
       console.log('REAL_SITE_RESULT',JSON.stringify(record));
       results.push({name:c.name,passed,status:record.status,observedDestination,modelUsed,verified:record.verified,error});
+      if(stopReason){
+        console.log('REAL_SITE_STOP',JSON.stringify({reason:stopReason,after:c.name,
+          message:'Remaining websites were not attempted; do not count them as failures or successes'}));
+        break;
+      }
     }
-    console.log('REAL_SITES_SUMMARY',JSON.stringify({passed:results.filter(x=>x.passed).length,total:results.length,results}));
-    if(results.some(x=>!x.passed))process.exitCode=1;
+    const skipped=selected.filter(c=>!results.some(r=>r.name===c.name)).map(c=>c.name);
+    console.log('REAL_SITES_SUMMARY',JSON.stringify({passed:results.filter(x=>x.passed).length,
+      attempted:results.length,total:selected.length,stopReason,skipped,results}));
+    if(results.some(x=>!x.passed)||skipped.length)process.exitCode=1;
   }finally{close()}
 }
 main().catch(e=>{console.error('REAL_SITES_FATAL',String(e.stack||e));process.exitCode=2});

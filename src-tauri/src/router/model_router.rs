@@ -112,15 +112,20 @@ async fn send_cloud_inference(
                         .get(reqwest::header::RETRY_AFTER)
                         .and_then(|header| header.to_str().ok())
                         .and_then(|value| value.parse::<u64>().ok());
-                    // Honor a longer rate limit without hammering the API or
-                    // blocking the browser agent for an unknown number of minutes.
+                    // 429 without a short explicit Retry-After commonly means
+                    // a sustained free-tier quota limit. Never hammer the provider
+                    // or replay the same chargeable inference speculatively.
+                    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        && !retry_after.is_some_and(|secs| (1..=3).contains(&secs))
+                    {
+                        return Ok(response);
+                    }
                     if retry_after.is_some_and(|secs| secs > 3) {
                         return Ok(response);
                     }
-                    let delay = retry_after.unwrap_or(if attempt == 0 { 1 } else { 2 });
                     tokio::time::sleep(std::time::Duration::from_millis(
-                        if retry_after.is_some() { delay * 1000 }
-                        else if attempt == 0 { 450 } else { 950 }
+                        retry_after.map(|secs| secs * 1000)
+                            .unwrap_or(if attempt == 0 { 450 } else { 950 })
                     )).await;
                     continue;
                 }
@@ -1092,6 +1097,35 @@ mod tests {
         for code in [200u16, 400, 401, 403, 404, 422, 500] {
             assert!(!retryable_inference_status(
                 reqwest::StatusCode::from_u16(code).unwrap()));
+        }
+    }
+
+    #[tokio::test]
+    async fn cloud_quota_429_without_short_retry_window_is_not_replayed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for retry_header in ["", "Retry-After: 120\r\n"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let header = retry_header.to_string();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\n{header}content-length: 0\r\nconnection: close\r\n\r\n"
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                let repeated = tokio::time::timeout(
+                    std::time::Duration::from_millis(1100), listener.accept()
+                ).await;
+                assert!(repeated.is_err(), "Free-tier 429 must not be replayed");
+            });
+            let client = reqwest::Client::new();
+            let response = send_cloud_inference(client.post(format!(
+                "http://{address}/model"
+            )).body("fixture")).await.unwrap();
+            assert_eq!(response.status().as_u16(), 429);
+            server.await.unwrap();
         }
     }
 
