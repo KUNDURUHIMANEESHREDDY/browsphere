@@ -154,8 +154,30 @@ pub fn requested_navigation_url(goal: &str) -> Option<Url> {
     Some(parsed)
 }
 
-/// Preserve existing approval/deny policy for any target not explicitly and
-/// exactly requested in the user's own goal. Do not override run allowlists.
+/// A user who asks to search a named public website has already authorized
+/// ordinary navigation to that website. Recognize only explicit request shapes,
+/// never suggestions found in page content or generated model thoughts.
+fn requested_search_host(goal: &str) -> Option<&'static str> {
+    let normalized = goal.trim().to_ascii_lowercase();
+    for (name, host) in [
+        ("youtube", "www.youtube.com"),
+        ("google", "www.google.com"),
+        ("wikipedia", "www.wikipedia.org"),
+        ("github", "github.com"),
+    ] {
+        if normalized.starts_with(&format!("search {name} for "))
+            || normalized.starts_with(&format!("search on {name} for "))
+            || (normalized.starts_with("search for ")
+                && normalized.contains(&format!(" on {name}")))
+        {
+            return Some(host);
+        }
+    }
+    None
+}
+
+/// Preserve existing approval/deny policy for any target not explicitly
+/// authorized by the user's own goal. Do not override run allowlists.
 pub fn evaluate_user_navigation_policy(
     active_origin: &str, action: &BrowserAction, allowed_domains: &[String], goal: &str
 ) -> (RiskLevel, PolicyDecision) {
@@ -163,9 +185,13 @@ pub fn evaluate_user_navigation_policy(
     let BrowserAction::Navigate { url } = action else { return base };
     let PolicyDecision::RequireApproval { ref reason } = base.1 else { return base };
     if !reason.starts_with("Cross-origin navigation to ") { return base; }
-    let Some(expected) = requested_navigation_url(goal) else { return base };
     let Ok(actual) = Url::parse(url) else { return base };
-    if actual == expected
+    let user_explicitly_named_destination = requested_navigation_url(goal)
+        .is_some_and(|expected| actual == expected);
+    let user_explicitly_named_search_site = requested_search_host(goal)
+        .is_some_and(|host| actual.scheme() == "https"
+            && actual.host_str() == Some(host));
+    if (user_explicitly_named_destination || user_explicitly_named_search_site)
         && actual.host_str().is_some_and(|host| host_matches_allowlist(host, allowed_domains))
     {
         return (RiskLevel::Low, PolicyDecision::Allow);
@@ -365,6 +391,30 @@ mod tests {
         assert!(matches!(evaluate_user_navigation_policy(origin,
             &navigate("javascript:alert(1)"), &[], "open javascript:alert(1)").1,
             PolicyDecision::Deny { .. }));
+    }
+
+    #[test]
+    fn search_named_website_can_navigate_without_second_consent() {
+        let goal = "Search YouTube for NASA Artemis mission and open a video result";
+        let nav = |url: &str| BrowserAction::Navigate { url: url.into() };
+        assert_eq!(requested_search_host(goal), Some("www.youtube.com"));
+        assert!(matches!(evaluate_user_navigation_policy("about:blank",
+            &nav("https://www.youtube.com/"), &[], goal).1,
+            PolicyDecision::Allow));
+        assert!(matches!(evaluate_user_navigation_policy("about:blank",
+            &nav("https://www.youtube.com/results?search_query=nasa"), &[], goal).1,
+            PolicyDecision::Allow));
+        // No permission silently extends to a different host or explicit run block.
+        for bad in ["https://www.youtube.com.attacker.example/",
+            "https://accounts.google.com/", "http://www.youtube.com/"] {
+            assert!(matches!(evaluate_user_navigation_policy("about:blank",
+                &nav(bad), &[], goal).1, PolicyDecision::RequireApproval { .. }));
+        }
+        assert!(matches!(evaluate_user_navigation_policy("about:blank",
+            &nav("https://www.youtube.com/"), &["example.org".into()], goal).1,
+            PolicyDecision::RequireApproval { .. }));
+        assert_eq!(requested_search_host("I do not want to use YouTube"), None);
+        assert_eq!(requested_search_host("search another site for youtube videos"), None);
     }
 
     #[test]
