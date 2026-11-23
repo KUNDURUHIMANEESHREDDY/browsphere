@@ -45,6 +45,19 @@ async function main() {
     await sleep(350);
     const before = await evaluate('window.browsphereApp.activeTab()');
     assert.equal(before.url, 'browsphere://start', 'Need to start from the actual in-app New Tab page');
+    // The old preflight rejected this goal before returning a run ID.
+    // Exercise startup independently of the configured planner and its response.
+    const genericRun = await evaluate("window.aetherBridge.startLuciaSpecialistTask('Search YouTube for robotics videos','browsphere://start','New Tab')");
+    try {
+      assert.match(genericRun, /^[0-9a-f-]{36}$/i, 'A multi-step request should start on New Tab');
+      const blank = await evaluate("window.__TAURI__.core.invoke('capture_live_snapshot')");
+      assert.equal(blank?.origin, 'about:blank', 'Startup should attach an empty native document');
+      assert.equal(blank.interactive_nodes.length, 0);
+    } finally {
+      await evaluate("window.__TAURI__.core.invoke('cancel_agent_run')");
+    }
+    await evaluate("window.browsphereApp.newTab('browsphere://start')");
+    await sleep(350);
     const output = await evaluate("(async()=>{window.__luciaStartEvents=[];window.__luciaStartUnlisten=await window.__TAURI__.event.listen('agent:run_status',ev=>window.__luciaStartEvents.push(ev.payload));return await window.aetherBridge.startLuciaSpecialistTask('open youtube','browsphere://start','New Tab')})()");
     assert.ok(output, 'Lucia task did not start');
     let outcome;

@@ -4563,8 +4563,7 @@
           showHudToast('Lucia specialist agents started');
         } catch (err) {
           thread.pending = false;
-          thread.agentTask.status = 'Not started';
-          thread.agentTask.error = String(err);
+          thread.agentTask = null;
           thread.messages.push({role:'assistant',content:'Could not start the task: ' + String(err),error:true});
           renderActiveTab();
         }
