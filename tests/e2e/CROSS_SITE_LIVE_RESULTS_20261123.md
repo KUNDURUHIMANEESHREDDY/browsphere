@@ -34,7 +34,7 @@
 
 This follow-up uses a freshly built `target/release/browsphere-core.exe` containing the navigation settle checks, bounded action-JSON retry, and narrower observed-title verifier. The test launcher supports `-UseSavedCloud`, which loads only the saved cloud endpoint/model from the user's SQLite settings using `read-saved-cloud-settings.py`; the helper opens the database read-only. Keys remain in Windows Credential Manager, not test output or the disposable WebView2 profile.
 
-- **Unit regressions:** `cargo test --workspace --locked` passed: 118 passed, 0 failed, 5 intentionally ignored. `node --test tests/*.test.cjs` passed: 16/16.
+- **Unit regressions:** `cargo test --workspace --locked` passed after the invalid-control replan change: 119 passed, 0 failed, 5 intentionally ignored. `node --test tests/*.test.cjs` passed: 16/16.
 - **Actual external WebView2 page compatibility:** 17/17 passed on Example Domain, GitHub, Wikipedia, and Hacker News, including observed content, toolbar sync, permission controls and popup consent.
 - **Live agent navigation:** 4/4 passed with genuine native snapshots and independently evidence-checked destination URLs. These short tasks dispatch URLs directly from explicit user requests; they do **not** demonstrate cloud-model reasoning.
 - **Hosted-model multi-step search:** **FAILED**, not certified. The saved Groq route (`openai/gpt-oss-20b`) produced an actual browser `click`, then returned HTTP 429 `rate_limit_exceeded` on a later action request. Wikipedia's Ada Lovelace article was not opened; the run was correctly reported failed. Do not count the cloud model as end-to-end verified.
