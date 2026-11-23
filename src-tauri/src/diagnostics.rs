@@ -47,7 +47,9 @@ pub fn init(data_dir: &Path) {
         let source = location.map(|l| l.file().rsplit(['/', '\\']).next().unwrap_or("unknown"))
             .unwrap_or("unknown");
         // Panic payload deliberately omitted: it may include secrets or page data.
-        record("crash", "panic", json!({"component": source, "error_kind": "panic"}));
+        record("crash", "panic", json!({"component": source, "error_kind": "panic",
+            "line": location.map(|l| l.line()).unwrap_or(0)}));
+        #[cfg(debug_assertions)]
         eprintln!("Browsphere encountered an unexpected error; see the local crash diagnostics");
     }));
     record("runtime", "session_start", json!({"component": "browsphere"}));
@@ -67,7 +69,7 @@ fn guarded_fields(input: Value) -> Value {
                 "component" | "run_id" | "trace_id" | "step" | "action" |
                 "status" | "risk" | "decision" | "model_route" | "latency_ms" |
                 "duration_ms" | "blocked_trackers" | "error_kind" | "level" |
-                "private" | "stage" | "count" | "kind" | "outcome" | "source"
+                "private" | "stage" | "count" | "kind" | "outcome" | "source" | "line"
             ) { continue; }
             match value {
                 Value::Bool(_) | Value::Number(_) | Value::Null => { fields.insert(key, value); }

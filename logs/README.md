@@ -17,7 +17,7 @@ Browsphere creates persistent local diagnostics automatically when the native ap
 - `downloads.jsonl`: download outcomes, not URLs or filenames
 - `ui.jsonl`: uncaught frontend errors and unhandled promise rejection counts (no stacks or raw error text)
 - `errors.jsonl`: categorized runtime failures without raw exception content
-- `crash.jsonl`: Rust panic metadata without user data or panic payload
+- `crash.jsonl`: Rust panic file/line metadata without user data or panic payload
 
 Each entry contains a timestamp, session ID, process ID, channel, event, and restricted metadata fields. Files rotate after **2 MiB**, retain **4 backups per channel**, and rotate/delete logs older than **14 days** on startup.
 

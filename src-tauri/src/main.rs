@@ -2582,11 +2582,18 @@ async fn start_agent_run(
 }
 
 fn write_startup_log(_data_dir: &std::path::Path, msg: &str) {
-    // Keep detailed text on the console, never persist arbitrary error strings.
+    // Avoid stderr in release GUI processes, and never persist arbitrary text.
+    #[cfg(debug_assertions)]
     eprintln!("[Browsphere Startup] {msg}");
-    diagnostics::record("errors", "startup_warning", serde_json::json!({
-        "error_kind": if msg.contains("SQLite") { "sqlite_open" } else { "startup" }
-    }));
+    if msg.starts_with("Data dir:") {
+        diagnostics::record("runtime", "startup_ready", serde_json::json!({
+            "component": "browsphere"
+        }));
+    } else {
+        diagnostics::record("errors", "startup_warning", serde_json::json!({
+            "error_kind": if msg.contains("SQLite") { "sqlite_open" } else { "startup" }
+        }));
+    }
 }
 
 #[tauri::command]
@@ -2617,11 +2624,15 @@ fn main() {
     diagnostics::init(&data_dir);
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::registry()
+    let subscriber = tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer())
-        .with(diagnostics::RuntimeMetadataLayer)
-        .init();
+        .with(diagnostics::RuntimeMetadataLayer);
+    // Console output is only useful in debug builds; in a GUI release it can
+    // fail when no stderr handle exists. Metadata still goes to JSONL logs.
+    #[cfg(debug_assertions)]
+    subscriber.with(tracing_subscriber::fmt::layer()).init();
+    #[cfg(not(debug_assertions))]
+    subscriber.init();
     let site_permissions = SitePermissions::new(&data_dir);
     write_startup_log(&data_dir, &format!("Data dir: {}", data_dir.to_string_lossy()));
 
@@ -2684,7 +2695,8 @@ fn main() {
                 let _ = win.show();
                 let _ = win.set_focus();
             } else {
-                eprintln!("[Browsphere Startup] Warning: main webview window not found during setup");
+                diagnostics::record("errors", "main_window_missing",
+                    serde_json::json!({"error_kind": "main_window"}));
             }
             AutomationEngine::spawn_scheduler(
                 auto_for_sched,
