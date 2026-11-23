@@ -118,8 +118,11 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     // accessible names; unlabelled clickable cards were otherwise skipped.
     const ancestorLabel = el.closest("label");
     const imageAlt = el.querySelector("img[alt]")?.getAttribute("alt") || "";
-    const text = (el.innerText || el.value || ancestorLabel?.innerText ||
-      imageAlt || el.getAttribute("alt") || "").replace(/\s+/g, " ").trim();
+    // Text-only layout whitespace must not eclipse a meaningful image alt.
+    const normalized = value => String(value || "").replace(/\s+/g, " ").trim();
+    const text = normalized(el.innerText) || normalized(el.value)
+      || normalized(ancestorLabel?.innerText) || normalized(imageAlt)
+      || normalized(el.getAttribute("alt"));
     return text.slice(0, 120);
   }}
 
