@@ -38,7 +38,7 @@ In the Windows app open Settings > AI & ML > Connect AWS. The button uses your e
 | AWS integration | Optional AWS CLI-profile connection and resource discovery for Bedrock, S3, DynamoDB, Cognito, and Lambda. Account-side S3, DynamoDB, Cognito, and Lambda resources have been configured and tested in development; no automatic cloud sync or Bedrock routing is enabled by default. |
 | Packaging and tests | Windows build/installer script, a GitHub Actions workflow, Rust tests, and automated WebView2/Chromium UI smoke-test scripts. |
 
-**Verification snapshot:** The latest recorded Rust release test run completed with **50 passed, 0 failed, 4 ignored** (the ignored tests require configured local models). A separate real-local-model verifier test passed, and a previously recorded desktop E2E run passed **15/15** UI/integration checks. The recorded release build exited successfully. These are development test results, not exhaustive production certification.
+**Verification snapshot:** The latest Rust test run completed with **51 passed, 0 failed, 4 ignored** (the ignored tests require configured local models). A separate real-local-model verifier test passed, and a previously recorded desktop E2E run passed **15/15** UI/integration checks. The updated Windows release compilation also succeeded. These are development test results, not exhaustive production certification.
 
 ### What's pending
 
@@ -55,3 +55,20 @@ In the Windows app open Settings > AI & ML > Connect AWS. The button uses your e
 After that, finish native voice/AWS integration checks and release testing. This section describes the **current development priority**, not an unattended background process.
 
 For details, see [AWS integration](AWS_INTEGRATION.md), [Voice Agent](VOICE_AGENT.md), and [Windows E2E report](tests/e2e/REPORT.md).
+
+### Browser maturity milestone — 22 November 2026
+
+The first **everyday-browser reliability** update is now implemented:
+
+- **Session recovery:** ordinary open tabs, active tab and bounded per-tab URL history are saved locally and restored on launch. Closing/switching/navigating tabs updates the snapshot. Private-mode tab URLs are excluded.
+- **Persistent library:** bookmarks and reading-list items survive restarts, without storing password/token-bearing URLs.
+- **Real WebView2 navigation:** completed child-webview page loads synchronize link clicks/redirects into the tab's URL and navigation history. Restored tabs lazily create their WebView2 instance when selected.
+- **Working reload and navigation shortcuts:** Reload now executes in the actual child webview; F5/Ctrl+R, Ctrl+Tab, Alt+Left/Right are supported when the Browsphere UI has keyboard focus.
+- **Safer input and history:** the omnibar preserves HTTP and HTTPS URLs, searches ordinary text, rejects unsupported URL schemes, and avoids saving common OAuth/token URL parameters in browser history. Private navigation skips history insertion.
+- **Honest UI state:** Empty Page is blank; unavailable native website rendering no longer displays simulated website/article content; navigation failures show an error; fabricated password records and nonfunctional pre-enabled extension listings were removed. The Extensions pane now explains that extension hosting is not available.
+
+**Tests:** Run `node tests/browser-state.test.cjs` for session, bookmark, URL and privacy filtering checks, and `cargo test --workspace --offline` for the Rust test suite. Tests validate implementation paths but do not prove real-world site compatibility or full private-browsing isolation.
+
+**Still pending before Chrome-level maturity:** full native-browser UI regression on diverse websites, engine-native back/forward state and scroll restoration, external-window/popup handling, proper isolated private browsing (cookies/storage currently share the default WebView2 profile), extension hosting, permission management, polished download UX, standards/security review (including CSP), auto-update signing/release pipeline, and performance/accessibility/reliability testing. Some keyboard shortcuts may not work while a child WebView has focus.
+
+**Next priority:** native WebView2 navigation/permissions/private-profile integration and repeatable end-to-end desktop browsing tests. This is a development roadmap, not proof of Chrome/Edge feature parity.

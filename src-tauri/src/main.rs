@@ -35,6 +35,32 @@ use router::model_router::{ChatAnswer, ChatTurn, ModelRouter, RouterConfig};
 use storage::credentials::CredentialStore;
 use storage::sqlite_wal::{AgentRunSummary, BrowserDatabase, HistoryEntry, ItpHostCount, SavedCredentialMeta, WorkflowMacro, MemoryEntry};
 
+// OAuth callback URLs and similar secrets must not end up in persistent history.
+fn contains_sensitive_history_parameter(address: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(address) else { return false; };
+    let is_secret = |name: &str| matches!(name.to_ascii_lowercase().as_str(),
+        "access_token" | "id_token" | "refresh_token" | "code" | "token" |
+        "api_key" | "apikey" | "password" | "session" | "auth" | "client_secret");
+    parsed.query_pairs().any(|(key, _)| is_secret(&key)) ||
+        parsed.fragment().map(|fragment|
+            url::form_urlencoded::parse(fragment.as_bytes())
+                .any(|(key, _)| is_secret(&key)))
+            .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod browser_history_tests {
+    use super::contains_sensitive_history_parameter;
+
+    #[test]
+    fn excludes_oauth_and_secret_urls_from_persistent_history() {
+        assert!(contains_sensitive_history_parameter("https://login.example/callback?code=abc"));
+        assert!(contains_sensitive_history_parameter("https://example.org/#access_token=secret"));
+        assert!(contains_sensitive_history_parameter("https://example.org/?API_KEY=secret"));
+        assert!(!contains_sensitive_history_parameter("https://example.org/page?sort=recent"));
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TabBounds {
     pub x: f64,
@@ -908,6 +934,7 @@ async fn open_or_navigate_tab(
     tab_id: String,
     url: String,
     bounds: Option<TabBounds>,
+    is_private: Option<bool>,
 ) -> Result<(), String> {
     let parsed = url::Url::parse(&url).map_err(|e| format!("Invalid URL: {e}"))?;
     if !state.itp.allow_navigation(&parsed) {
@@ -936,7 +963,7 @@ async fn open_or_navigate_tab(
     };
 
     let itp_verdict = state.itp.check_url(&target);
-    {
+    if !is_private.unwrap_or(false) && !contains_sensitive_history_parameter(&target) {
         let mut db = state.db.lock().await;
         let _ = db.record_visit(&target, None, itp_verdict.blocked_trackers);
     }
@@ -950,7 +977,8 @@ async fn open_or_navigate_tab(
     hide_other_tab_webviews(&app, &state.tabs, &label).await;
 
     if let Some(existing) = app.get_webview(&label) {
-        let _ = existing.navigate(parsed);
+        existing.navigate(parsed)
+            .map_err(|e| format!("Could not navigate website: {e}"))?;
         apply_webview_geometry(&existing, &effective_bounds);
         return Ok(());
     }
@@ -961,6 +989,8 @@ async fn open_or_navigate_tab(
 
     let itp_for_nav = state.itp.clone();
     let app_for_nav = app.clone();
+    let app_for_page_load = app.clone();
+    let tab_id_for_page_load = tab_id.clone();
     let itp_for_dl = state.itp.clone();
     let dl_mgr_for_dl = state.downloads.clone();
     let db_for_dl = state.db.clone();
@@ -973,6 +1003,17 @@ async fn open_or_navigate_tab(
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
         .initialization_script(&guard_script)
         .initialization_script(&theme_script)
+        .on_page_load(move |_webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                let _ = app_for_page_load.emit(
+                    "browser:page-loaded",
+                    serde_json::json!({
+                        "tabId": tab_id_for_page_load,
+                        "url": payload.url().to_string()
+                    }),
+                );
+            }
+        })
         .on_navigation(move |nav_url| {
             let allowed = itp_for_nav.allow_navigation(nav_url);
             if !allowed {
@@ -1116,6 +1157,18 @@ async fn switch_tab_webview(
     }
 
     Ok(())
+}
+
+#[tauri::command]
+async fn reload_tab_webview(
+    app: tauri::AppHandle,
+    tab_id: String,
+) -> Result<(), String> {
+    let label = TabManagerState::sanitize_label(&tab_id);
+    let webview = app.get_webview(&label)
+        .ok_or_else(|| "No loaded website to reload".to_string())?;
+    webview.eval("window.location.reload()")
+        .map_err(|e| format!("Website reload failed: {e}"))
 }
 
 #[tauri::command]
@@ -1478,7 +1531,11 @@ async fn record_navigation(
     state: tauri::State<'_, Arc<AppState>>,
     url: String,
     title: Option<String>,
+    is_private: Option<bool>,
 ) -> Result<(), String> {
+    if is_private.unwrap_or(false) || contains_sensitive_history_parameter(&url) {
+        return Ok(());
+    }
     let itp_verdict = state.itp.check_url(&url);
     let mut db = state.db.lock().await;
     db.record_visit(&url, title.as_deref(), itp_verdict.blocked_trackers)
@@ -2271,6 +2328,7 @@ fn main() {
             set_app_theme,
             open_or_navigate_tab,
             switch_tab_webview,
+            reload_tab_webview,
             close_tab_webview,
             sync_tab_bounds,
             report_itp_blocked,

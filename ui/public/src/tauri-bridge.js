@@ -30,6 +30,7 @@
   let activeApprovalId = null;
   let agentPaused = false;
   let currentTabId = 'tab-1';
+  const loadedExternalTabs = new Set();
   let currentTabIsExternal = false;
 
   if (hasTauri) {
@@ -214,14 +215,23 @@
 
       if (isExternal) {
         try {
-          await invoke('open_or_navigate_tab', { tabId: currentTabId, url, bounds });
+          await invoke('open_or_navigate_tab', {
+            tabId: currentTabId, url, bounds,
+            isPrivate: document.documentElement.getAttribute('data-private') === 'true'
+          });
+          loadedExternalTabs.add(currentTabId);
         } catch (err) {
           console.warn('Child WebView2 nav error:', err);
+          emitUiEvent('aether:browser-error', {
+            tabId: currentTabId, url, message: String(err)
+          });
         }
       } else {
         try {
           await invoke('switch_tab_webview', { tabId: currentTabId, isExternal: false, bounds });
-          await invoke('record_navigation', { url, title: title || url });
+          if (document.documentElement.getAttribute('data-private') !== 'true') {
+            await invoke('record_navigation', { url, title: title || url, isPrivate: false });
+          }
         } catch (_) {}
       }
       emitUiEvent('aether:history-updated');
@@ -234,14 +244,39 @@
       currentTabIsExternal = isExternal;
       const bounds = computeCanvasBounds();
       try {
-        await invoke('switch_tab_webview', { tabId: currentTabId, isExternal, bounds });
-      } catch (_) {}
+        if (isExternal && !loadedExternalTabs.has(currentTabId)) {
+          await invoke('open_or_navigate_tab', {
+            tabId: currentTabId, url, bounds,
+            isPrivate: document.documentElement.getAttribute('data-private') === 'true'
+          });
+          loadedExternalTabs.add(currentTabId);
+        } else {
+          await invoke('switch_tab_webview', { tabId: currentTabId, isExternal, bounds });
+        }
+      } catch (err) {
+        console.warn('Could not switch browser tab:', err);
+        emitUiEvent('aether:browser-error', {
+          tabId: currentTabId, url, message: String(err)
+        });
+      }
+    },
+
+    async reloadTab(tabId) {
+      if (!invoke) throw new Error('Native browser runtime not available');
+      await invoke('reload_tab_webview', { tabId });
+    },
+
+    async recordCompletedNavigation(url, title) {
+      if (!invoke || document.documentElement.getAttribute('data-private') === 'true') return;
+      await invoke('record_navigation', { url, title, isPrivate: false });
+      emitUiEvent('aether:history-updated');
     },
 
     async onCloseTab(tabId) {
       if (!invoke || !tabId) return;
       try {
         await invoke('close_tab_webview', { tabId });
+        loadedExternalTabs.delete(tabId);
       } catch (_) {}
     },
 
@@ -761,6 +796,10 @@
 
     listen('itp:blocked', (event) => {
       emitUiEvent('aether:itp-updated', event.payload || {});
+    });
+
+    listen('browser:page-loaded', (event) => {
+      emitUiEvent('aether:page-loaded', event.payload || {});
     });
 
     listen('download:progress', (event) => {

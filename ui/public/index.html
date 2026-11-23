@@ -1615,6 +1615,7 @@
     Action completed
   </div>
 
+  <script src="./src/browser-state.js"></script>
   <script src="./src/ai-preferences.js"></script>
   <script>
     (function () {
@@ -2069,6 +2070,26 @@
 
       var downloads = [];
 
+      // Persist only ordinary tab URLs; private navigation never enters the saved session.
+      function saveBrowserSession() {
+        if (window.BrowsphereState) {
+          window.BrowsphereState.saveSession(localStorage, tabs, activeTabId, isPrivateMode);
+        }
+      }
+      function saveBrowserLibrary() {
+        if (window.BrowsphereState) {
+          window.BrowsphereState.saveLibrary(localStorage, bookmarks, readingList);
+        }
+      }
+      function restoreBrowserSession() {
+        if (!window.BrowsphereState) return;
+        var restored = window.BrowsphereState.load(localStorage);
+        tabs = restored.tabs;
+        activeTabId = restored.activeTabId;
+        bookmarks = restored.bookmarks;
+        readingList = restored.readingList;
+      }
+
       var findMatches = [];
       var activeFindIndex = -1;
 
@@ -2092,20 +2113,11 @@
           try { return localStorage.getItem('browsphere-auto-memory') !== 'off'; }
           catch (_) { return true; }
         })(),
-        extensions: [
-          { id: 'ext-1p', name: '1Password for Browsphere', desc: 'Autofill passwords, passkeys, and 2FA codes.', enabled: true },
-          { id: 'ext-wipr', name: 'Wipr Content Blocker', desc: 'Blocks trackers, ads, and cookie banners.', enabled: true },
-          { id: 'ext-vinegar', name: 'Vinegar Tube Cleaner', desc: 'Replaces web players with native HTML5 video.', enabled: true },
-          { id: 'ext-grammarly', name: 'Grammarly for Browsphere', desc: 'Checks spelling and clarity in text fields.', enabled: false },
-          { id: 'ext-raycast', name: 'Raycast Companion', desc: 'Search open tabs and bookmarks from Raycast.', enabled: true }
-        ],
+        // No browser extensions are installed; do not claim third-party extensions work.
+        extensions: [],
         autofillPasswords: true,
-        savedLogins: [
-          { site: 'arxiv-review.org', username: 'elena.rostova@quantumlab.edu', masked: '••••••••••••', plain: 'Qubit#Lattice2026!' },
-          { site: 'internal.acme.design', username: 'design-lead@acme.design', masked: '••••••••••••', plain: 'SequoiaGlass$99' },
-          { site: 'github.com', username: 'mlx-contributor', masked: '••••••••••••', plain: 'UnifiedMem_M4Max!' },
-          { site: 'icloud.com', username: 'alex.mercer@icloud.com', masked: '••••••••••••', plain: 'AppleSilicon#2026' }
-        ],
+        // Native builds load actual saved credentials from Windows Credential Manager.
+        savedLogins: [],
         showFullWebsiteAddress: false,
         showDeveloperMenu: false,
         reducedMotion: false
@@ -2847,36 +2859,28 @@
       }
 
       function getPageData(url) {
-        if (url === 'about:blank') return PRESET_PAGES['browsphere://start'];
+        if (url === 'about:blank') return {
+          url: url, title: 'Blank tab', group: 'Open Tabs', isArticle: false,
+          renderHtml: function () { return ''; }
+        };
         if (PRESET_PAGES[url]) return PRESET_PAGES[url];
         var cleanTitle = url.replace(/^https?:\/\//, '').split('/')[0] || 'New Page';
         return {
           url: url,
           title: cleanTitle,
-          group: 'Research & Papers',
-          isArticle: true,
-          readTime: '4 min read',
-          summaryBullets: [
-            '<strong>Live Web Synthesis for ' + esc(cleanTitle) + ':</strong> Page indexed into Apple Intelligence local context.',
-            '<strong>Zero-Tracker Session:</strong> 6 cross-site analytics scripts blocked automatically by Browsphere ITP.',
-            '<strong>Full Reader &amp; Q&amp;A Ready:</strong> Ask any follow-up question in the top-right Lucia popover.'
-          ],
-          keyMetrics: '• Domain: ' + cleanTitle + '\n• Trackers Blocked: 6\n• Reader Mode Compatibility: Verified',
-          critique: 'Page content for ' + cleanTitle + ' is loaded cleanly in Browsphere’s WebKit sandbox with full Reader View and AI summarization enabled.',
+          group: 'Websites',
+          isArticle: false,
+          readTime: '',
+          summaryBullets: [],
+          keyMetrics: '',
+          critique: '',
           renderHtml: function () {
-            return (
-              '<article class="max-w-[820px] mx-auto px-6 sm:px-12 py-10">' +
-                '<div class="mb-6 pb-5 border-b border-black/10 dark:border-white/10">' +
-                  '<div class="text-xs font-medium text-[#007AFF] mb-2">WebKit Live Render • ' + esc(url) + '</div>' +
-                  '<h1 class="font-serif text-3xl font-bold tracking-tight mb-2">' + esc(cleanTitle) + '</h1>' +
-                  '<p class="text-xs opacity-60">Loaded via Browsphere AI-Native Engine • 6 Trackers Blocked</p>' +
-                '</div>' +
-                '<div class="reader-body font-serif text-[17px] leading-[1.78] space-y-5">' +
-                  '<p>Welcome to <strong>' + esc(cleanTitle) + '</strong>. Browsphere has automatically stripped cross-site tracking scripts and indexed this document for instant summarization in the top-right <strong>Lucia</strong> popover.</p>' +
-                  '<p><span class="smart-highlight">Highlight any sentence on this page or click this passage to trigger Explain, Summarize, or Ask in Chat.</span></p>' +
-                '</div>' +
-              '</article>'
-            );
+            return '<main class="max-w-[660px] mx-auto px-6 py-20 text-center space-y-3">' +
+              '<h1 class="text-xl font-semibold">Live website view unavailable</h1>' +
+              '<p class="text-sm opacity-70">Open Browsphere as a Windows desktop application ' +
+              'to browse ' + esc(cleanTitle) + ' using WebView2. This fallback page does not ' +
+              'pretend to contain the real website content.</p>' +
+              '</main>';
           }
         };
       }
@@ -2890,10 +2894,14 @@
         if (document.activeElement !== omnibar) {
           if (currentUrl.indexOf('browsphere://') === 0 || currentUrl === 'about:blank') {
             omnibar.value = currentUrl;
-          } else if (browserSettings.showFullWebsiteAddress) {
-            omnibar.value = 'https://' + currentUrl;
           } else {
-            omnibar.value = currentUrl.split('/')[0];
+            try {
+              var parsedOmnibarUrl = new URL(currentUrl);
+              omnibar.value = browserSettings.showFullWebsiteAddress
+                ? parsedOmnibarUrl.href : parsedOmnibarUrl.host;
+            } catch (_) {
+              omnibar.value = currentUrl;
+            }
           }
         }
 
@@ -2939,6 +2947,31 @@
         }
       }
 
+      // Keep real link clicks, redirects and address-bar state in step with WebView2.
+      function syncCompletedNativeNavigation(detail) {
+        if (!detail || !detail.tabId || !detail.url || !window.BrowsphereState) return;
+        var tab = tabs.find(function (entry) { return entry.id === detail.tabId; });
+        var url = window.BrowsphereState.validAddress(detail.url);
+        if (!tab || !url || !/^https?:\/\//i.test(url)) return;
+        if (tab.history[tab.historyIndex] === url) return;
+        if (isPrivateMode) tab.privateContext = true;
+        tab.history = tab.history.slice(0, tab.historyIndex + 1);
+        tab.history.push(url);
+        tab.historyIndex = tab.history.length - 1;
+        if (!isPrivateMode && !tab.privateContext) {
+          var page = getPageData(url);
+          browsingHistory.unshift({
+            title: page.title, url: url,
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          });
+          if (window.aetherBridge && window.aetherBridge.recordCompletedNavigation) {
+            window.aetherBridge.recordCompletedNavigation(url, page.title).catch(function () {});
+          }
+        }
+        saveBrowserSession();
+        if (tab.id === activeTabId) renderActiveTab();
+      }
+
       function navigateToUrl(rawInput) {
         var query = String(rawInput || '').trim();
         if (!query) return;
@@ -2949,23 +2982,24 @@
           return;
         }
 
-        if (query.indexOf('.') === -1 && query.indexOf('browsphere://') !== 0 && query !== 'about:blank') {
-          var engineDomains = {
-            Google: 'www.google.com/search?q=',
-            DuckDuckGo: 'duckduckgo.com/?q=',
-            Perplexity: 'www.perplexity.ai/search?q=',
-            Kagi: 'kagi.com/search?q='
-          };
-          var prefix = engineDomains[browserSettings.searchEngine] || engineDomains.Google;
-          query = prefix + encodeURIComponent(query);
-        } else {
-          query = query.replace(/^https?:\/\//, '');
+        query = window.BrowsphereState.addressOrSearch(query, browserSettings.searchEngine);
+        if (!query) {
+          showHudToast('Invalid or unsupported web address');
+          return;
         }
 
         var tab = getActiveTab();
+        if (!isPrivateMode && tab.privateContext) {
+          // Never copy private-page history into a subsequent normal session.
+          tab.history = [];
+          tab.historyIndex = -1;
+          tab.privateContext = false;
+        }
+        if (isPrivateMode) tab.privateContext = true;
         tab.history = tab.history.slice(0, tab.historyIndex + 1);
         tab.history.push(query);
         tab.historyIndex = tab.history.length - 1;
+        saveBrowserSession();
 
         var page = getPageData(query);
         if (!isPrivateMode) {
@@ -2976,8 +3010,7 @@
         closeAllPopovers();
         renderActiveTab();
         if (window.aetherBridge && window.aetherBridge.isNative) {
-          var navTarget = (query.indexOf('browsphere://') === 0 || query === 'about:blank') ? query : ('https://' + query);
-          window.aetherBridge.onNavigate(tab.id, navTarget, page.title);
+          window.aetherBridge.onNavigate(tab.id, query, page.title);
         }
       }
 
@@ -2986,10 +3019,12 @@
         var nextIdx = tab.historyIndex + delta;
         if (nextIdx < 0 || nextIdx >= tab.history.length) return;
         tab.historyIndex = nextIdx;
+        if (isPrivateMode) tab.privateContext = true;
+        saveBrowserSession();
         renderActiveTab();
         if (window.aetherBridge && window.aetherBridge.isNative) {
           var u = tab.history[tab.historyIndex];
-          var resolved = (u.indexOf('browsphere://') === 0 || u === 'about:blank') ? u : ('https://' + u);
+          var resolved = u;
           var p = getPageData(u);
           if (resolved.indexOf('http://') === 0 || resolved.indexOf('https://') === 0) {
             window.aetherBridge.onNavigate(tab.id, resolved, p.title);
@@ -3004,8 +3039,17 @@
         icon.classList.remove('spin-reload');
         void icon.offsetWidth;
         icon.classList.add('spin-reload');
+        var tab = getActiveTab();
+        var url = tab.history[tab.historyIndex];
+        if (window.aetherBridge && window.aetherBridge.isNative &&
+            /^https?:\/\//i.test(url)) {
+          window.aetherBridge.reloadTab(tab.id)
+            .then(function () { showHudToast('Website reloaded'); })
+            .catch(function (err) { showHudToast('Reload failed: ' + String(err)); });
+          return;
+        }
         renderActiveTab();
-        showHudToast('Page reloaded');
+        showHudToast('Start page refreshed');
       }
 
       function createNewTab(url) {
@@ -3019,17 +3063,20 @@
             targetUrl = 'browsphere://start';
           }
         }
-        var newId = 'tab-' + Date.now();
+        targetUrl = window.BrowsphereState.addressOrSearch(targetUrl, browserSettings.searchEngine) || 'browsphere://start';
+        var newId = 'tab-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
         tabs.push({
           id: newId,
           group: 'Open Tabs',
           history: [targetUrl],
-          historyIndex: 0
+          historyIndex: 0,
+          privateContext: isPrivateMode
         });
         activeTabId = newId;
+        saveBrowserSession();
         renderActiveTab();
         if (window.aetherBridge && window.aetherBridge.isNative) {
-          var resolved = (targetUrl.indexOf('browsphere://') === 0 || targetUrl === 'about:blank') ? targetUrl : ('https://' + targetUrl.replace(/^https?:\/\//, ''));
+          var resolved = targetUrl;
           if (resolved.indexOf('http://') === 0 || resolved.indexOf('https://') === 0) {
             window.aetherBridge.onNavigate(newId, resolved, getPageData(targetUrl).title);
           } else {
@@ -3043,7 +3090,15 @@
           window.aetherBridge.onCloseTab(tabId);
         }
         if (tabs.length === 1) {
-          navigateToUrl('browsphere://start');
+          var onlyTab = getActiveTab();
+          onlyTab.history = ['browsphere://start'];
+          onlyTab.historyIndex = 0;
+          onlyTab.privateContext = isPrivateMode;
+          saveBrowserSession();
+          if (window.aetherBridge && window.aetherBridge.isNative) {
+            window.aetherBridge.onSwitchTab(onlyTab.id, 'browsphere://start');
+          }
+          renderActiveTab();
           return;
         }
         var idx = tabs.findIndex(function (t) { return t.id === tabId; });
@@ -3051,11 +3106,12 @@
         if (activeTabId === tabId) {
           activeTabId = tabs[Math.max(0, idx - 1)].id;
         }
+        saveBrowserSession();
         renderActiveTab();
         if (window.aetherBridge && window.aetherBridge.isNative) {
           var nextTab = getActiveTab();
           var nextUrl = nextTab.history[nextTab.historyIndex];
-          var resolved = (nextUrl.indexOf('browsphere://') === 0 || nextUrl === 'about:blank') ? nextUrl : ('https://' + nextUrl);
+          var resolved = nextUrl;
           window.aetherBridge.onSwitchTab(nextTab.id, resolved);
         }
         if (!document.getElementById('tabOverviewModal').classList.contains('hidden')) {
@@ -3064,13 +3120,14 @@
       }
 
       function switchToTab(tabId) {
+        if (!tabs.some(function (t) { return t.id === tabId; })) return;
         activeTabId = tabId;
+        saveBrowserSession();
         renderActiveTab();
         if (window.aetherBridge && window.aetherBridge.isNative) {
           var t = getActiveTab();
           var u = t.history[t.historyIndex];
-          var resolved = (u.indexOf('browsphere://') === 0 || u === 'about:blank') ? u : ('https://' + u);
-          window.aetherBridge.onSwitchTab(t.id, resolved);
+          window.aetherBridge.onSwitchTab(t.id, u);
         }
       }
 
@@ -3201,6 +3258,7 @@
         if (!bookmarks.some(function (b) { return b.url === url; })) {
           bookmarks.unshift({ folder: 'Favorites', title: page.title, url: url });
         }
+        saveBrowserLibrary();
         closeAllPopovers();
         renderSidebarSection();
         showHudToast('Bookmarked "' + page.title + '"');
@@ -3213,6 +3271,7 @@
         if (!readingList.some(function (r) { return r.url === url; })) {
           readingList.unshift({ title: page.title, url: url, readTime: page.readTime || '5 min', unread: true });
         }
+        saveBrowserLibrary();
         closeAllPopovers();
         renderSidebarSection();
         showHudToast('Saved "' + page.title + '" to Reading List');
@@ -3222,6 +3281,7 @@
         var item = readingList[idx];
         if (!item) return;
         item.unread = false;
+        saveBrowserLibrary();
         navigateToUrl(item.url);
       }
 
@@ -3889,11 +3949,13 @@
       }
 
       function togglePrivateBrowsing() {
+        if (!isPrivateMode) saveBrowserSession();
         isPrivateMode = !isPrivateMode;
+        if (!isPrivateMode) saveBrowserSession();
         document.documentElement.setAttribute('data-private', isPrivateMode ? 'true' : 'false');
         document.getElementById('privateModeBadge').classList.toggle('hidden', !isPrivateMode);
         document.getElementById('privateTogglePill').textContent = isPrivateMode ? 'On' : 'Off';
-        showHudToast(isPrivateMode ? 'Private Browsing Enabled — History paused' : 'Standard Browsing Restored');
+        showHudToast(isPrivateMode ? 'History saving paused; separate cookie isolation is still pending' : 'Standard browsing restored');
       }
 
       function toggleFullscreenWindow() {
@@ -4104,6 +4166,20 @@
           } else if (mod && e.key.toLowerCase() === 'w') {
             e.preventDefault();
             closeTab(activeTabId);
+          } else if ((mod && e.key.toLowerCase() === 'r') || e.key === 'F5') {
+            e.preventDefault();
+            reloadActivePage();
+          } else if (mod && e.key === 'Tab') {
+            e.preventDefault();
+            var tabIndex = tabs.findIndex(function (t) { return t.id === activeTabId; });
+            var step = e.shiftKey ? -1 : 1;
+            switchToTab(tabs[(tabIndex + step + tabs.length) % tabs.length].id);
+          } else if (e.altKey && !mod && e.key === 'ArrowLeft') {
+            e.preventDefault();
+            goHistory(-1);
+          } else if (e.altKey && !mod && e.key === 'ArrowRight') {
+            e.preventDefault();
+            goHistory(1);
           } else if (mod && e.key.toLowerCase() === 'f') {
             e.preventDefault();
             toggleFindBar(true);
@@ -4396,6 +4472,14 @@
           });
 
         } else if (pane === 'extensions') {
+          if (!browserSettings.extensions.length) {
+            body.innerHTML = '<div class="macos-group-box p-5 text-[12px] space-y-2">' +
+              '<h3 class="font-semibold text-[14px]">Extensions are not available yet</h3>' +
+              '<p class="opacity-70">Browsphere does not currently install or run Chrome, Edge or Safari extensions. The previously displayed examples were placeholders, not working integrations.</p>' +
+              '<p class="opacity-70">Extension hosting, permission handling and security review are pending for a later release.</p>' +
+              '</div>';
+            return;
+          }
           var activeExt = browserSettings.extensions[selectedExtensionIdx] || browserSettings.extensions[0];
           var listHtml = browserSettings.extensions.map(function (ext, idx) {
             var isSelected = idx === selectedExtensionIdx;
@@ -6195,10 +6279,31 @@
       }
 
       function initBrowser() {
+        restoreBrowserSession();
         bindAllEvents();
         bindNativeHydrationEvents();
+        window.addEventListener('aether:page-loaded', function (event) {
+          syncCompletedNativeNavigation(event.detail);
+        });
+        window.addEventListener('aether:browser-error', function (event) {
+          var detail = event.detail || {};
+          if (detail.tabId !== activeTabId) return;
+          var viewport = document.getElementById('pageViewport');
+          if (viewport) {
+            viewport.innerHTML = '<div class="max-w-xl mx-auto px-8 py-16 text-center space-y-2">' +
+              '<h2 class="text-xl font-semibold">Website could not be opened</h2>' +
+              '<p id="browserErrorDetail" class="text-sm opacity-70"></p></div>';
+            document.getElementById('browserErrorDetail').textContent =
+              String(detail.message || 'An unexpected browser navigation error occurred.');
+          }
+          showHudToast('Browser navigation failed');
+        });
         renderSidebarSection();
         renderActiveTab();
+        if (window.aetherBridge && window.aetherBridge.isNative) {
+          var recovered = getActiveTab();
+          window.aetherBridge.onSwitchTab(recovered.id, recovered.history[recovered.historyIndex]);
+        }
         renderDownloadsList();
         applyBrowserSettings();
         setupSelectionListener();
