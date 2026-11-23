@@ -176,6 +176,12 @@ fn requested_search_host(goal: &str) -> Option<&'static str> {
     None
 }
 
+/// The home URL is derived from the user's explicit search destination,
+/// never from website instructions or the model's preferred destination.
+pub fn requested_search_entry_url(goal: &str) -> Option<Url> {
+    Url::parse(&format!("https://{}/", requested_search_host(goal)?)).ok()
+}
+
 /// Preserve existing approval/deny policy for any target not explicitly
 /// authorized by the user's own goal. Do not override run allowlists.
 pub fn evaluate_user_navigation_policy(
@@ -398,6 +404,9 @@ mod tests {
         let goal = "Search YouTube for NASA Artemis mission and open a video result";
         let nav = |url: &str| BrowserAction::Navigate { url: url.into() };
         assert_eq!(requested_search_host(goal), Some("www.youtube.com"));
+        assert_eq!(requested_search_entry_url(goal).unwrap().as_str(),
+            "https://www.youtube.com/");
+        assert!(requested_search_entry_url("Show me a funny video").is_none());
         assert!(matches!(evaluate_user_navigation_policy("about:blank",
             &nav("https://www.youtube.com/"), &[], goal).1,
             PolicyDecision::Allow));
