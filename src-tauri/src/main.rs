@@ -5,6 +5,7 @@ mod agent;
 mod aws;
 mod aws_discovery;
 mod automation;
+mod diagnostics;
 mod privacy;
 mod router;
 mod site_permissions;
@@ -22,6 +23,7 @@ use tauri::{Emitter, LogicalPosition, LogicalSize, Manager, WebviewBuilder, Webv
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+use tracing_subscriber::prelude::*;
 
 use aws::{AwsConfig, CloudSnapshot, CognitoSession, MemoryMeta};
 use aws_discovery::AwsConnectResult;
@@ -942,7 +944,12 @@ fn set_site_permission(
     allowed: bool,
 ) -> Result<SitePolicy, String> {
     if webview.label() != "main" { return Err("Only the browser chrome can manage site permissions".into()); }
-    state.update(&origin, &permission, allowed)
+    let result = state.update(&origin, &permission, allowed);
+    if result.is_ok() {
+        diagnostics::record("security", "permission_changed",
+            serde_json::json!({"kind": if allowed { "allowed" } else { "denied" }}));
+    }
+    result
 }
 
 #[tauri::command]
@@ -1012,6 +1019,8 @@ async fn open_or_navigate_tab(
     let app_for_permissions = app.clone();
     let tab_id_for_permissions = tab_id.clone();
     let private_for_permissions = is_private.unwrap_or(false);
+    let private_for_popups = is_private.unwrap_or(false);
+    let private_for_page_load = is_private.unwrap_or(false);
     let tab_id_for_popups = tab_id.clone();
     let app_for_page_load = app.clone();
     let perception_for_page_load = state.perception.clone();
@@ -1037,6 +1046,10 @@ async fn open_or_navigate_tab(
                     .response(location, permission, private_for_permissions)
             }).unwrap_or(tauri::webview::PermissionResponse::Deny);
             if response != tauri::webview::PermissionResponse::Allow {
+                if !private_for_permissions {
+                    diagnostics::record("security", "permission_denied",
+                        serde_json::json!({"kind": "webview"}));
+                }
                 let _ = app_for_permissions.emit("browser:permission-denied", serde_json::json!({
                     "tabId": tab_id_for_permissions,
                     "permission": permission.to_string(),
@@ -1053,6 +1066,10 @@ async fn open_or_navigate_tab(
             {
                 // The external popup is always denied. Only browser-chrome
                 // user interaction may reopen it as an ordinary tab.
+                if !private_for_popups {
+                    diagnostics::record("security", "popup_blocked",
+                        serde_json::json!({"kind": "external_window"}));
+                }
                 let _ = app_for_popups.emit("browser:popup-blocked", serde_json::json!({
                     "tabId": tab_id_for_popups,
                     "url": popup_url.to_string()
@@ -1065,6 +1082,10 @@ async fn open_or_navigate_tab(
         .initialization_script(agent::reactive_perception::OBSERVER_SCRIPT)
         .on_page_load(move |_webview, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                if !private_for_page_load {
+                    diagnostics::record("browser", "page_loaded",
+                        serde_json::json!({"status": "complete"}));
+                }
                 perception_for_page_load.invalidate(&label_for_page_load);
                 let _ = app_for_page_load.emit(
                     "browser:page-loaded",
@@ -1127,6 +1148,10 @@ async fn open_or_navigate_tab(
                     }
                 }
                 DownloadEvent::Finished { url, path, success } => {
+                    if !private_download {
+                        diagnostics::record("downloads", "native_download_finished",
+                            serde_json::json!({"status": if success { "completed" } else { "failed" }}));
+                    }
                     let saved = path
                         .as_ref()
                         .map(|p| p.to_string_lossy().to_string())
@@ -1752,7 +1777,10 @@ async fn record_navigation(
     let itp_verdict = state.itp.check_url(&url);
     let mut db = state.db.lock().await;
     db.record_visit(&url, title.as_deref(), itp_verdict.blocked_trackers)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    diagnostics::record("browser", "navigation_recorded",
+        serde_json::json!({"blocked_trackers": itp_verdict.blocked_trackers}));
+    Ok(())
 }
 
 #[tauri::command]
@@ -1952,9 +1980,22 @@ async fn ask_main_tab_ai(
     messages: Vec<ChatTurn>,
     voice_mode: Option<bool>,
 ) -> Result<ChatAnswer, String> {
+    let started = std::time::Instant::now();
     let router = state.router.lock().await;
-    router.chat_completion(&messages, &state.creds, voice_mode.unwrap_or(false))
-        .await.map_err(|e| e.to_string())
+    let result = router.chat_completion(&messages, &state.creds, voice_mode.unwrap_or(false))
+        .await.map_err(|e| e.to_string());
+    diagnostics::record("model", "chat_completion", serde_json::json!({
+        "status": if result.is_ok() { "ok" } else { "failed" },
+        "duration_ms": started.elapsed().as_millis() as u64,
+        "count": messages.len(),
+        "kind": if voice_mode.unwrap_or(false) { "voice" } else { "text" }
+    }));
+    if result.is_err() {
+        diagnostics::record("errors", "model_failure", serde_json::json!({
+            "error_kind": "chat_completion"
+        }));
+    }
+    result
 }
 
 #[derive(Serialize)]
@@ -2383,6 +2424,11 @@ async fn start_agent_run(
     }
 
     let run_id = Uuid::new_v4();
+    if !private_mode {
+        diagnostics::record("agent", "run_started", serde_json::json!({
+            "run_id": run_id.to_string(), "count": max_steps.unwrap_or(20)
+        }));
+    }
     let cancel_token = CancellationToken::new();
     *state.active_cancel.lock().await = Some(cancel_token.clone());
 
@@ -2424,6 +2470,30 @@ async fn start_agent_run(
         while let Some(entry) = trace_rx.recv().await {
             // Never keep agent traces (including user goals) from Private Browsing.
             if !private_mode {
+                let action = match &entry.action {
+                    agent::policy::BrowserAction::Navigate { .. } => "navigate",
+                    agent::policy::BrowserAction::Click { .. } => "click",
+                    agent::policy::BrowserAction::TypeText { .. } => "type_text",
+                    agent::policy::BrowserAction::Scroll { .. } => "scroll",
+                    agent::policy::BrowserAction::Download { .. } => "download",
+                    agent::policy::BrowserAction::Complete { .. } => "complete",
+                };
+                let decision = match &entry.decision {
+                    agent::policy::PolicyDecision::Allow => "allow",
+                    agent::policy::PolicyDecision::Deny { .. } => "deny",
+                    agent::policy::PolicyDecision::RequireApproval { .. } => "approval",
+                };
+                diagnostics::record("agent", "action_trace", serde_json::json!({
+                    "run_id": entry.run_id.to_string(),
+                    "trace_id": entry.trace_id.to_string(),
+                    "step": entry.step_index,
+                    "action": action,
+                    "risk": format!("{:?}", entry.risk),
+                    "decision": decision,
+                    "model_route": if entry.model_route.contains("macro:") { "macro" } else { "agent_model" },
+                    "latency_ms": entry.latency_ms,
+                    "outcome": entry.outcome
+                }));
                 let mut db = db_for_traces.lock().await;
                 let _ = db.insert_trace(&entry);
             }
@@ -2482,6 +2552,16 @@ async fn start_agent_run(
                 "failed".to_string()
             }
         };
+        if !private_mode {
+            diagnostics::record("agent", "run_finished", serde_json::json!({
+                "run_id": run_id.to_string(), "status": final_status
+            }));
+            if final_status == "failed" || final_status == "halted" {
+                diagnostics::record("errors", "agent_failure", serde_json::json!({
+                    "run_id": run_id.to_string(), "error_kind": "agent_run"
+                }));
+            }
+        }
         // run_react_loop has returned, dropping any unresolved approval
         // receivers. Close the corresponding pending UI controls immediately.
         prune_closed_approvals(&app_for_status, &approvals_for_status).await;
@@ -2501,28 +2581,47 @@ async fn start_agent_run(
     Ok(run_id)
 }
 
-fn write_startup_log(data_dir: &std::path::Path, msg: &str) {
+fn write_startup_log(_data_dir: &std::path::Path, msg: &str) {
+    // Keep detailed text on the console, never persist arbitrary error strings.
     eprintln!("[Browsphere Startup] {msg}");
-    let log_file = data_dir.join("startup.log");
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_file)
-        .and_then(|mut f| {
-            use std::io::Write;
-            writeln!(f, "{msg}")
-        });
+    diagnostics::record("errors", "startup_warning", serde_json::json!({
+        "error_kind": if msg.contains("SQLite") { "sqlite_open" } else { "startup" }
+    }));
+}
+
+#[tauri::command]
+fn open_diagnostics_folder() -> Result<String, String> {
+    let path = diagnostics::folder(&resolve_data_dir());
+    std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    std::process::Command::new("explorer.exe").arg(&path).spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn record_ui_diagnostic(kind: String) {
+    if matches!(kind.as_str(), "js_error" | "unhandled_rejection" | "bridge_error") {
+        diagnostics::record("ui", "frontend_failure", serde_json::json!({"error_kind": kind}));
+    }
+}
+
+#[tauri::command]
+fn export_diagnostics() -> Result<String, String> {
+    let output = diagnostics::export(&resolve_data_dir()).map_err(|e| e.to_string())?;
+    Ok(output.to_string_lossy().to_string())
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let data_dir = resolve_data_dir();
+    diagnostics::init(&data_dir);
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(diagnostics::RuntimeMetadataLayer)
+        .init();
     let site_permissions = SitePermissions::new(&data_dir);
     write_startup_log(&data_dir, &format!("Data dir: {}", data_dir.to_string_lossy()));
 
@@ -2606,6 +2705,9 @@ fn main() {
         .manage(app_state)
         .manage(site_permissions)
         .invoke_handler(tauri::generate_handler![
+            open_diagnostics_folder,
+            export_diagnostics,
+            record_ui_diagnostic,
             window_close,
             window_minimize,
             window_toggle_maximize,

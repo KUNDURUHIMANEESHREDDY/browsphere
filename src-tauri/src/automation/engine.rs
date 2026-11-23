@@ -443,6 +443,9 @@ impl AutomationEngine {
         }
 
         let run_id = Uuid::new_v4();
+        crate::diagnostics::record("automation", "job_started", serde_json::json!({
+            "run_id": run_id.to_string(), "count": job.steps.len()
+        }));
         {
             let mut guard = db.lock().await;
             let _ = guard.create_agent_run(&run_id.to_string(), &format!("[Automation] {}", job.name));
@@ -487,6 +490,11 @@ impl AutomationEngine {
                 detail: detail.clone(),
             };
             let _ = app.emit("automation:step", &log_entry);
+            crate::diagnostics::record("automation", "step_finished", serde_json::json!({
+                "run_id": run_id.to_string(), "step": idx,
+                "kind": step_kind, "status": if ok { "ok" } else { "failed" },
+                "duration_ms": started.elapsed().as_millis() as u64
+            }));
 
             let trace = TraceEntry {
                 trace_id: Uuid::new_v4(),
@@ -507,7 +515,7 @@ impl AutomationEngine {
                     format!("FAILED: {detail}")
                 },
             };
-            let _ = trace_tx.send(trace).await;
+            let _ = trace_tx.send(trace.sanitized()).await;
 
             if !ok {
                 final_status = "failed".to_string();
@@ -526,6 +534,9 @@ impl AutomationEngine {
             let _ = guard.record_automation_run_result(&job.id, &final_status);
         }
 
+        crate::diagnostics::record("automation", "job_finished", serde_json::json!({
+            "run_id": run_id.to_string(), "status": final_status
+        }));
         let _ = app.emit(
             "automation:status",
             serde_json::json!({

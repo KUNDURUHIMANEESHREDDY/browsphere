@@ -224,6 +224,9 @@
       '<span class="mac-ai-status-dot"></span>' +
       '<span class="mac-ai-status-text" id="cfgConnectionStatus" role="status" aria-live="polite">' +
       esc(testStatus) + '</span></div></section>';
+    var localLogs = section('Local Logs', 'Automatically captures browser events, Lucia agent traces, model status, errors, and crashes. No messages, credentials, or private browsing activity are stored.',
+      row('Diagnostics files', 'Rotating JSONL logs stay on this device for up to 14 days.',
+        btn('open-diagnostics', 'Open Logs') + ' ' + btn('export-diagnostics', 'Export Diagnostics')));
     var footer = '<div class="mac-ai-footer">' +
       '<button class="mac-ai-danger" type="button" data-action="remove-model-key">Remove Saved Key</button>' +
       '<div class="mac-ai-footer-actions">' +
@@ -233,7 +236,7 @@
     return '<div class="mac-ai" id="macAiSettings">' +
       '<header class="mac-ai-intro"><h2>AI &amp; ML</h2>' +
       '<p>Configure the models Browsphere uses for local and cloud intelligence.</p></header>' +
-      awsConnection + primary + local + cloud + routing + diagnostic + footer +
+      awsConnection + primary + local + cloud + routing + diagnostic + localLogs + footer +
       '<details class="mac-aws-advanced"><summary>Advanced AWS service settings</summary>' +
       bedrock + s3 + ddb + cognito + lambda + awsSave + '</details></div>';
   };

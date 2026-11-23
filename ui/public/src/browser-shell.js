@@ -909,6 +909,20 @@
             case 'aws-lambda-invoke':
               runNativeAwsAction(btn.dataset.action);
               break;
+            case 'open-diagnostics':
+              if (window.aetherBridge && window.aetherBridge.isNative) {
+                window.aetherBridge.openDiagnosticsFolder().then(function () {
+                  showHudToast('Diagnostics folder opened');
+                }).catch(function () { showHudToast('Could not open diagnostics folder'); });
+              } else showHudToast('Open Logs requires Browsphere desktop');
+              break;
+            case 'export-diagnostics':
+              if (window.aetherBridge && window.aetherBridge.isNative) {
+                window.aetherBridge.exportDiagnostics().then(function (path) {
+                  showHudToast('Diagnostics exported: ' + path);
+                }).catch(function () { showHudToast('Could not export diagnostics'); });
+              } else showHudToast('Export requires Browsphere desktop');
+              break;
             case 'test-model-connection':
               testNativeModelConnection(null);
               break;

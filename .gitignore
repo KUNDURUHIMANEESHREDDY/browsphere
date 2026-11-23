@@ -9,6 +9,8 @@
 
 # Logs, temporary results, backups
 *.log
+/logs/*
+!/logs/README.md
 *.exit
 *.tmp
 *.bak

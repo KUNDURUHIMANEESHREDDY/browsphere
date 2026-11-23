@@ -113,6 +113,7 @@ pub async fn synthesize_voice(
     is_private: Option<bool>,
 ) -> Result<VoiceAudio, String> {
     let clean = text.trim();
+    let started = std::time::Instant::now();
     if clean.is_empty() || clean.len() > 1600 || clean.chars().any(|c| c == '\0') {
         return Err("Speech input must be 1–1600 characters".into());
     }
@@ -129,6 +130,10 @@ pub async fn synthesize_voice(
         if let Ok(Some(api_key)) = state.creds.get_secret(ELEVEN_KEY_ACCOUNT) {
             if !api_key.is_empty() {
                 if let Ok(bytes) = elevenlabs_speech(clean, &config, &api_key, &client).await {
+                    crate::diagnostics::record("voice", "synthesis_finished",
+                        serde_json::json!({"kind": "elevenlabs",
+                            "status": "ok",
+                            "duration_ms": started.elapsed().as_millis() as u64}));
                     return Ok(VoiceAudio {
                         audio_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
                         mime_type: "audio/mpeg".into(), provider: "elevenlabs".into()
@@ -138,11 +143,24 @@ pub async fn synthesize_voice(
         }
     }
     match kokoro_speech(clean, &client).await {
-        Ok(bytes) => Ok(VoiceAudio {
-            audio_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-            mime_type: "audio/mpeg".into(), provider: "kokoro".into()
-        }),
-        Err(_) => Err("ElevenLabs unavailable or not enabled; local Kokoro service is not running. Use Windows speech fallback.".into())
+        Ok(bytes) => {
+            if !private {
+                crate::diagnostics::record("voice", "synthesis_finished",
+                    serde_json::json!({"kind": "kokoro", "status": "ok",
+                        "duration_ms": started.elapsed().as_millis() as u64}));
+            }
+            Ok(VoiceAudio {
+                audio_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                mime_type: "audio/mpeg".into(), provider: "kokoro".into()
+            })
+        },
+        Err(_) => {
+            if !private {
+                crate::diagnostics::record("errors", "voice_failure",
+                    serde_json::json!({"error_kind": "voice_synthesis"}));
+            }
+            Err("ElevenLabs unavailable or not enabled; local Kokoro service is not running. Use Windows speech fallback.".into())
+        }
     }
 }
 

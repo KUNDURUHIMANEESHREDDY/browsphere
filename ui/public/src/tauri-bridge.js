@@ -27,6 +27,14 @@
   const hasTauri = Boolean(invoke);
   const listen = getTauriListen();
 
+  // Capture unexpected UI failures without uploading or storing stack traces,
+  // full error messages, URLs, prompts, or app state.
+  if (hasTauri && invoke) {
+    const report = (kind) => invoke('record_ui_diagnostic', { kind }).catch(() => {});
+    window.addEventListener('error', () => report('js_error'));
+    window.addEventListener('unhandledrejection', () => report('unhandled_rejection'));
+  }
+
   let activeApprovalId = null;
   let agentPaused = false;
   let currentTabId = 'tab-1';
@@ -570,6 +578,16 @@
     async invokeAwsLambda(payload) {
       if (!invoke) throw new Error('Desktop application required');
       return invoke('aws_invoke_lambda', { payload });
+    },
+
+    async openDiagnosticsFolder() {
+      if (!invoke) throw new Error('Diagnostics require the desktop application');
+      return invoke('open_diagnostics_folder');
+    },
+
+    async exportDiagnostics() {
+      if (!invoke) throw new Error('Diagnostics export requires the desktop application');
+      return invoke('export_diagnostics');
     },
 
     async loadRouterConfig() {
