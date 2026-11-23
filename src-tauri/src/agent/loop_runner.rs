@@ -719,14 +719,21 @@ pub async fn run_react_loop(
                 )
             } else {
                 // Never hold the shared model-router mutex during inference.
-                // A slow model must not block settings or unrelated chat commands.
+                // A slow local CPU model needs a larger, but still finite action
+                // budget; cancellation remains immediate via tokio::select.
                 let r = router.lock().await.clone();
+                let action_timeout_secs: u64 = if r.get_config().prefer_local_for_simple {
+                    180
+                } else { 90 };
                 tokio::select! {
                     _ = cancel.cancelled() => return Ok("cancelled".into()),
-                    result = tokio::time::timeout(std::time::Duration::from_secs(90),
+                    result = tokio::time::timeout(
+                        std::time::Duration::from_secs(action_timeout_secs),
                         r.propose_specialist_action(&snapshot.origin, &prompt_payload,
                             orchestrator.specialist().instructions(), &creds, voice_mode)) =>
-                        result.map_err(|_| anyhow::anyhow!("Lucia's action model timed out. Choose a faster model in Settings > AI & ML."))??
+                        result.map_err(|_| anyhow::anyhow!(
+                            "Lucia's action model timed out after {action_timeout_secs}s. Choose a faster model in Settings > AI & ML."
+                        ))??
                 }
             };
 
