@@ -5,6 +5,9 @@ const assert = require('node:assert/strict');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const port = Number(process.env.LUCIA_CDP_PORT || 9272);
 const base = 'http://127.0.0.1:18764';
+const realModel = process.env.LUCIA_E2E_REAL_MODEL?.trim() || null;
+const modelUrl = realModel ? 'http://127.0.0.1:11434' : 'http://127.0.0.1:18766';
+const chosenModel = realModel || 'lucia-local-e2e';
 
 async function connect() {
   let target;
@@ -55,8 +58,14 @@ async function connect() {
 }
 
 async function main() {
-  assert.equal((await (await fetch('http://127.0.0.1:18766/health')).json()).ok,true,
-    'Loopback test model is not running');
+  if(realModel){
+    const listing=await (await fetch(modelUrl + '/api/tags')).json();
+    assert.ok((listing.models||[]).some(m=>m.name===realModel || m.model===realModel),
+      'The configured real Qwen model is not installed in Ollama');
+  } else {
+    assert.equal((await (await fetch(modelUrl + '/health')).json()).ok,true,
+      'Loopback simulated model is not running');
+  }
   assert.equal((await (await fetch(base + '/health')).json()).ok,true,
     'Local webpage fixture is not running');
   const {ws,command,evaluate} = await connect();
@@ -64,7 +73,7 @@ async function main() {
   const eventsExpression = "window.__luciaNativeEvents.slice(-300)";
   try {
     await command('Runtime.enable');
-    await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');c.ollama_url='http://127.0.0.1:18766';c.ollama_model='lucia-local-e2e';c.prefer_local_for_simple=true;c.domain_overrides={};await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaNativeEvents=[];for(const name of ['agent:plan','agent:stage','agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required'])await window.__TAURI__.event.listen(name,e=>window.__luciaNativeEvents.push({event:name,payload:e.payload}));return true})()");
+    await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');c.ollama_url=" + JSON.stringify(modelUrl) + ";c.ollama_model=" + JSON.stringify(chosenModel) + ";c.prefer_local_for_simple=true;c.domain_overrides={};await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaNativeEvents=[];for(const name of ['agent:plan','agent:stage','agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required'])await window.__TAURI__.event.listen(name,e=>window.__luciaNativeEvents.push({event:name,payload:e.payload}));return true})()");
     async function openLocal(path) {
       const url = base + path;
       await evaluate('window.browsphereApp.newTab(' + JSON.stringify(url) + ')');
@@ -79,7 +88,7 @@ async function main() {
       throw Error('Fixture navigation not observed in native WebView: ' + url);
     }
 
-    async function run(goal, initial, limit=60) {
+    async function run(goal, initial, limit=realModel?280:60) {
       // Exercise the real UI-to-Rust bridge, including run-to-tab registration.
       const id = await evaluate('window.aetherBridge.startLuciaSpecialistTask(' +
         JSON.stringify(goal) + ',' + JSON.stringify(initial.origin) + ',' +
@@ -150,7 +159,9 @@ async function main() {
     // 1. Search text -> submit local search -> click result -> SPA URL -> verified.
     const initial=await openLocal('/multistep.html');
     const search=await run(
-      'On the current local test page, search for robotics video and open the first result.',
+      realModel
+        ? 'On the current local website, type robotics video into the Search box, click Search, then open the first robotics video result. Report the opened video details page.'
+        : 'On the current local test page, search for robotics video and open the first result.',
       initial
     );
     assert.ok(search.actions.some(x=>x.type==='type_text'
@@ -191,6 +202,13 @@ async function main() {
     assert.ok(afterRecovery.text_excerpt.includes('Recovery complete: fallback button succeeded'),
       'Recovery confirmation not visible');
     console.log('PASS native failed action, autonomous fallback, and independent verification');
+    if (realModel) {
+      // Keep the CPU-only hosted-runner real-LLM experiment scoped to two
+      // distinct task patterns; mock-model CI continues testing background tabs.
+      console.log('PASS REAL MODEL: '+realModel+
+        ' completed search/click/SPA navigation and failed-action recovery');
+      return;
+    }
 
     // 3. A fresh task-owned background WebView must finish while the user
     // switches to another unrelated tab. Its verified result must not
