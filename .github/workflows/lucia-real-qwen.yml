@@ -1,17 +1,8 @@
 name: Lucia Real Qwen Windows E2E
 
+# Local Qwen is an explicit, optional diagnostic; cloud provider
+# integrations are the primary automated regression gate.
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/lucia-real-qwen.yml'
-      - 'tests/e2e/run-lucia-real-qwen.ps1'
-      - 'tests/e2e/lucia-multistep-mock.cjs'
-  pull_request:
-    paths:
-      - 'src-tauri/src/agent/**'
-      - 'tests/e2e/**'
-      - '.github/workflows/lucia-real-qwen.yml'
   workflow_dispatch:
 
 permissions:
