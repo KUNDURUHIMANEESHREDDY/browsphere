@@ -58,6 +58,14 @@ References: https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-comp
 - The isolated **native WebView2 browser-only smoke test** using the updated debug executable navigated and clicked real links on **Python Docs, MDN, GitHub Docs and Hacker News (4 passes)**. Wiktionary returned a real **Wikimedia Error** page, classified as **site_unavailable** with no click; overall smoke suite exited nonzero (1). This is an external-page-availability outcome, not a verified agent result.
 - The real OpenRouter runner was launched with the selected free model and stopped at its **missing endpoint-scoped Windows Credential Manager key** preflight. There were **zero authenticated OpenRouter inference calls and zero completed real-model website tasks**. Browser-only smoke and free-model catalog checks cannot substitute for the missing live-model pass.
 
+## NVIDIA Omni 30B free-model attempt — 23 November 2026
+
+- **Exact ID:** `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` on OpenRouter.
+- **Catalog check:** HTTP 200; input and output pricing `$0`; `structured_outputs` **not advertised**. The runner now reports this capability gap as a warning rather than refusing an explicitly free model.
+- **Native Windows test:** Isolated debug Browsphere app loaded `https://docs.python.org/3/` (78 browser controls) and started a Lucia Browser Agent task with this model.
+- **Provider response:** HTTP **429** on the first inference; status `failed`, `provider_rate_limited`. There were **zero** model-generated actions, no destination change and no independent completion verification. Remaining sites were not attempted.
+- **Interpretation:** OpenRouter rate limiting prevented testing the model's actual action JSON quality or browser autonomy; it is neither a success nor evidence that Omni 30B is incompatible. Do not retry repeatedly or bypass limits.
+
 ## Authenticated-key retest — 23 November 2026
 
 An OpenRouter credential target `model_api_key:openrouter.ai:443` was **present** in the Windows Credential Manager during this retest; the key value was never read into logs or displayed. This supersedes the earlier "key missing" status, which accurately described the prior check.

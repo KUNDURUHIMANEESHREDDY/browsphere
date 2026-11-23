@@ -45,6 +45,10 @@ test('native OpenRouter real-site suite keeps model-derived browser actions sepa
   assert.match(wrapper, /https:\/\/openrouter\.ai\/api\/v1\/chat\/completions/);
   assert.match(wrapper, /MISSING_OPENROUTER_KEY/);
   assert.match(wrapper, /structured_outputs/);
+  assert.match(wrapper, /Write-Warning 'Model does not advertise structured outputs/);
+  assert.match(wrapper, /if \(-not \$structured\)/);
+  assert.match(wrapper, /pricing\.prompt/);
+  assert.match(wrapper, /pricing\.completion/);
   assert.match(wrapper, /ONLY_FREE_MODELS/);
   assert.match(wrapper, /openrouter\/free/);
   assert.match(wrapper, /[.]EndsWith\(':free'/);

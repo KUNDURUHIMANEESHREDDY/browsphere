@@ -16,17 +16,21 @@ if ($model -ne 'openrouter/free' -and -not $model.EndsWith(':free', [StringCompa
 }
 $endpoint = 'https://openrouter.ai/api/v1/chat/completions'
 
-# Verify this is a currently available free chat model with structured outputs.
+# Verify the model is currently free. Report, but do not assume, structured-output support.
 $catalog = Invoke-RestMethod -Uri 'https://openrouter.ai/api/v1/models' -TimeoutSec 20
 $entry = @($catalog.data | Where-Object { $_.id -eq $model })
 if ($entry.Count -ne 1) { throw "OpenRouter free test model not listed: $model" }
 if ([double]$entry[0].pricing.prompt -ne 0 -or [double]$entry[0].pricing.completion -ne 0) {
     throw "OpenRouter catalog no longer lists the selected model as free; refusing to spend credits"
 }
-if (@($entry[0].supported_parameters) -notcontains 'structured_outputs') {
-    throw "Selected model no longer advertises structured output support"
+$structured = @($entry[0].supported_parameters) -contains 'structured_outputs'
+# This model is explicitly requested for testing. The absence of advertised
+# schema support is a compatibility risk, not proof the API cannot answer.
+# Do not report a schema-compatible model or autonomous success prematurely.
+Write-Host "OPENROUTER_CATALOG_OK model=$model free=true structured_outputs=$($structured.ToString().ToLowerInvariant())"
+if (-not $structured) {
+    Write-Warning 'Model does not advertise structured outputs. Lucia may reject malformed action JSON; live verification is required.'
 }
-Write-Host "OPENROUTER_CATALOG_OK model=$model free=true structured_outputs=true"
 if ($CheckCatalogOnly) { return }
 
 # Browsphere stores its endpoint-scoped provider credentials in Windows Credential Manager.
