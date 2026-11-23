@@ -178,13 +178,13 @@ fn goal_terms(goal: &str) -> Vec<String> {
 
 /// A claimed YouTube video-result task needs an actual observed watch page.
 /// This is a postcondition, not a predetermined URL or invented success.
-fn requested_youtube_video_page(goal: &str) -> bool {
+pub(crate) fn requested_youtube_video_page(goal: &str) -> bool {
     let g = goal.to_lowercase();
     g.contains("youtube") && g.contains("video")
         && (g.contains("open ") || g.contains("click "))
 }
 
-fn observed_youtube_video_page(origin: &str) -> bool {
+pub(crate) fn observed_youtube_video_page(origin: &str) -> bool {
     let Ok(url) = url::Url::parse(origin) else { return false; };
     let Some(host) = url.host_str() else { return false; };
     if host != "youtube.com" && !host.ends_with(".youtube.com") {
@@ -503,6 +503,7 @@ mod tests {
     fn research_agent_can_search_but_not_type_into_unrelated_or_sensitive_fields() {
         let mut page = snapshot("https://search.example", "An example search page with information to research.");
         page.interactive_nodes.push(crate::agent::dom_extractor::DomNodeSummary {
+            href: None,
             node_id: "query".into(), tag: "input".into(), role: "searchbox".into(),
             label: "Search this site".into(), is_submit: false, is_sensitive: false, bbox: None
         });

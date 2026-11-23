@@ -148,6 +148,50 @@ fn trusted_search_bootstrap(
         BrowserAction::Navigate { url: target.to_string() })
 }
 
+/// Choose a freshly observed watch-page link only when the user explicitly
+/// asked for the first YouTube video result. This still passes through
+/// live DOM binding, standard policy checks, and independent verification.
+fn trusted_first_youtube_video_result(
+    goal: &str,
+    snapshot: &DomSnapshot,
+    specialist: Specialist,
+) -> Option<BrowserAction> {
+    let request = goal.to_ascii_lowercase();
+    if !request.contains("youtube") || !request.contains("first video result")
+        || !(request.contains("open ") || request.contains("click "))
+        || !matches!(specialist, Specialist::Browser | Specialist::Research)
+    {
+        return None;
+    }
+    let location = url::Url::parse(&snapshot.origin).ok()?;
+    if location.scheme() != "https"
+        || location.host_str() != Some("www.youtube.com")
+        || location.path() != "/results"
+    {
+        return None;
+    }
+    let candidates: Vec<_> = snapshot.interactive_nodes.iter()
+        .filter(|node| !node.is_sensitive
+            && node.tag == "a"
+            && !node.label.trim().is_empty()
+            && node.href.as_ref().is_some_and(|href| {
+                let Ok(url) = url::Url::parse(href) else { return false };
+                url.scheme() == "https"
+                    && url.host_str() == Some("www.youtube.com")
+                    && url.path() == "/watch"
+                    && url.query_pairs().any(|(key,value)| key == "v" && !value.is_empty())
+            }))
+        .collect();
+    let chosen = candidates.iter()
+        .find(|node| node.bbox.as_ref().is_some_and(|box_| box_.in_viewport))
+        .or_else(|| candidates.first())?;
+    Some(BrowserAction::Click {
+        node_id: chosen.node_id.clone(),
+        element_label: chosen.label.clone(),
+        is_submit: chosen.is_submit,
+    })
+}
+
 fn retryable_verifier_format_error(error: &str) -> bool {
     // A malformed LLM quote/claim may be repaired by a second independent
     // review. Do not retry missing evidence, unobserved source URLs, or the
@@ -540,6 +584,26 @@ pub async fn run_react_loop(
                     },
                     "verification:read_only".to_string(),
                 )
+            } else if freshly_observed
+                && !last_action_failed
+                && matches!(orchestrator.specialist(), Specialist::Browser | Specialist::Research)
+                && goal.to_ascii_lowercase().contains("first video result")
+                && crate::agent::orchestrator::requested_youtube_video_page(&goal)
+                && crate::agent::orchestrator::observed_youtube_video_page(&snapshot.origin)
+                && recorded_steps.iter().any(|step| matches!(step, BrowserAction::Click { .. }))
+                && orchestrator.can_complete(&snapshot).is_ok()
+            {
+                // The requested watch page is already confirmed by fresh
+                // WebView evidence and successful click actions. Handoff to
+                // independent verification rather than asking the model to
+                // keep browsing and potentially undo the result.
+                (
+                    "Requested YouTube video is open; request independent evidence check".to_string(),
+                    BrowserAction::Complete {
+                        summary: "Observed requested video result on a real YouTube watch page".into(),
+                    },
+                    "observed_video:verified_stage_handoff".to_string(),
+                )
             } else if orchestrator.specialist() == Specialist::Browser
                 && requested_navigation_url(&goal).is_some()
             {
@@ -552,6 +616,18 @@ pub async fn run_react_loop(
                     "Navigate to the website explicitly named by the user".to_string(),
                     BrowserAction::Navigate { url: target.to_string() },
                     "direct_navigation:trusted_user_goal".to_string(),
+                )
+            } else if freshly_observed
+                && trusted_first_youtube_video_result(
+                    &goal, &snapshot, orchestrator.specialist()).is_some()
+            {
+                let action = trusted_first_youtube_video_result(
+                    &goal, &snapshot, orchestrator.specialist())
+                    .expect("checked live video-result target");
+                (
+                    "Click the first verified YouTube watch link observed on the live results page".to_string(),
+                    action,
+                    "first_video_result:observed_dom".to_string(),
                 )
             } else if let Some(action) =
                 trusted_search_bootstrap(&goal, &snapshot, orchestrator.specialist())
@@ -1007,16 +1083,19 @@ mod production_safety_tests {
             text_excerpt: "Account settings are available for this test website.".into(),
             interactive_nodes: vec![
                 DomNodeSummary {
+            href: None,
                     node_id: "remove".into(), tag: "button".into(),
                     role: "button".into(), label: "Delete account".into(),
                     is_submit: false, is_sensitive: false, bbox: None
                 },
                 DomNodeSummary {
+            href: None,
                     node_id: "password".into(), tag: "input".into(),
                     role: "textbox".into(), label: "Password".into(),
                     is_submit: false, is_sensitive: true, bbox: None
                 },
                 DomNodeSummary {
+            href: None,
                     node_id: "submit".into(), tag: "button".into(),
                     role: "button".into(), label: "Submit application".into(),
                     is_submit: true, is_sensitive: false, bbox: None
@@ -1086,11 +1165,13 @@ mod production_safety_tests {
             text_excerpt: "YouTube Search".into(),
             interactive_nodes: vec![
                 DomNodeSummary {
+            href: None,
                     node_id: "search-input".into(), tag: "input".into(),
                     role: "combobox".into(), label: "Search".into(),
                     is_submit: false, is_sensitive: false, bbox: None,
                 },
                 DomNodeSummary {
+            href: None,
                     node_id: "search-button".into(), tag: "button".into(),
                     role: "button".into(), label: "Search".into(),
                     is_submit: false, is_sensitive: false, bbox: None,
@@ -1124,6 +1205,7 @@ mod production_safety_tests {
 
         let mut ambiguous = page.clone();
         ambiguous.interactive_nodes.push(DomNodeSummary {
+            href: None,
             node_id: "another-search".into(), tag: "input".into(),
             role: "searchbox".into(), label: "Search".into(),
             is_submit: false, is_sensitive: false, bbox: None,
@@ -1217,6 +1299,7 @@ mod autonomous_live_form_tests {
             title: "Feedback".into(),
             text_excerpt: "Feedback form".into(),
             interactive_nodes: vec![DomNodeSummary {
+            href: None,
                 node_id: "button".into(), tag: "button".into(),
                 role: "button".into(), label: "Submit feedback".into(),
                 is_submit: true, is_sensitive: sensitive, bbox: None,
@@ -1247,5 +1330,56 @@ mod autonomous_live_form_tests {
         let (risk, decision) = evaluate_live_action_policy(&snapshot.origin, &action, &[], &snapshot);
         assert_eq!(risk, RiskLevel::High);
         assert!(matches!(decision, PolicyDecision::RequireApproval { .. }));
+    }
+}
+
+#[cfg(test)]
+mod first_youtube_result_tests {
+    use super::*;
+    use crate::agent::dom_extractor::{BoundingBox, DomNodeSummary};
+
+    fn result_node(id: &str, href: &str, visible: bool) -> DomNodeSummary {
+        DomNodeSummary {
+            node_id: id.into(),
+            tag: "a".into(),
+            role: "a".into(),
+            label: format!("Video {id}"),
+            href: Some(href.into()),
+            is_submit: false,
+            is_sensitive: false,
+            bbox: Some(BoundingBox {
+                x: 0.0, y: 20.0, width: 200.0, height: 30.0,
+                in_viewport: visible
+            }),
+        }
+    }
+
+    #[test]
+    fn first_video_click_is_grounded_in_same_site_watch_link() {
+        let page = DomSnapshot {
+            origin: "https://www.youtube.com/results?search_query=nasa".into(),
+            title: "YouTube results".into(),
+            text_excerpt: String::new(),
+            interactive_nodes: vec![
+                result_node("external", "https://evil.test/watch?v=untrusted", true),
+                result_node("first", "https://www.youtube.com/watch?v=first123", true),
+                result_node("later", "https://www.youtube.com/watch?v=later123", false),
+            ],
+        };
+        let goal = "Search YouTube for NASA Artemis mission and open the first video result";
+        let action = trusted_first_youtube_video_result(goal, &page, Specialist::Browser);
+        assert!(matches!(action, Some(BrowserAction::Click { node_id, .. }) if node_id == "first"));
+        assert!(trusted_first_youtube_video_result(
+            "Search YouTube for NASA Artemis mission", &page, Specialist::Browser).is_none());
+        assert!(trusted_first_youtube_video_result(
+            goal, &page, Specialist::Verification).is_none());
+        let mut offsite = page.clone();
+        offsite.origin = "https://evil.test/results".into();
+        assert!(trusted_first_youtube_video_result(goal, &offsite, Specialist::Browser).is_none());
+        let mut fake_page = page.clone();
+        fake_page.interactive_nodes.clear();
+        fake_page.interactive_nodes.push(result_node(
+            "fake", "https://www.youtube.com/redirect?v=123", true));
+        assert!(trusted_first_youtube_video_result(goal, &fake_page, Specialist::Browser).is_none());
     }
 }

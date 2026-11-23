@@ -19,6 +19,8 @@ pub struct DomNodeSummary {
     pub tag: String,
     pub role: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
     pub is_submit: bool,
     pub is_sensitive: bool,
     pub bbox: Option<BoundingBox>,
@@ -187,6 +189,25 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
           tag: current.tagName.toLowerCase(),
           role: (current.getAttribute("role") || current.tagName).toLowerCase(),
           label: computeAccessibleName(current),
+          // Retain same-origin destinations but strip arbitrary URL query
+          // parameters, which might include OAuth codes or other secrets.
+          // YouTube watch links retain only the video ID for DOM-based clicks.
+          href: current.tagName === "A"
+            ? (() => {{
+                try {{
+                  const address = new URL(current.href);
+                  if (!/^https?:$/.test(address.protocol)
+                      || address.origin !== location.origin) return null;
+                  if (address.hostname === "www.youtube.com"
+                      && address.pathname === "/watch") {{
+                    const videoId = address.searchParams.get("v");
+                    if (!videoId) return null;
+                    return address.origin + "/watch?v="
+                      + encodeURIComponent(videoId.slice(0, 60));
+                  }}
+                  return address.origin + address.pathname.slice(0, 480);
+                }} catch (_) {{ return null; }}
+              }})() : null,
           is_submit: isSubmit,
           is_sensitive: isSensitiveField(current) || sensitiveForm,
           bbox: {{
