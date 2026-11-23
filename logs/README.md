@@ -9,7 +9,7 @@ Browsphere creates persistent local diagnostics automatically when the native ap
 
 - `runtime.jsonl`: app sessions and tracing framework event metadata
 - `browser.jsonl`: navigation and page-load events (never full URLs)
-- `agent.jsonl`: Lucia agent run IDs, sanitized step/action traces, risk, policy outcome, model-route class and latency
+- `agent.jsonl`: Lucia agent run IDs, sanitized step/action traces, risk, policy outcome, model-route class, latency, and tab lifecycle (`source` / `kind` / `status`)
 - `model.jsonl`: model call status and latency, never prompts/responses
 - `automation.jsonl`: scheduled workflow starts, per-step results, and completions
 - `voice.jsonl`: local/cloud voice synthesis status and latency
@@ -20,6 +20,8 @@ Browsphere creates persistent local diagnostics automatically when the native ap
 - `crash.jsonl`: Rust panic file/line metadata without user data or panic payload
 
 Each entry contains a timestamp, session ID, process ID, channel, event, and restricted metadata fields. Files rotate after **2 MiB**, retain **4 backups per channel**, and rotate/delete logs older than **14 days** on startup.
+
+During a Lucia run, `tab_lifecycle` identifies an explicit `user_close`, `private_session_end`, `startup_rollback`, or `unknown_close`, separately from unexpected `webview_missing`. It records no URLs or tab IDs; private browsing runs do not write agent diagnostics. Missing WebViews are not silently recreated or replayed because browser actions may have side effects.
 
 The existing SQLite database still stores the ordinary agent trace history for the app's trace viewer. Its contents are intentionally **excluded** from diagnostics export.
 

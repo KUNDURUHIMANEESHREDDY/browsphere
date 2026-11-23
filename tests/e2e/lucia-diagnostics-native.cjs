@@ -28,7 +28,8 @@ function installFixture() {
       latency_ms:320, outcome:'verified', api_key:'NEVER-EXPOSE-SECRET'}),
     item(2,'agent','action_trace',{run_id:failed, trace_id:'44444444-4444-4444-8444-444444444444',
       step:2, action:'click', decision:'deny', risk:'High', model_route:'agent_model', latency_ms:24, outcome:'denied'}),
-    item(3,'agent','run_finished',{run_id:failed,status:'halted'}),
+    item(2.5,'agent','tab_lifecycle',{run_id:failed,source:'user_close',kind:'intentional',status:'closed',secret:'NOT-EXPOSED'}),
+    item(3,'agent','run_finished',{run_id:failed,status:'tab_closed'}),
     item(4,'agent','run_started',{run_id:completed,count:2}),
     item(5,'agent','run_finished',{run_id:completed,status:'completed'})
   ].join('\n')+'\n');
@@ -96,6 +97,9 @@ async function main() {
     assert.ok(issues.includes(failed.slice(0,8)));
     assert.equal(issues.includes('data-run-id="'+completed+'"'),false);
     assert.ok(issues.includes('Policy: deny'));
+    assert.ok(issues.includes('Triggered by: user close'));
+    assert.ok(issues.includes('Close type: intentional'));
+    assert.equal(issues.includes('NOT-EXPOSED'),false);
     await evalJS("document.querySelector('[data-action=\"lucia-diag-filter\"][data-filter=\"completed\"]').click()");
     const done = await evalJS('document.getElementById("luciaDiagnosticsPanel").innerHTML');
     assert.ok(done.includes(completed));

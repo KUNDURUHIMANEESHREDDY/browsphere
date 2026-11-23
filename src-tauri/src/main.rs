@@ -348,6 +348,8 @@ pub struct ActiveAgentTarget {
     tab_id: String,
     run_id: Uuid,
     tab_closed: CancellationToken,
+    cancel: CancellationToken,
+    private_mode: bool,
 }
 
 pub struct AppState {
@@ -1301,21 +1303,36 @@ async fn close_tab_webview(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
     tab_id: String,
+    reason: Option<String>,
 ) -> Result<(), String> {
+    // Only known UI lifecycle operations may name the reason in retained logs.
+    // Never log URLs, the tab identifier, or any arbitrary frontend text.
+    let source = match reason.as_deref() {
+        Some("user_close") => "user_close",
+        Some("private_session_end") => "private_session_end",
+        Some("startup_rollback") => "startup_rollback",
+        _ => "unknown_close",
+    };
     let closing_run = {
         let target = state.active_agent_target.lock().await;
         target.as_ref().filter(|target| target.tab_id == tab_id)
-            .map(|target| (target.run_id, target.tab_closed.clone()))
+            .map(|target| (target.run_id, target.tab_closed.clone(), target.cancel.clone(), target.private_mode))
     };
-    if let Some((run_id, closed_signal)) = closing_run {
-        // Give the worker an explicit terminal reason, even if it is paused.
-        closed_signal.cancel();
-        if let Some(token) = state.active_cancel.lock().await.as_ref() {
-            token.cancel();
+    if let Some((run_id, closed_signal, run_cancel, private_mode)) = closing_run {
+        // Explicit UI teardown is cancellation, not an unexpected WebView loss.
+        if !private_mode {
+            diagnostics::record("agent", "tab_lifecycle", serde_json::json!({
+                "run_id": run_id.to_string(), "source": source,
+                "status": "closed", "kind": "intentional"
+            }));
         }
+        closed_signal.cancel();
+        // Cancel exactly this run. A stale tab-close must not cancel a newer task.
+        run_cancel.cancel();
         let _ = app.emit("agent:run_error", serde_json::json!({
             "run_id": run_id,
-            "message": "Task stopped because its assigned browser tab was closed."
+            "message": tab_closure_message(source),
+            "source": source
         }));
     }
     let label = {
@@ -2461,6 +2478,15 @@ async fn stop_automation_job(
     Ok(state.automation.stop_job(&id).await)
 }
 
+fn tab_closure_message(source: &str) -> &'static str {
+    match source {
+        "user_close" => "Task stopped because its assigned browser tab was closed.",
+        "private_session_end" => "Lucia stopped because its private browsing session ended.",
+        "startup_rollback" => "Lucia stopped because task startup rolled back and closed its tab.",
+        _ => "Lucia stopped after a browser tab close request from an unknown source.",
+    }
+}
+
 fn initial_task_tab_snapshot(origin: String) -> DomSnapshot {
     // A new task WebView has not been observed yet. Never copy another tab's
     // DOM labels, text, or node IDs into it.
@@ -2570,7 +2596,7 @@ async fn start_agent_run(
     let tab_closed = CancellationToken::new();
     *state.active_cancel.lock().await = Some(cancel_token.clone());
     *state.active_agent_target.lock().await = Some(ActiveAgentTarget {
-        tab_id, run_id, tab_closed: tab_closed.clone(),
+        tab_id, run_id, tab_closed: tab_closed.clone(), cancel: cancel_token.clone(), private_mode,
     });
 
     let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalRequest>(16);
@@ -2745,7 +2771,15 @@ fn close_aware_agent_result(
 
 #[cfg(test)]
 mod tab_closed_tests {
-    use super::{close_aware_agent_result, initial_task_tab_snapshot};
+    use super::{close_aware_agent_result, initial_task_tab_snapshot, tab_closure_message};
+
+    #[test]
+    fn distinguishes_explicit_closure_reasons() {
+        assert!(tab_closure_message("user_close").contains("assigned browser tab"));
+        assert!(tab_closure_message("private_session_end").contains("private browsing"));
+        assert!(tab_closure_message("startup_rollback").contains("startup"));
+        assert!(tab_closure_message("unknown_close").contains("unknown source"));
+    }
 
     #[test]
     fn dedicated_task_tab_starts_without_foreground_dom_content() {

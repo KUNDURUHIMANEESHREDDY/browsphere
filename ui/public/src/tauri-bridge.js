@@ -317,13 +317,18 @@
       emitUiEvent('aether:history-updated');
     },
 
-    async onCloseTab(tabId) {
+    async onCloseTab(tabId, reason = 'user_close') {
       if (!invoke || !tabId) return;
+      const closeReason = ['user_close', 'private_session_end', 'startup_rollback'].includes(reason)
+        ? reason : 'unknown_close';
       try {
-        await invoke('close_tab_webview', { tabId });
+        await invoke('close_tab_webview', { tabId, reason: closeReason });
         loadedExternalTabs.delete(tabId);
         agentTaskTabs.delete(tabId);
-      } catch (_) {}
+      } catch (err) {
+        // Do not silently claim that native tab teardown succeeded.
+        console.warn('Native browser tab close failed:', err);
+      }
     },
 
     syncBounds() {

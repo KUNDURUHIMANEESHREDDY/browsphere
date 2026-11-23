@@ -78,10 +78,19 @@ async function main() {
     const foregroundId = await evaluate('window.browsphereApp.activeTab().id');
     assert.notEqual(chatId, foregroundId, 'Failed to switch user to a separate tab');
     assert.notEqual(taskTab, foregroundId, 'Assigned background tab became foreground');
+    // Navigate the unrelated foreground tab, switch to the task tab and back,
+    // then verify that neither ordinary navigation nor focus transfer closed it.
+    await evaluate("window.browsphereApp.navigate('http://127.0.0.1:18764/recovery.html')");
+    await sleep(400);
+    await evaluate('window.browsphereApp.switchTab(' + JSON.stringify(taskTab) + ')');
+    await evaluate('window.browsphereApp.switchTab(' + JSON.stringify(foregroundId) + ')');
     await sleep(350);
     const stillPending = await evaluate(`window.__tabCloseEvents.some(event =>
       event.name==='agent:run_status' && event.payload?.run_id===${JSON.stringify(runId)})`);
-    assert.equal(stillPending, false, 'Switching unrelated tabs stopped the paused agent');
+    assert.equal(stillPending, false, 'Switching or navigating unrelated tabs stopped the paused agent');
+    assert.equal(await evaluate(`window.__tabCloseEvents.some(event =>
+      event.name==='agent:run_error' && event.payload?.run_id===${JSON.stringify(runId)})`), false,
+      'Ordinary navigation emitted an agent close or failure error');
     const clickResult = await evaluate(`(() => {
       const close = document.querySelector('[data-action="close-tab"][data-tab-id="${taskTab}"]');
       if (!close) throw Error('Lucia task-tab close button missing');
@@ -97,12 +106,16 @@ async function main() {
       await sleep(300);
     }
     assert.equal(finalStatus, 'tab_closed', 'Closing the assigned tab did not stop its task explicitly');
+    const closeSource = await evaluate(`window.__tabCloseEvents.find(event =>
+      event.name==='agent:run_error' && event.payload?.run_id===${JSON.stringify(runId)} &&
+      event.payload?.source==='user_close')?.payload?.source`);
+    assert.equal(closeSource, 'user_close', 'Native task closure did not identify the user close operation');
     assert.equal(await evaluate('window.browsphereApp.activeTab().id'), foregroundId,
       'Closing task tab unexpectedly moved the foreground browser tab');
     await evaluate(`document.querySelector('[data-action="switch-tab"][data-tab-id="${chatId}"]').click()`);
     await sleep(350);
     const message = await evaluate('document.getElementById("mainChatMessages")?.innerText || ""');
-    assert.match(message, /Lucia stopped because its assigned task tab was closed/i);
+    assert.match(message, /(?:Lucia stopped because its assigned task tab was closed|Task stopped because its assigned browser tab was closed)/i);
     console.log('PASS: unrelated tab switch kept task alive; closing its assigned tab cancelled it with a clear chat result');
   } finally {
     await evaluate("window.__TAURI__.core.invoke('set_agent_paused', {paused:false})").catch(() => {});

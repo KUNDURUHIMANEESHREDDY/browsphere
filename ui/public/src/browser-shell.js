@@ -1510,17 +1510,32 @@
         return taskId;
       }
 
-      function closeTab(tabId) {
+      function markLuciaTaskTabClosed(tabId, source) {
+        var messages = {
+          user_close: 'Task stopped because its assigned browser tab was closed.',
+          private_session_end: 'Lucia stopped because its private browsing session ended.',
+          startup_rollback: 'Lucia stopped because task startup rolled back and closed its tab.'
+        };
         newTabChatHistory.forEach(function (thread) {
           if (thread.agentTask && thread.agentTask.tabId === tabId) {
             thread.agentTask.tabClosed = true;
             if (thread.agentTask.status === 'Running') {
-              thread.agentTask.error = 'Task stopped because its assigned browser tab was closed.';
+              thread.agentTask.error = messages[source] || 'Lucia task tab closed.';
             }
           }
         });
+      }
+
+      function closeTab(tabId) {
+        if (!tabs.some(function (tab) { return tab.id === tabId; })) return;
+        markLuciaTaskTabClosed(tabId, 'user_close');
         if (window.aetherBridge && window.aetherBridge.isNative) {
-          window.aetherBridge.onCloseTab(tabId);
+          window.aetherBridge.onCloseTab(tabId, 'user_close');
+        }
+        // Never reuse a task tab as the browser's last ordinary start-page tab.
+        if (tabs.length === 1 && tabs[0].luciaTask) {
+          tabs.push({id:'tab-home-' + Date.now(), group:'Open Tabs',
+            history:['browsphere://start'], historyIndex:0, privateContext:isPrivateMode});
         }
         if (tabs.length === 1) {
           var onlyTab = getActiveTab();
@@ -2407,7 +2422,8 @@
           // Close private WebView2 profiles; normal tabs and their cookies are untouched.
           if (window.aetherBridge && window.aetherBridge.isNative) {
             disposablePrivateTabs.forEach(function (privateTab) {
-              window.aetherBridge.onCloseTab(privateTab.id);
+              markLuciaTaskTabClosed(privateTab.id, 'private_session_end');
+              window.aetherBridge.onCloseTab(privateTab.id, 'private_session_end');
             });
           }
           saveBrowserSession();
@@ -4614,7 +4630,9 @@
             var completion = task.verificationReport.summary;
             thread.messages.push({role:'assistant',content:completion,model:'Lucia · Source-checked findings'});
           } else if (payload.status === 'tab_closed') {
-            thread.messages.push({role:'assistant',content:'Lucia stopped because its assigned task tab was closed.'});
+            thread.messages.push({role:'assistant',content:task.error || 'Lucia stopped because its assigned task tab was closed.'});
+          } else if (payload.status === 'tab_missing') {
+            thread.messages.push({role:'assistant',content:task.error || 'Lucia lost its task WebView unexpectedly. Restart the task in a fresh tab.',error:true});
           } else if (payload.status === 'completed') {
             thread.messages.push({role:'assistant',content:'The task ended, but no source-backed verification report was delivered. Do not treat this as a verified result.',error:true});
           } else {
@@ -4700,7 +4718,7 @@
           var abandonedId = thread.agentTask && thread.agentTask.tabId;
           if (abandonedId) {
             tabs = tabs.filter(function (tab) { return tab.id !== abandonedId; });
-            window.aetherBridge?.onCloseTab(abandonedId);
+            window.aetherBridge?.onCloseTab(abandonedId, 'startup_rollback');
             saveBrowserSession();
           }
           thread.agentTask = null;

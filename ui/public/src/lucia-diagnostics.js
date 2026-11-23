@@ -48,7 +48,7 @@
     return {
       completed: 'Completed', complete: 'Completed', success: 'Completed', replayed: 'Replayed',
       failed: 'Failed', halted: 'Halted', unverified: 'Unverified', rejected: 'Rejected', cancelled: 'Cancelled',
-      canceled: 'Cancelled', stopped: 'Stopped',
+      canceled: 'Cancelled', stopped: 'Stopped', tab_closed: 'Tab closed', tab_missing: 'Tab missing',
       incomplete: 'No completion recorded', running: 'Running'
     }[status] || 'Unknown';
   }
@@ -58,6 +58,11 @@
   function failureHint(run) {
     if (!isIssue(run)) return 'Run completed. The timeline shows the recorded actions and decisions.';
     var events = run.events;
+    var tabEvent = events.find(function (event) { return event.event === 'tab_lifecycle'; });
+    if (tabEvent && tabEvent.kind === 'intentional')
+      return 'The assigned tab was explicitly closed by ' + ({user_close:'a user tab-close action',private_session_end:'private browsing teardown',startup_rollback:'failed task startup cleanup',unknown_close:'an unknown close operation'}[tabEvent.source] || 'a browser UI operation') + '. The task was cancelled.';
+    if (tabEvent && tabEvent.kind === 'unexpected')
+      return 'The task WebView disappeared unexpectedly. Lucia stopped without replaying browser actions.';
     if (events.some(function (e) { return e.outcome === 'approval_rejected'; }) || run.status === 'rejected')
       return 'An action was rejected during approval. The run stopped without continuing.';
     if (events.some(function (e) { return e.outcome === 'approval_timeout'; }))
@@ -132,6 +137,7 @@
         events.map(function (ev) {
           var title = ev.event === 'run_started' ? 'Run started' :
             ev.event === 'run_finished' ? 'Run finished' :
+            ev.event === 'tab_lifecycle' ? 'Tab lifecycle' :
             ev.event === 'agent_failure' ? 'Failure recorded' : (ev.action || 'Action');
           var detail = [
             ev.step != null ? 'Step ' + ev.step : '',
@@ -139,6 +145,8 @@
             ev.risk ? 'Risk: ' + ev.risk : '',
             ev.model_route ? 'Route: ' + ev.model_route : '',
             ev.outcome ? 'Outcome: ' + ev.outcome : '',
+            ev.source ? 'Triggered by: ' + ev.source.replace(/_/g, ' ') : '',
+            ev.kind ? 'Close type: ' + ev.kind : '',
             ev.latency_ms != null ? ev.latency_ms + ' ms' : ''
           ].filter(Boolean).join(' · ');
           return '<div class="border-l-2 border-[#007AFF]/30 pl-3 py-1">' +

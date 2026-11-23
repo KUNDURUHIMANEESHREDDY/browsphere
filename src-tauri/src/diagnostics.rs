@@ -208,7 +208,7 @@ pub fn classify_agent_outcome(outcome: &str) -> &'static str {
 fn public_lucia_event(value: &Value, channel: &str) -> Option<Value> {
     let name = value.get("event")?.as_str()?;
     if !match channel {
-        "agent" => matches!(name, "run_started" | "action_trace" | "run_finished"),
+        "agent" => matches!(name, "run_started" | "action_trace" | "run_finished" | "tab_lifecycle"),
         "errors" => name == "agent_failure",
         _ => false,
     } { return None; }
@@ -237,8 +237,13 @@ fn public_lucia_event(value: &Value, channel: &str) -> Option<Value> {
         "decision": fixed("decision", &["allow", "deny", "approval"]),
         "risk": fixed("risk", &["Low", "Medium", "High", "Critical"]),
         "model_route": fixed("model_route", &["macro", "agent_model"]),
-        "status": fixed("status", &["running", "completed", "complete", "success", "replayed", "unverified", "rejected", "failed", "halted", "cancelled", "canceled", "stopped"]),
+        "status": fixed("status", &["running", "completed", "complete", "success", "replayed", "unverified", "rejected", "failed", "halted", "cancelled", "canceled", "stopped", "tab_closed", "tab_missing", "closed", "missing"]),
         "outcome": fixed("outcome", &["success", "failed", "failure", "ok", "error", "blocked", "denied", "timeout", "completed", "verified", "unverified", "loop_guard", "approval_rejected", "approval_timeout", "approval_closed", "cancelled", "replay_drift", "unknown", "other"]),
+        "source": if name == "tab_lifecycle" { fixed("source", &[
+            "user_close", "private_session_end", "startup_rollback",
+            "unknown_close", "webview_missing"
+        ]) } else { None },
+        "kind": if name == "tab_lifecycle" { fixed("kind", &["intentional", "unexpected"]) } else { None },
         "error_kind": if name == "agent_failure" { Some("agent_run") } else { None },
     }))
 }
@@ -291,6 +296,22 @@ mod dashboard_tests {
         assert!(event["outcome"].is_null());
         assert!(event["trace_id"].is_null());
         assert!(!event.to_string().contains("secret"));
+        let close = public_lucia_event(&json!({
+            "timestamp":"2026-11-23T05:00:00Z", "channel":"agent", "event":"tab_lifecycle",
+            "fields":{"run_id":run_id, "status":"closed", "source":"user_close",
+                "kind":"intentional", "url":"https://private.example/path",
+                "secret":"do-not-log"}
+        }), "agent").unwrap();
+        assert_eq!(close["source"], "user_close");
+        assert_eq!(close["kind"], "intentional");
+        assert_eq!(close["status"], "closed");
+        assert!(!close.to_string().contains("do-not-log"));
+        assert!(!close.to_string().contains("private.example"));
+        let missing = public_lucia_event(&json!({
+            "timestamp":"2026-11-23T05:00:00Z", "channel":"agent", "event":"run_finished",
+            "fields":{"run_id":run_id, "status":"tab_missing"}
+        }), "agent").unwrap();
+        assert_eq!(missing["status"], "tab_missing");
         assert!(!event.to_string().contains("privatePassword"));
         assert!(public_lucia_event(&json!({"timestamp":"2026-11-23T05:00:00Z",
             "channel":"agent","event":"run_started","fields":{"run_id":"bad-id"}}),

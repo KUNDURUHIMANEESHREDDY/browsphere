@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -894,11 +894,17 @@ pub async fn run_react_loop(
                 "status": "unavailable", "retry_count": observation_failures
             }));
             if observation_failures >= 3 {
+                let disappeared = app.get_webview(&webview_label).is_none();
                 let _ = app.emit("agent:run_error", serde_json::json!({
                     "run_id": run_id,
-                    "message": "Lucia could not observe the live task tab after three checks. No further page actions were attempted."
+                    "message": if disappeared {
+                        "Lucia's task WebView disappeared unexpectedly. No actions were replayed; restart the task in a fresh tab."
+                    } else {
+                        "Lucia could not observe the live task tab after three checks. No further page actions were attempted."
+                    },
+                    "source": if disappeared { "webview_missing" } else { "observation_timeout" }
                 }));
-                final_status = "unverified".into();
+                final_status = if disappeared { "tab_missing" } else { "unverified" }.into();
                 break;
             }
             tokio::select! {
