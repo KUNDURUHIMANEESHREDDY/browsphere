@@ -4,6 +4,8 @@
 param(
     [string]$Site = "",
     [int]$CdpPort = 9553,
+    [ValidateRange(1,5)][int]$Repeats = 1,
+    [ValidatePattern('^oc/[A-Za-z0-9._/-]+$')][string]$Model = "oc/hy4-flash-free",
     [string]$ExecutablePath = ""
 )
 $ErrorActionPreference = "Stop"
@@ -18,7 +20,8 @@ $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $profile "WebView2"
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$CdpPort --remote-allow-origins=*"
 $env:LUCIA_CDP_PORT = "$CdpPort"
 $env:LUCIA_TEST_CLOUD_ENDPOINT = "http://localhost:20128/v1/chat/completions"
-$env:LUCIA_TEST_CLOUD_MODEL = "oc/hy4-flash-free"
+$env:LUCIA_TEST_CLOUD_MODEL = $Model
+$env:LUCIA_REAL_REPEATS = "$Repeats"
 $env:LUCIA_REAL_SITE = $Site
 $app = $null
 try {
@@ -46,6 +49,7 @@ try {
     Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
     Remove-Item Env:WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
     Remove-Item Env:LUCIA_REAL_SITE -ErrorAction SilentlyContinue
+    Remove-Item Env:LUCIA_REAL_REPEATS -ErrorAction SilentlyContinue
     Remove-Item Env:LUCIA_TEST_CLOUD_ENDPOINT -ErrorAction SilentlyContinue
     Remove-Item Env:LUCIA_TEST_CLOUD_MODEL -ErrorAction SilentlyContinue
     Write-Host "Closed isolated native test app"

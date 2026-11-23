@@ -1,6 +1,7 @@
 'use strict';
 // Independent real-site DOM and navigation checks in native Browsphere WebView2.
 // This does not use AI inference: report separately from Lucia autonomy.
+const {pageReadiness}=require('./lucia-real-site-evidence.cjs');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const port=Number(process.env.LUCIA_CDP_PORT || 9563);
 const base='http://127.0.0.1:'+port;
@@ -64,7 +65,10 @@ async function main(){
           if(new URL(before.url).hostname===host&&before.title?.length>5&&before.body>100&&before.ready!=='loading')break;
           await sleep(350);
         }
-        if(new URL(before.url).hostname!==host||before.body<100)throw Error('Rendered document unavailable or empty');
+        const readiness=pageReadiness({url:before.url,title:before.title,
+          controls:(before.links||0)+(before.inputs||0),excerptLength:before.body},host);
+        if(!readiness.ok)throw Error('SITE_UNAVAILABLE: '+readiness.reason);
+        if(before.body<100)throw Error('Rendered document unavailable or empty');
         // Select an actual first-party visible link. Reject logins, downloads,
         // account operations, editor links, and any third-party destination.
         chosen=await child.eval(`(()=>{const u=location.href;
@@ -95,12 +99,15 @@ async function main(){
         }
       }catch(e){error=String(e)}
       const navigated=!error&&after?.url===chosen?.url&&after?.body>100&&after?.title?.length>5;
-      const record={site:site.name,passed:!!navigated,before,chosen,after,error};
+      const status=navigated?'passed':String(error||'').includes('SITE_UNAVAILABLE:')?'site_unavailable':'failed';
+      const record={site:site.name,passed:!!navigated,status,before,chosen,after,error};
       console.log('REAL_BROWSER_CONTROL',JSON.stringify(record));
-      records.push({site:record.site,passed:record.passed,clicked:chosen?.label||null,error});
+      records.push({site:record.site,passed:record.passed,status,clicked:chosen?.label||null,error});
     }
   }finally{child?.close();main.close()}
-  console.log('REAL_BROWSER_CONTROLS_SUMMARY',JSON.stringify({passed:records.filter(r=>r.passed).length,total:records.length,records}));
+  console.log('REAL_BROWSER_CONTROLS_SUMMARY',JSON.stringify({passed:records.filter(r=>r.passed).length,
+    siteUnavailable:records.filter(r=>r.status==='site_unavailable').length,
+    total:records.length,records}));
   if(records.some(r=>!r.passed))process.exitCode=1;
 }
 main().catch(e=>{console.error('REAL_BROWSER_CONTROLS_FATAL',String(e.stack||e));process.exitCode=2});
