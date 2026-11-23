@@ -160,6 +160,103 @@ async function main() {
     assert.ok(afterRecovery.text_excerpt.includes('Recovery complete: fallback button succeeded'),
       'Recovery confirmation not visible');
     console.log('PASS native failed action, autonomous fallback, and independent verification');
+
+    // 3. A fresh task-owned background WebView must finish while the user
+    // switches to another unrelated tab. Its verified result must not
+    // navigate or mutate the foreground tab.
+    const backgroundInitial = await openLocal('/multistep.html');
+    const taskId = await evaluate('window.browsphereApp.createTaskTab(' +
+      JSON.stringify(backgroundInitial.origin) + ')');
+    assert.match(taskId, /^tab-lucia-/);
+    const backgroundGoal = 'On the current local test page, search for robotics video and open the first result.';
+    const backgroundRun = await evaluate(
+      'window.aetherBridge.startLuciaSpecialistTask(' +
+      JSON.stringify(backgroundGoal) + ',' +
+      JSON.stringify(backgroundInitial.origin) + ',' +
+      JSON.stringify(backgroundInitial.title) + ',' + JSON.stringify(taskId) + ')');
+    assert.ok(backgroundRun, 'Background Lucia run did not start');
+    await evaluate("window.browsphereApp.newTab('browsphere://start')");
+    const browsingTab = await evaluate('window.browsphereApp.activeTab()');
+    assert.notEqual(browsingTab.id, taskId, 'Browsing tab should differ from task tab');
+    let backgroundTerminal;
+    for (let i = 0; i < 80; i++) {
+      await sleep(700);
+      const events = await evaluate(eventsExpression) || [];
+      backgroundTerminal = events.find(e => e.event === 'agent:run_status' &&
+        e.payload?.run_id === backgroundRun);
+      if (backgroundTerminal) break;
+    }
+    assert.ok(backgroundTerminal, 'Background task never reached a terminal state');
+    assert.equal(backgroundTerminal.payload?.status, 'completed',
+      'The background multi-step task failed');
+    const backgroundSnapshot = await evaluate(
+      "window.__TAURI__.core.invoke('capture_tab_snapshot',{tabId:" +
+      JSON.stringify(taskId) + "})");
+    assert.ok(backgroundSnapshot?.origin?.includes('/multistep.html?video=robotics-demo'),
+      'Background task did not open the first video result');
+    assert.ok(backgroundSnapshot.text_excerpt.includes('VIDEO_PAGE_CONFIRMED'),
+      'Background target page lacked verification evidence');
+    assert.equal((await evaluate('window.browsphereApp.activeTab()')).id, browsingTab.id,
+      'Task unexpectedly changed the foreground tab');
+    console.log('PASS native task-owned tab continues during unrelated browsing');
+
+    // 4. Native close must cancel the matching task, including when paused.
+    await evaluate("window.__TAURI__.core.invoke('set_agent_paused',{paused:true})");
+    try {
+      const closingTab = await evaluate(
+        "window.browsphereApp.createTaskTab('about:blank')");
+      const closingRun = await evaluate(
+        "window.aetherBridge.startLuciaSpecialistTask(" +
+          JSON.stringify('On this local test page, find the recovery control.') +
+          ",'browsphere://start','New Tab'," + JSON.stringify(closingTab) + ")");
+      assert.ok(closingRun, 'Closing test run did not start');
+      // The user is still browsing elsewhere; close the task target by ID.
+      await evaluate('window.browsphereApp.closeTab(' + JSON.stringify(closingTab) + ')');
+      let closedTerminal, closedError;
+      for (let i=0; i<45; i++) {
+        await sleep(350);
+        const events = await evaluate(eventsExpression) || [];
+        closedError = events.find(e => e.event === 'agent:run_error' &&
+          e.payload?.run_id === closingRun &&
+          /assigned browser tab was closed/.test(e.payload?.message || ''));
+        closedTerminal = events.find(e => e.event === 'agent:run_status' &&
+          e.payload?.run_id === closingRun);
+        if (closedTerminal && closedError) break;
+      }
+      assert.ok(closedError, 'Closing the assigned tab did not report the cause');
+      assert.equal(closedTerminal?.payload?.status, 'cancelled',
+        'Closing a task tab must stop the run');
+      console.log('PASS closing the background task tab cancels with a clear message');
+    } finally {
+      await evaluate("window.__TAURI__.core.invoke('set_agent_paused',{paused:false})");
+    }
+
+    // 5. The user-facing View task tab control must open the assigned tab.
+    await evaluate("window.browsphereApp.newTab('browsphere://start')");
+    await evaluate("window.__TAURI__.core.invoke('set_agent_paused',{paused:true})");
+    try {
+      const chatReady = await evaluate("Boolean(document.getElementById('newTabChatInput'))");
+      assert.ok(chatReady, 'Main Lucia composer unavailable');
+      await evaluate("(()=>{const f=document.getElementById('newTabChatInput');" +
+        "f.value='On this blank local test page, inspect available controls.';" +
+        `document.querySelector('[data-action="nt-run-agent"]').click();return true})()`);
+      let viewTabId;
+      for (let i=0;i<45;i++) {
+        await sleep(250);
+        viewTabId = await evaluate(
+          `document.querySelector('[data-action="nt-view-task-tab"]')?.dataset.tabId || null`);
+        if (viewTabId) break;
+      }
+      assert.match(viewTabId || '', /^tab-lucia-/,
+        'View task tab button not shown in the Lucia conversation');
+      await evaluate(`document.querySelector('[data-action="nt-view-task-tab"]').click()`);
+      const opened = await evaluate('window.browsphereApp.activeTab()');
+      assert.equal(opened.id, viewTabId, 'View task tab did not select its target');
+      await evaluate('window.browsphereApp.closeTab(' + JSON.stringify(viewTabId) + ')');
+      console.log('PASS task progress button opens assigned WebView2 tab');
+    } finally {
+      await evaluate("window.__TAURI__.core.invoke('set_agent_paused',{paused:false})");
+    }
   } finally {
     ws.close();
   }

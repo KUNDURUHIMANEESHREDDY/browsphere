@@ -43,6 +43,7 @@
   // Bind each agent run to the tab the user actually launched it from.
   // This prevents an asynchronous SPA observation from updating another tab.
   const agentRunTabs = new Map();
+  const agentTaskTabs = new Set();
 
   if (hasTauri) {
     document.body.classList.remove('p-2', 'sm:p-4', 'md:p-6');
@@ -224,20 +225,22 @@
   async function reconcileAgentPage(runId) {
     const key = String(runId || '');
     const tabId = agentRunTabs.get(key);
-    if (!invoke || !tabId || tabId !== currentTabId) return;
+    if (!invoke || !tabId) return;
     try {
       // WebView2 PageLoadEvent does not necessarily fire for history.pushState
       // transitions in dynamic SPAs. Only a fresh native DOM observation can
       // synchronize the address bar here; never trust the model's claimed URL.
-      const observed = await invoke('capture_live_snapshot');
-      if (agentRunTabs.get(key) !== tabId || tabId !== currentTabId) return;
+      const observed = await invoke('capture_tab_snapshot', { tabId });
+      if (agentRunTabs.get(key) !== tabId) return;
       const url = observed?.origin || '';
       if (!/^https?:\/\//i.test(url)) return;
-      const currentUiUrl = window.browsphereApp?.activeTab?.()?.url;
-      if (currentUiUrl === url) return;
-      currentTabIsExternal = true;
+      const active = window.browsphereApp?.activeTab?.();
+      if (active?.id === tabId && active.url === url) return;
       loadedExternalTabs.add(tabId);
-      scheduleBoundsSync();
+      if (currentTabId === tabId) {
+        currentTabIsExternal = true;
+        scheduleBoundsSync();
+      }
       emitUiEvent('aether:page-loaded', { tabId, url });
     } catch (_) {
       // The next real page event or agent observation can repair the view.
@@ -281,7 +284,8 @@
     async onSwitchTab(tabId, url) {
       if (!invoke) return;
       currentTabId = tabId || currentTabId;
-      const isExternal = Boolean(url && (url.startsWith('http://') || url.startsWith('https://')));
+      const isExternal = agentTaskTabs.has(currentTabId) ||
+        Boolean(url && (url.startsWith('http://') || url.startsWith('https://')));
       currentTabIsExternal = isExternal;
       const bounds = computeCanvasBounds();
       try {
@@ -318,6 +322,7 @@
       try {
         await invoke('close_tab_webview', { tabId });
         loadedExternalTabs.delete(tabId);
+        agentTaskTabs.delete(tabId);
       } catch (_) {}
     },
 
@@ -376,7 +381,7 @@
       return invoke('route_lucia_intent', { message });
     },
 
-    async startLuciaSpecialistTask(goal, currentUrl, pageTitle) {
+    async startLuciaSpecialistTask(goal, currentUrl, pageTitle, taskTabId = null) {
       if (!invoke) throw new Error('Specialist tasks require the Browsphere Windows application');
       let snapshot = null;
       try { snapshot = await invoke('capture_live_snapshot'); } catch (_) {}
@@ -396,9 +401,14 @@
         maxSteps: 26,
         allowLearning: document.documentElement.getAttribute('data-private') !== 'true' && isAutomaticMemoryAllowed(),
         isPrivate: document.documentElement.getAttribute('data-private') === 'true',
-        voiceMode: window.browsphereVoice?.enabled === true
+        voiceMode: window.browsphereVoice?.enabled === true,
+        taskTabId
       });
-      agentRunTabs.set(String(runId), launchTabId);
+      if (taskTabId) {
+        agentTaskTabs.add(taskTabId);
+        loadedExternalTabs.add(taskTabId);
+      }
+      agentRunTabs.set(String(runId), taskTabId || launchTabId);
       // Capture an initial navigation even if it raced ahead of the launch reply.
       reconcileAgentPage(runId).catch(() => {});
       return runId;
@@ -870,6 +880,7 @@
       // A Lucia action may create/navigate a native child without going
       // through onNavigate(). Make that tab visible and keep geometry in sync
       // before the browser shell updates its URL and history.
+      if (agentTaskTabs.has(detail.tabId)) loadedExternalTabs.add(detail.tabId);
       if (detail.tabId === currentTabId && /^https?:\/\//i.test(detail.url || '')) {
         currentTabIsExternal = true;
         loadedExternalTabs.add(detail.tabId);

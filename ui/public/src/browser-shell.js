@@ -766,6 +766,13 @@
             case 'nt-run-agent':
               startNewTabAgentTask();
               break;
+            case 'nt-view-task-tab':
+              if (tabs.some(function (tab) { return tab.id === btn.dataset.tabId; })) {
+                switchToTab(btn.dataset.tabId);
+              } else {
+                showHudToast('The Lucia task tab has been closed');
+              }
+              break;
             case 'nt-task-stop':
               if (window.aetherBridge?.isNative) window.aetherBridge.cancelRun();
               break;
@@ -1250,7 +1257,9 @@
 
       function getTabDisplayTitle(tab) {
         var conversation = getTabConversation(tab);
-        return conversation ? conversation.title : getPageData(tab.history[tab.historyIndex]).title;
+        return conversation ? conversation.title :
+          (tab.luciaTask && tab.history[tab.historyIndex] === 'about:blank' ? 'Lucia task tab' :
+           getPageData(tab.history[tab.historyIndex]).title);
       }
 
       function getPageData(url) {
@@ -1313,7 +1322,7 @@
           window.aetherBridge &&
           window.aetherBridge.isNative &&
           currentUrl.indexOf('browsphere://') !== 0 &&
-          currentUrl !== 'about:blank'
+          (currentUrl !== 'about:blank' || Boolean(tab.luciaTask))
         );
         viewport.innerHTML = isNativeExternal
           ? '<div class="w-full h-full min-h-full bg-transparent"></div>'
@@ -1477,7 +1486,28 @@
         }
       }
 
+      function createLuciaTaskTab(sourceUrl) {
+        var taskId = 'tab-lucia-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+        var initialUrl = /^https?:\/\//i.test(sourceUrl || '') ? sourceUrl : 'about:blank';
+        tabs.push({
+          id: taskId, group: 'Lucia', luciaTask: true,
+          history: [initialUrl], historyIndex: 0, privateContext: isPrivateMode
+        });
+        saveBrowserSession();
+        renderSidebarSection();
+        renderSeparateTabStrip();
+        return taskId;
+      }
+
       function closeTab(tabId) {
+        newTabChatHistory.forEach(function (thread) {
+          if (thread.agentTask && thread.agentTask.tabId === tabId) {
+            thread.agentTask.tabClosed = true;
+            if (thread.agentTask.status === 'Running') {
+              thread.agentTask.error = 'Task stopped because its assigned browser tab was closed.';
+            }
+          }
+        });
         if (window.aetherBridge && window.aetherBridge.isNative) {
           window.aetherBridge.onCloseTab(tabId);
         }
@@ -3371,6 +3401,9 @@
       window.browsphereApp = {
         navigate: navigateToUrl,
         newTab: createNewTab,
+        createTaskTab: createLuciaTaskTab,
+        switchTab: switchToTab,
+        closeTab: closeTab,
         activeTab: function () {
           var tab = getActiveTab();
           return {
@@ -4370,6 +4403,9 @@
             }).join('') + '</div>' +
             '<div class="main-chat-agent-footer"><span>' + (task.actions || 0) +
             ' browser steps · ' + (task.evidence || 0) + ' observed sources</span>' +
+            (task.tabId && !task.tabClosed && tabs.some(function (tab) { return tab.id === task.tabId; }) ?
+              '<button type="button" class="main-chat-task-view" data-action="nt-view-task-tab" data-tab-id="' +
+              esc(task.tabId) + '">View task tab</button>' : '') +
             (task.status === 'Running' ? '<button type="button" class="main-chat-task-stop" data-action="nt-task-stop">Stop task</button>' : '') +
             '</div>' +
             (task.verificationReport?.findings?.length ?
@@ -4559,7 +4595,7 @@
         thread.pending = true;
         thread.agentTask = {
           runId: null, status:'Running', plan:{stages:[]},
-          actions:0, evidence:0, approval:null, error:''
+          actions:0, evidence:0, approval:null, error:'', tabId:null, tabClosed:false
         };
         if (input) input.value = '';
         renderActiveTab();
@@ -4569,14 +4605,23 @@
             throw new Error('Run Task needs the Browsphere desktop app.');
           }
           var active = getActiveTab();
+          var sourceUrl = active.history[active.historyIndex];
+          var taskTabId = createLuciaTaskTab(sourceUrl);
+          thread.agentTask.tabId = taskTabId;
           var runId = await window.aetherBridge.startLuciaSpecialistTask(
-            text, active.history[active.historyIndex], getPageData(active.history[active.historyIndex]).title
+            text, sourceUrl, getPageData(sourceUrl).title, taskTabId
           );
           thread.agentTask.runId = runId;
           flushLuciaAgentEvents();
           showHudToast('Lucia specialist agents started');
         } catch (err) {
           thread.pending = false;
+          var abandonedId = thread.agentTask && thread.agentTask.tabId;
+          if (abandonedId) {
+            tabs = tabs.filter(function (tab) { return tab.id !== abandonedId; });
+            window.aetherBridge?.onCloseTab(abandonedId);
+            saveBrowserSession();
+          }
           thread.agentTask = null;
           thread.messages.push({role:'assistant',content:'Could not start the task: ' + String(err),error:true});
           renderActiveTab();

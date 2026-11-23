@@ -361,6 +361,7 @@ pub struct AppState {
     pub pending_snapshots: Arc<Mutex<HashMap<Uuid, oneshot::Sender<DomSnapshot>>>>,
     pub pending_action_results: Arc<Mutex<HashMap<Uuid, oneshot::Sender<ActionResult>>>>,
     pub active_cancel: Arc<Mutex<Option<CancellationToken>>>,
+    pub active_agent_target: Arc<Mutex<Option<(String, Uuid)>>>,
     pub pause_tx: watch::Sender<bool>,
 }
 
@@ -961,6 +962,18 @@ async fn open_or_navigate_tab(
     bounds: Option<TabBounds>,
     is_private: Option<bool>,
 ) -> Result<(), String> {
+    open_or_navigate_tab_inner(app, state, tab_id, url, bounds, is_private, true).await
+}
+
+async fn open_or_navigate_tab_inner(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    tab_id: String,
+    url: String,
+    bounds: Option<TabBounds>,
+    is_private: Option<bool>,
+    activate: bool,
+) -> Result<(), String> {
     let parsed = url::Url::parse(&url).map_err(|e| format!("Invalid URL: {e}"))?;
     if !state.itp.allow_navigation(&parsed) {
         let host = parsed.host_str().unwrap_or("unknown").to_string();
@@ -977,15 +990,19 @@ async fn open_or_navigate_tab(
     }
 
     let target = parsed.to_string();
-    *state.tabs.active_tab_id.lock().await = tab_id.clone();
-    *state.tabs.active_url.lock().await = target.clone();
+    if activate {
+        *state.tabs.active_tab_id.lock().await = tab_id.clone();
+        *state.tabs.active_url.lock().await = target.clone();
+    }
 
-    let effective_bounds = if let Some(b) = bounds {
-        *state.tabs.bounds.lock().await = b.clone();
+    let mut effective_bounds = if let Some(b) = bounds {
+        if activate { *state.tabs.bounds.lock().await = b.clone(); }
         b
     } else {
         state.tabs.bounds.lock().await.clone()
     };
+    // Background task views must never steal foreground geometry or tab focus.
+    if !activate { effective_bounds.hidden = true; }
 
     let itp_verdict = state.itp.check_url(&target);
     if target != "about:blank" && !is_private.unwrap_or(false) && !contains_sensitive_history_parameter(&target) {
@@ -999,7 +1016,9 @@ async fn open_or_navigate_tab(
         map.insert(tab_id.clone(), label.clone());
     }
 
-    hide_other_tab_webviews(&app, &state.tabs, &label).await;
+    if activate {
+        hide_other_tab_webviews(&app, &state.tabs, &label).await;
+    }
 
     if let Some(existing) = app.get_webview(&label) {
         state.perception.invalidate(&label);
@@ -1277,6 +1296,20 @@ async fn close_tab_webview(
     state: tauri::State<'_, Arc<AppState>>,
     tab_id: String,
 ) -> Result<(), String> {
+    let closing_run = {
+        let target = state.active_agent_target.lock().await;
+        target.as_ref().filter(|(id, _)| id == &tab_id)
+            .map(|(_, run_id)| *run_id)
+    };
+    if let Some(run_id) = closing_run {
+        if let Some(token) = state.active_cancel.lock().await.as_ref() {
+            token.cancel();
+        }
+        let _ = app.emit("agent:run_error", serde_json::json!({
+            "run_id": run_id,
+            "message": "Task stopped because its assigned browser tab was closed."
+        }));
+    }
     let label = {
         let mut map = state.tabs.tab_labels.lock().await;
         map.remove(&tab_id)
@@ -1617,6 +1650,22 @@ async fn submit_action_result(
         let _ = tx.send(result);
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn capture_tab_snapshot(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    tab_id: String,
+) -> Result<Option<DomSnapshot>, String> {
+    let label = state.tabs.tab_labels.lock().await.get(&tab_id).cloned()
+        .ok_or_else(|| "Browser tab no longer exists".to_string())?;
+    let generation = state.perception.generation(&label);
+    let snapshot = request_live_dom_snapshot(&app, &label, &state.pending_snapshots, 2000).await;
+    if let Some(ref observed) = snapshot {
+        state.perception.accept(&label, generation, observed.clone());
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -2217,7 +2266,7 @@ async fn replay_workflow_macro(
         snap.origin = format!("https://{}", wf.origin_host);
     }
 
-    start_agent_run(app, state, wf.goal_display, snap, allowed_domains, Some(20), Some(false), Some(false), Some(false)).await
+    start_agent_run(app, state, wf.goal_display, snap, allowed_domains, Some(20), Some(false), Some(false), Some(false), None).await
 }
 
 #[tauri::command]
@@ -2381,15 +2430,47 @@ async fn start_agent_run(
     allow_learning: Option<bool>,
     is_private: Option<bool>,
     voice_mode: Option<bool>,
+    task_tab_id: Option<String>,
 ) -> Result<Uuid, String> {
     let private_mode = is_private.unwrap_or(false);
     let memory_enabled = allow_learning.unwrap_or(false) && !private_mode;
 
-    let tab_id = state.tabs.active_tab_id.lock().await.clone();
+    let dedicated = task_tab_id.is_some();
+    let tab_id = match task_tab_id {
+        Some(id) if id.starts_with("tab-lucia-")
+            && id.len() <= 100
+            && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => id,
+        Some(_) => return Err("Invalid Lucia task tab identifier".into()),
+        None => state.tabs.active_tab_id.lock().await.clone(),
+    };
     let agent_label = TabManagerState::sanitize_label(&tab_id);
     let child = app.get_webview(&agent_label);
-    let on_start_page = state.tabs.active_url.lock().await.starts_with("browsphere://");
-    let snapshot = if on_start_page || child.is_none() {
+    let on_start_page = !dedicated && state.tabs.active_url.lock().await.starts_with("browsphere://");
+    let snapshot = if dedicated {
+        if child.is_some() {
+            return Err("Lucia task tab identifier already exists".into());
+        }
+        let start_url = if snapshot.origin.starts_with("http://")
+            || snapshot.origin.starts_with("https://") {
+            snapshot.origin.clone()
+        } else {
+            "about:blank".into()
+        };
+        let mut bounds = state.tabs.bounds.lock().await.clone();
+        bounds.hidden = true;
+        open_or_navigate_tab_inner(
+            app.clone(), app.state::<Arc<AppState>>(), tab_id.clone(),
+            start_url.clone(), Some(bounds), Some(private_mode), false,
+        ).await?;
+        if start_url == "about:blank" {
+            DomSnapshot {
+                origin: "about:blank".into(), title: String::new(),
+                text_excerpt: String::new(), interactive_nodes: Vec::new(),
+            }
+        } else {
+            snapshot
+        }
+    } else if on_start_page || child.is_none() {
         // Start with an empty document. The first real destination, including a
         // direct user command, goes through the ordinary action and evidence gates.
         if let Some(previous_page) = child {
@@ -2401,7 +2482,7 @@ async fn start_agent_run(
         open_or_navigate_tab(
             app.clone(),
             app.state::<Arc<AppState>>(),
-            tab_id,
+            tab_id.clone(),
             "about:blank".into(),
             Some(bounds),
             Some(private_mode),
@@ -2431,6 +2512,7 @@ async fn start_agent_run(
     }
     let cancel_token = CancellationToken::new();
     *state.active_cancel.lock().await = Some(cancel_token.clone());
+    *state.active_agent_target.lock().await = Some((tab_id, run_id));
 
     let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalRequest>(16);
     let (trace_tx, mut trace_rx) = mpsc::channel::<TraceEntry>(64);
@@ -2507,7 +2589,8 @@ async fn start_agent_run(
     let downloads_arc = state.downloads.clone();
     let db_arc = state.db.clone();
     let active_webview_label = agent_label;
-    let active_url_arc = state.tabs.active_url.clone();
+    // The task's navigation state is independent of whichever tab is visible.
+    let active_url_arc = Arc::new(Mutex::new(snapshot.origin.clone()));
     let snapshots_arc = state.pending_snapshots.clone();
     let action_results_arc = state.pending_action_results.clone();
     let app_for_loop = app.clone();
@@ -2516,6 +2599,7 @@ async fn start_agent_run(
     let db_for_status = state.db.clone();
     let app_for_status = app.clone();
     let approvals_for_status = state.pending_approvals.clone();
+    let target_for_status = state.active_agent_target.clone();
     tokio::spawn(async move {
         let result = run_react_loop(
             app_for_loop,
@@ -2565,6 +2649,12 @@ async fn start_agent_run(
         // run_react_loop has returned, dropping any unresolved approval
         // receivers. Close the corresponding pending UI controls immediately.
         prune_closed_approvals(&app_for_status, &approvals_for_status).await;
+        {
+            let mut target = target_for_status.lock().await;
+            if target.as_ref().is_some_and(|(_, id)| *id == run_id) {
+                *target = None;
+            }
+        }
         if !private_mode {
             let mut db = db_for_status.lock().await;
             let _ = db.update_agent_run_status(&run_id.to_string(), &final_status);
@@ -2680,6 +2770,7 @@ fn main() {
         pending_snapshots: Arc::new(Mutex::new(HashMap::new())),
         pending_action_results: Arc::new(Mutex::new(HashMap::new())),
         active_cancel: Arc::new(Mutex::new(None)),
+        active_agent_target: Arc::new(Mutex::new(None)),
         pause_tx,
     });
 
@@ -2741,6 +2832,7 @@ fn main() {
             switch_tab_webview,
             reload_tab_webview,
             close_tab_webview,
+            capture_tab_snapshot,
             sync_tab_bounds,
             report_itp_blocked,
             get_itp_stats,

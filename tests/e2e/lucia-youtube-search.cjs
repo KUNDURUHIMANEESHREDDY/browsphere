@@ -62,7 +62,7 @@ async function main() {
   const compactSnapshot = "(async()=>{const s=await window.__TAURI__.core.invoke('capture_live_snapshot');return {origin:s?.origin,title:s?.title,searchControls:(s?.interactive_nodes||[]).filter(n=>/search/i.test(n.label)).map(n=>({id:n.node_id,label:n.label,tag:n.tag,role:n.role})).slice(0,10)}})()";
   try {
     await command('Runtime.enable');
-    await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');c.prefer_local_for_simple=true;c.ollama_model='qwen2.5:3b-instruct';await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaYoutubeEvents=[];for(const event of ['agent:trace','agent:stage','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required'])await window.__TAURI__.event.listen(event,e=>window.__luciaYoutubeEvents.push({event,payload:e.payload}));window.browsphereApp.newTab('browsphere://start');return true})()");
+    await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');c.prefer_local_for_simple=true;c.ollama_url='http://127.0.0.1:11434';c.ollama_model='qwen2.5:3b-instruct';await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaYoutubeEvents=[];for(const event of ['agent:trace','agent:stage','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required'])await window.__TAURI__.event.listen(event,e=>window.__luciaYoutubeEvents.push({event,payload:e.payload}));window.browsphereApp.newTab('browsphere://start');return true})()");
     await sleep(400);
     const openRun = await evaluate("window.aetherBridge.startLuciaSpecialistTask('open youtube','browsphere://start','New Tab')");
     const opened = await terminal(openRun, 35);
@@ -73,10 +73,22 @@ async function main() {
     console.log('BEFORE', JSON.stringify({snapshot: before, tab: visibleBefore?.url}));
     assert.match(before?.origin || '', /^https:\/\/(www\.)?youtube\.com\//);
     const goal = 'Search YouTube for NASA Artemis mission and open the first video result, then report the observed video page.';
-    const runId = await evaluate("window.aetherBridge.startLuciaSpecialistTask(" + JSON.stringify(goal) + ",'https://www.youtube.com/','YouTube')");
+    const taskTabId = await evaluate("window.browsphereApp.createTaskTab('https://www.youtube.com/')");
+    const runId = await evaluate("window.aetherBridge.startLuciaSpecialistTask(" +
+      JSON.stringify(goal) + ",'https://www.youtube.com/','YouTube'," + JSON.stringify(taskTabId) + ")");
+    // Do not bring the task-owned tab to the foreground: prove that its
+    // native WebView2 keeps working independently of everyday browsing.
+    await evaluate("window.browsphereApp.newTab('browsphere://start')");
+    const foregroundTab = await evaluate('window.browsphereApp.activeTab()');
+    assert.notEqual(foregroundTab?.id, taskTabId, 'Lucia unexpectedly stole browser focus');
     const result = await terminal(runId);
-    const after = await evaluate(compactSnapshot).catch(err => ({error:String(err)}));
+    const after = await evaluate("(async()=>{const s=await window.__TAURI__.core.invoke('capture_tab_snapshot',{tabId:" +
+      JSON.stringify(taskTabId) +
+      "});return {origin:s?.origin,title:s?.title,searchControls:(s?.interactive_nodes||[]).filter(n=>/search/i.test(n.label)).slice(0,10)}})()")
+      .catch(err => ({error:String(err)}));
     const visibleAfter = await evaluate('window.browsphereApp.activeTab()');
+    assert.equal(visibleAfter?.id, foregroundTab?.id,
+      'Browsing foreground tab changed during background YouTube task');
     const traces = result.events.filter(e=>e.event==='agent:trace' && e.payload?.run_id===runId);
     const reports = result.events.filter(e=>e.event==='agent:verification_report' && e.payload?.run_id===runId);
     const actions = traces.map(e=>({
@@ -105,7 +117,7 @@ async function main() {
       'No successful video-result click');
     assert.match(after?.origin || '', /^https:\/\/(www\.)?youtube\.com\/watch/,
       'No observed YouTube watch page');
-    console.log('PASS: Lucia searched, clicked a result, and verified the video page');
+    console.log('PASS: Background Lucia searched, clicked first YouTube result, and verified observed watch page without changing foreground tab');
   } finally {
     ws.close();
   }

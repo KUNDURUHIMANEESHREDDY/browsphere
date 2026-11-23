@@ -147,7 +147,8 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
     let current = walker.nextNode();
     while (current && nodes.length < MAX_NODES) {{
-      if (isVisible(current) && isInteractive(current)) {{
+      if (isVisible(current) && isInteractive(current) &&
+          !observedIds.has(current.getAttribute("data-aether-id"))) {{
         let nodeId = current.getAttribute("data-aether-id");
         if (!nodeId || observedIds.has(nodeId)) {{
           nodeId = freshNodeId();
@@ -226,6 +227,15 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     }}
   }}
 
+  // On YouTube search results, inspect result cards before the numerous
+  // navigation/toolbar controls exhaust the bounded interactive node budget.
+  // This is still a fresh DOM observation, never a guessed result URL.
+  if (/^([^.]+\.)?youtube\.com$/i.test(location.hostname) &&
+      location.pathname === "/results") {{
+    const resultsRoot = document.querySelector(
+      'ytd-two-column-search-results-renderer #contents');
+    if (resultsRoot) walk(resultsRoot);
+  }}
   walk(document.body || document.documentElement);
 
   const visibleText = (document.body?.innerText || "")
