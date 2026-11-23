@@ -812,7 +812,16 @@
     });
 
     listen('browser:page-loaded', (event) => {
-      emitUiEvent('aether:page-loaded', event.payload || {});
+      const detail = event.payload || {};
+      // A Lucia action may create/navigate a native child without going
+      // through onNavigate(). Make that tab visible and keep geometry in sync
+      // before the browser shell updates its URL and history.
+      if (detail.tabId === currentTabId && /^https?:\/\//i.test(detail.url || '')) {
+        currentTabIsExternal = true;
+        loadedExternalTabs.add(detail.tabId);
+        scheduleBoundsSync();
+      }
+      emitUiEvent('aether:page-loaded', detail);
     });
     listen('browser:popup-blocked', (event) => {
       emitUiEvent('aether:popup-blocked', event.payload || {});
