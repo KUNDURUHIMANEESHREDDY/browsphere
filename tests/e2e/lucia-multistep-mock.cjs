@@ -103,9 +103,24 @@ async function main() {
         JSON.stringify(initial.title) + ')');
       assert.ok(id,'Native agent run failed to start');
       let terminal, events = [];
+      let reported = 0;
       for(let i=0;i<limit;i++){
         await sleep(750);
         events = await evaluate(eventsExpression) || [];
+        if(realModel){
+          const progress=events.filter(x=>x.payload?.run_id===id &&
+            ['agent:trace','agent:stage','agent:run_error','agent:run_status'].includes(x.event));
+          for(const entry of progress.slice(reported)){
+            // The app's trace fields are already sanitized. Never print raw
+            // page excerpts, user text, credentials, rationale or model prompts.
+            console.log('QWEN_PROGRESS',JSON.stringify({
+              event:entry.event,action:entry.payload?.action?.type,
+              outcome:entry.payload?.outcome,status:entry.payload?.status,
+              specialist:entry.payload?.specialist
+            }));
+          }
+          reported=progress.length;
+        }
         const approval = events.find(x=>x.event==='agent:approval_required'
           && x.payload?.run_id===id);
         if(approval){
