@@ -266,6 +266,8 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   ]) {{
     const region = document.querySelector(selector);
     if (region && isVisible(region)) walk(region);
+  }}
+  walk(document.body || document.documentElement);
 
   // Give the actual content/dialog priority over enormous navigation menus,
   // while retaining a bounded slice of the remaining page for context.
