@@ -1,0 +1,14 @@
+{
+  "name": "browsphere-ui",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build:css": "tailwindcss -i ./input.css -o ./public/src/tailwind.css --minify"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
+  }
+}

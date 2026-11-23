@@ -1,0 +1,203 @@
+/* Lucia floating assistant — macOS-inspired light/dark design. */
+:root {
+  --lucia-ink: #171923;
+  --lucia-secondary: #737b91;
+  --lucia-edge: rgba(255,255,255,.8);
+}
+html,body { background:transparent !important; }
+body { overflow:hidden; }
+.lucia-shell {
+  position:relative;
+  isolation:isolate;
+  overflow:hidden;
+  border:1px solid rgba(165,178,209,.35) !important;
+  border-radius:22px;
+  color:var(--lucia-ink);
+  background:linear-gradient(148deg,#f7f8ff 0%,#f3f6ff 35%,#f4f1fc 72%,#edf3ff 100%) !important;
+  box-shadow:0 16px 45px rgba(31,40,88,.16),inset 0 1px rgba(255,255,255,.92);
+}
+.lucia-shell::before {
+  content:"";position:absolute;inset:80px -20% 0;pointer-events:none;z-index:-1;
+  background:
+    radial-gradient(ellipse 56% 27% at 24% 7%, rgba(164,194,255,.3),transparent 88%),
+    radial-gradient(ellipse 58% 30% at 100% 64%,rgba(173,190,255,.25),transparent 88%),
+    radial-gradient(ellipse 70% 32% at 18% 92%,rgba(209,189,251,.22),transparent 84%);
+}
+.lucia-header {
+  position:relative;
+  z-index:1;
+  padding:7px 15px 10px;
+  background:linear-gradient(160deg,rgba(255,255,255,.65),rgba(250,250,255,.44));
+  border-bottom:1px solid rgba(120,135,177,.13);
+  backdrop-filter:blur(22px);
+  -webkit-backdrop-filter:blur(22px);
+  cursor:grab;
+  user-select:none;
+  flex-shrink:0;
+}
+.lucia-header:active {cursor:grabbing;}
+.lucia-traffic {display:flex;align-items:center;gap:7px;height:17px;margin-bottom:8px;}
+.lucia-traffic button {
+  appearance:none;width:11px;height:11px;padding:0;border-radius:50%;
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.09),0 1px 1px rgba(0,0,0,.07);
+  cursor:pointer;transition:filter .16s,transform .16s;
+}
+.lucia-traffic button:hover {filter:brightness(.93);transform:scale(1.08);}
+.lucia-traffic button:focus-visible,.lucia-icon-action:focus-visible,.lucia-mic:focus-visible {
+  outline:2px solid #3577ff;outline-offset:3px;
+}
+.lucia-traffic .traffic-close {background:#ff5f57;}
+.lucia-traffic .traffic-hide {background:#ffbd2e;}
+.lucia-traffic .traffic-dock {background:#28c840;}
+.lucia-titlebar {display:flex;align-items:center;min-width:0;gap:9px;}
+.lucia-wordmark {display:flex;align-items:center;gap:8px;white-space:nowrap;min-width:0;flex-shrink:0;}
+.lucia-wordmark strong {font-size:16px;letter-spacing:-.055em;font-weight:730;line-height:1.1;}
+.lucia-wave-logo {width:21px;height:21px;flex-shrink:0;color:#6d79f7;}
+.lucia-header-separator {height:20px;width:1px;background:rgba(98,107,132,.21);flex-shrink:0;}
+.lucia-context {
+  display:inline-flex;align-items:center;gap:5px;
+  min-width:0;max-width:100%;padding:5px 9px;
+  font-size:10.5px;font-weight:530;letter-spacing:-.01em;
+  color:#66718c;background:rgba(255,255,255,.32);
+  border:1px solid rgba(142,155,190,.13);border-radius:999px;
+  overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+}
+.lucia-context-text {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.lucia-context svg{width:13px;height:13px;flex-shrink:0;color:#7788a3;}
+.lucia-icon-action {
+  flex-shrink:0;width:26px;height:26px;border:0;background:transparent;
+  display:inline-flex;align-items:center;justify-content:center;
+  border-radius:9px;color:#6f778d;cursor:pointer;transition:background .15s,color .15s;
+}
+.lucia-icon-action:hover {background:rgba(108,119,157,.1);color:#303b60;}
+.lucia-icon-action svg {width:17px;height:17px;}
+.lucia-stage {flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden;position:relative;}
+.lucia-stream {
+  display:flex;flex-direction:column;justify-content:center;
+  padding:17px 17px 14px;overflow:auto;min-height:0;
+  scroll-behavior:smooth;flex:1;gap:10px;
+  font-size:13px;line-height:1.5;
+}
+.lucia-stream.has-messages {justify-content:flex-start;padding-top:19px;}
+.lucia-welcome {display:flex;align-items:center;flex-direction:column;gap:0;margin:auto 0;pointer-events:none;text-align:center;}
+.lucia-orb {
+  width:106px;height:106px;border-radius:34% 46% 41% 44%;
+  display:flex;align-items:center;justify-content:center;
+  position:relative;
+  background:
+    radial-gradient(circle at 31% 27%,rgba(255,255,255,.88),transparent 32%),
+    radial-gradient(circle at 70% 72%,rgba(79,162,255,.67),transparent 55%),
+    radial-gradient(circle at 31% 76%,rgba(179,113,255,.63),transparent 52%),
+    linear-gradient(140deg,rgba(196,214,255,.9),rgba(198,177,252,.78),rgba(171,219,255,.84));
+  box-shadow:0 16px 35px rgba(116,136,249,.16),inset 0 2px 15px rgba(255,255,255,.75);
+  margin:0 0 22px;transform:rotate(-7deg);
+}
+.lucia-orb::before,.lucia-orb::after {
+  content:"";position:absolute;inset:8px;border-radius:43% 34% 48% 35%;
+  border:1px solid rgba(255,255,255,.42);transform:rotate(48deg);
+}
+.lucia-orb::after {inset:-6px;transform:rotate(-31deg);border-color:rgba(205,220,255,.58);}
+.lucia-orb-icon {width:40px;height:40px;position:relative;z-index:1;color:white;filter:drop-shadow(0 3px 8px rgba(65,94,216,.28));transform:rotate(7deg);}
+.lucia-welcome h1 {margin:0;font-size:31px;font-weight:735;letter-spacing:-.055em;line-height:1.1;color:#161824;}
+.lucia-welcome p {margin:9px 12px 0;color:#778099;font-size:13px;letter-spacing:-.015em;}
+.lucia-composer-area {
+  position:relative;z-index:1;flex-shrink:0;padding:12px 13px 13px;
+  border-top:1px solid rgba(128,143,178,.15);
+  background:linear-gradient(0deg,rgba(250,251,255,.65),rgba(255,255,255,.25));
+  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+}
+.lucia-composer {
+  display:flex;align-items:center;gap:6px;padding:6px 7px 6px 16px;
+  min-height:52px;border:1px solid rgba(255,255,255,.92);
+  border-radius:22px;background:rgba(255,255,255,.59);
+  box-shadow:0 5px 20px rgba(43,55,104,.09),inset 0 1px 2px rgba(255,255,255,1);
+  transition:border-color .2s,box-shadow .2s;
+}
+.lucia-composer:focus-within {border-color:rgba(111,143,248,.52);box-shadow:0 7px 24px rgba(72,90,170,.12),0 0 0 3px rgba(96,139,255,.08);}
+.lucia-text-input {flex:1;min-width:0;outline:none;border:0;background:transparent;font-size:13px;font-weight:450;color:#22263a;padding:8px 0;}
+.lucia-text-input::placeholder {color:#9a9fb0;}
+.lucia-composer .lucia-icon-action {width:29px;height:32px;}
+.lucia-mic {
+  flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  width:37px;height:37px;border-radius:50%;cursor:pointer;
+  color:#232a47;background:linear-gradient(150deg,#fff,#f9faff);
+  box-shadow:0 2px 9px rgba(123,140,203,.23),0 0 0 1px rgba(154,171,246,.3);
+  transition:background .2s,transform .2s,box-shadow .2s;
+}
+.lucia-mic:hover {transform:translateY(-1px);box-shadow:0 4px 13px rgba(122,138,216,.26),0 0 0 2px rgba(141,163,255,.18);}
+.lucia-mic svg {width:19px;height:19px;}
+.lucia-mic[aria-busy="true"] {
+  color:#fff;background:linear-gradient(150deg,#6e7aff,#a378ef);
+  box-shadow:0 0 0 5px rgba(134,126,255,.15),0 0 21px rgba(109,110,240,.28);
+  animation:lucia-mic-pulse 1.2s ease-in-out infinite;
+}
+.lucia-send {
+  flex-shrink:0;width:35px;height:35px;border:0;border-radius:12px;
+  display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(145deg,#eef1fc,#e6eafa);
+  color:#77819d;cursor:pointer;transition:background .15s,color .15s;
+}
+.lucia-send:hover{background:linear-gradient(145deg,#5c78fc,#8572fa);color:white;}
+.lucia-send svg {width:17px;height:17px;}
+.lucia-live-status {
+  display:none;align-items:center;justify-content:center;
+  font-size:10px;color:#66708c;margin:5px 0 -6px;
+  min-height:12px;text-align:center;
+}
+.lucia-live-status:not(:empty):not([data-idle="true"]){display:flex;}
+@keyframes lucia-mic-pulse {50%{box-shadow:0 0 0 8px rgba(140,127,255,.11),0 0 18px rgba(109,110,240,.24);}}
+/* Clean, readable bubbles while retaining existing policy approval card. */
+.lucia-stream.has-messages > .flex {max-width:100%;}
+.lucia-stream.has-messages > .flex > div {overflow-wrap:anywhere;}
+.lucia-stream #tauriApprovalCard {flex-shrink:0;}
+/* Dark appearance */
+html[data-theme="dark"] .lucia-shell {
+ --lucia-ink:#f3f5ff;
+ color:var(--lucia-ink);
+ background:linear-gradient(155deg,#212335,#27273c 48%,#202841 100%) !important;
+ border-color:rgba(139,152,210,.23)!important;
+}
+html[data-theme="dark"] .lucia-shell::before {
+ background:radial-gradient(ellipse 70% 30% at 65% 29%,rgba(79,81,146,.21),transparent 90%),radial-gradient(ellipse 90% 45% at 20% 91%,rgba(110,79,160,.15),transparent 90%);
+}
+html[data-theme="dark"] .lucia-header{background:rgba(29,31,47,.56);border-bottom-color:rgba(174,185,229,.1);}
+html[data-theme="dark"] .lucia-header-separator{background:rgba(194,207,255,.21);}
+html[data-theme="dark"] .lucia-context {background:rgba(255,255,255,.045);color:#b9c1d8;border-color:rgba(255,255,255,.07);}
+html[data-theme="dark"] .lucia-icon-action{color:#a4acca;}
+html[data-theme="dark"] .lucia-icon-action:hover{color:white;background:rgba(255,255,255,.07);}
+html[data-theme="dark"] .lucia-welcome h1{color:#f4f4ff;}
+html[data-theme="dark"] .lucia-welcome p{color:#adb4d0;}
+html[data-theme="dark"] .lucia-composer-area{background:rgba(30,32,48,.5);border-top-color:rgba(167,179,221,.1);}
+html[data-theme="dark"] .lucia-composer{background:rgba(45,47,68,.73);border-color:rgba(153,166,210,.16);box-shadow:0 7px 20px rgba(0,0,0,.16);}
+html[data-theme="dark"] .lucia-text-input{color:#f2f3ff;}
+html[data-theme="dark"] .lucia-text-input::placeholder{color:#979db6;}
+html[data-theme="dark"] .lucia-mic{color:#d9e0ff;background:linear-gradient(150deg,#414663,#373b56);box-shadow:0 0 0 1px rgba(164,177,251,.22);}
+html[data-theme="dark"] .lucia-send{color:#b2bedf;background:#3b405d;}
+@media (max-width:365px){.lucia-header{padding-inline:10px;}.lucia-context{font-size:9px;padding:4px 6px;}.lucia-wordmark strong{font-size:15px;}.lucia-composer{padding-left:10px;}}
+@media (prefers-reduced-motion:reduce){.lucia-mic,.lucia-orb{animation:none!important;transition:none!important;}}
+
+/* Separate Voice Agent control: waveform is the mode toggle, microphone sends queries. */
+.lucia-voice-agent-button {
+  color:#6978e6;
+  width:29px;
+  height:29px;
+  margin-right:3px;
+}
+.lucia-voice-agent-button[aria-pressed="true"] {
+  background:linear-gradient(140deg,#657bfa,#a47dff);
+  color:#fff;
+  box-shadow:0 2px 11px rgba(112,113,241,.25);
+}
+.lucia-welcome {pointer-events:auto;}
+.lucia-orb {border:0;padding:0;cursor:pointer;pointer-events:auto;transition:filter .2s,box-shadow .2s,transform .2s;}
+.lucia-orb:hover {filter:saturate(1.2);box-shadow:0 19px 42px rgba(108,133,244,.27),inset 0 2px 15px rgba(255,255,255,.8);}
+.lucia-orb:focus-visible {outline:3px solid #657bfa;outline-offset:9px;}
+.lucia-orb[aria-pressed="true"] {
+  box-shadow:0 0 0 7px rgba(137,142,255,.18),0 14px 42px rgba(92,117,248,.34);
+  animation:lucia-voice-breathe 2s ease-in-out infinite;
+}
+.lucia-orb[aria-pressed="true"] .lucia-orb-icon {filter:drop-shadow(0 0 8px rgba(255,255,255,.72));}
+@keyframes lucia-voice-breathe {50% {box-shadow:0 0 0 13px rgba(137,142,255,.08),0 17px 46px rgba(92,117,248,.3);}}
+html[data-theme="dark"] .lucia-voice-agent-button {color:#bfc5ff;}
+html[data-theme="dark"] .lucia-voice-agent-button[aria-pressed="true"] {color:#fff;}
+@media(prefers-reduced-motion:reduce){.lucia-orb[aria-pressed="true"]{animation:none;}}

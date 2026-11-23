@@ -1,0 +1,38 @@
+# Local build outputs
+/target/
+/target-aws-connect/
+**/target/
+/dist/
+/ui/node_modules/
+/node_modules/
+/src-tauri/gen/
+
+# Logs, temporary results, backups
+*.log
+*.exit
+*.tmp
+*.bak
+/_aws-connect-backup-*/
+/tests/e2e/artifacts/
+/tests/e2e/edge-*/
+/tests/e2e/*profile*/
+
+# Local secrets, AWS state and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
+*credentials*.json
+/aws_provisioned.json
+/aws_test_results.json
+/AWS_SETUP_STATUS.md
+/.aws/
+
+# OS and editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,144 @@
+
+/* Browsphere · native macOS-inspired AI preferences. Scoped to the AI pane only. */
+#settingsPaneBody.mac-ai-host {
+  background: #f5f5f7;
+  color: #1d1d1f;
+  padding: 22px 28px 18px;
+  scrollbar-color: rgba(60,60,67,.25) transparent;
+}
+.mac-ai { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif; font-size: 12px; line-height: 1.45; }
+.mac-ai *, .mac-ai *::before, .mac-ai *::after { box-sizing: border-box; }
+.mac-ai-intro { padding: 0 2px 18px; }
+.mac-ai-intro h2 { font-size: 22px; font-weight: 650; line-height: 1.2; letter-spacing: -.035em; margin: 0 0 6px; }
+.mac-ai-intro p { margin: 0; color: #6e6e73; font-size: 11.5px; }
+.mac-ai-group { margin-bottom: 20px; }
+.mac-ai-heading { font-size: 13px; font-weight: 650; letter-spacing: -.012em; margin: 0 0 9px 12px; }
+.mac-ai-group-note { font-size: 11px; color: #6e6e73; margin: -5px 11px 10px; }
+.mac-ai-surface { background: #fff; border: 1px solid rgba(60,60,67,.12); border-radius: 12px; overflow: hidden; }
+.mac-ai-row { display: grid; grid-template-columns: minmax(172px, 0.93fr) minmax(0, 1.55fr); gap: 14px; align-items: center; padding: 12px 15px; min-height: 57px; }
+.mac-ai-row + .mac-ai-row { border-top: 1px solid rgba(60,60,67,.11); }
+.mac-ai-label { display: block; font-size: 12px; font-weight: 570; color: #1d1d1f; }
+.mac-ai-help { color: #86868b; font-size: 10.5px; margin-top: 2px; max-width: 300px; line-height: 1.4; }
+.mac-ai-controls { display: flex; justify-content: flex-end; align-items: center; gap: 9px; min-width: 0; }
+.mac-ai-controls .mac-ai-input, .mac-ai-controls .mac-ai-select { width: 100%; max-width: 360px; }
+.mac-ai-input, .mac-ai-select { appearance: auto; font-family: -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif; border: 1px solid rgba(60,60,67,.22); background: #fff; color: #1d1d1f; border-radius: 7px; font-size: 12px; height: 30px; min-width: 0; padding: 0 10px; outline: none; transition: box-shadow .12s,border-color .12s; }
+.mac-ai-input::placeholder { color: #98989e; }
+.mac-ai-input:focus, .mac-ai-select:focus { border-color: #007aff; box-shadow: 0 0 0 3px rgba(0,122,255,.17); }
+.mac-ai-mono { font-family: "SF Mono", "Cascadia Code", Consolas, ui-monospace, monospace; font-size: 11px; letter-spacing: -.025em; }
+.mac-ai-segmented { display: inline-flex; align-items: stretch; gap: 2px; padding: 3px; border-radius: 9px; background: #e8e8ed; min-height: 32px; width: 100%; max-width: 280px; }
+.mac-ai-segmented button { flex: 1; min-width: 0; border: 0; border-radius: 7px; padding: 4px 14px; background: transparent; color: #6e6e73; font-size: 12px; font-weight: 540; cursor: pointer; transition: background .12s,color .12s,box-shadow .12s; }
+.mac-ai-segmented button[aria-pressed="true"] { background: #fff; color: #1d1d1f; box-shadow: 0 1px 3px rgba(0,0,0,.12),0 0 0 .5px rgba(0,0,0,.09); font-weight: 650; }
+.mac-ai-segmented button:focus-visible,.mac-ai-btn:focus-visible,.mac-ai-key-btn:focus-visible { outline: 3px solid rgba(0,122,255,.45); outline-offset: 2px; }
+.mac-ai-btn { border: 1px solid rgba(60,60,67,.15); border-radius: 8px; min-height: 30px; background: #e9e9ed; color: #1d1d1f; padding: 5px 12px; font-weight: 570; font-size: 11.5px; cursor: pointer; white-space: nowrap; }
+.mac-ai-btn:hover { background: #dfdfe5; }
+.mac-ai-btn.primary { background: #007aff; color: #fff; border-color: #007aff; padding: 6px 18px; }
+.mac-ai-btn.primary:hover { background: #0069dc; }
+.mac-ai-danger { color: #d70015; background: transparent; border: 0; padding: 5px 0; cursor: pointer; font-size: 11.5px; font-weight: 550; text-align: left; }
+.mac-ai-danger:hover { text-decoration: underline; }
+.mac-ai-inline { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 360px; }
+.mac-ai-inline .mac-ai-input { flex: 1; min-width: 0; width: auto; }
+.mac-ai-lock-note { display: block; margin-top: 5px; font-size: 10px; line-height: 1.35; color: #6e6e73; text-align: right; }
+.mac-ai-security { display: block; margin-bottom: 5px; font-size: 10px; text-align: right; font-weight: 570; }
+.mac-ai-security.ready { color: #248a3d; }
+.mac-ai-security.empty { color: #86868b; }
+.mac-ai-chip-list { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; width: 100%; }
+.mac-ai-chip { display: inline-flex; align-items: center; gap: 7px; font-size: 10.5px; padding: 5px 8px; border: 1px solid rgba(60,60,67,.13); border-radius: 7px; background: #f2f2f7; color: #545458; }
+.mac-ai-chip button { cursor: pointer; border: 0; color: #86868b; background: none; font-weight: 700; padding: 0 1px; }
+.mac-ai-quiet { color: #86868b; font-size: 11px; }
+.mac-ai-routing-entry { display: flex; width: 100%; justify-content: flex-end; gap: 7px; }
+.mac-ai-routing-entry .mac-ai-input { flex: 1 1 auto; }
+.mac-ai-routing-entry .mac-ai-select { flex: 0 0 115px; width: 115px; }
+.mac-ai-switch { display: inline-flex; align-items: center; cursor: pointer; }
+.mac-ai-switch input { position: absolute; height: 1px; width: 1px; opacity: 0; }
+.mac-ai-switch .track { display: block; width: 39px; height: 23px; border-radius: 12px; background: #d1d1d6; padding: 2px; transition: background .15s; }
+.mac-ai-switch .thumb { display: block; width: 19px; height: 19px; border-radius: 50%; background: white; box-shadow: 0 1px 2px rgba(0,0,0,.24); transition: transform .15s; }
+.mac-ai-switch input:checked + .track { background: #34c759; }
+.mac-ai-switch input:checked + .track .thumb { transform: translateX(16px); }
+.mac-ai-switch input:focus-visible + .track { outline: 3px solid rgba(0,122,255,.45); outline-offset: 2px; }
+.mac-ai-status { display: flex; gap: 9px; align-items: flex-start; padding: 0 11px 5px; color: #6e6e73; font-size: 11.5px; }
+.mac-ai-status-dot { flex: 0 0 7px; height: 7px; width: 7px; border-radius: 50%; background: #8e8e93; margin-top: 5px; }
+.mac-ai-status[data-state="testing"] .mac-ai-status-dot { background: #ff9f0a; }
+.mac-ai-status[data-state="success"] .mac-ai-status-dot { background: #30d158; }
+.mac-ai-status[data-state="error"] .mac-ai-status-dot { background: #ff453a; }
+.mac-ai-status-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.mac-ai-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 4px 5px; }
+.mac-ai-footer-actions { display: flex; justify-content: flex-end; gap: 8px; }
+[data-theme="dark"] #settingsPaneBody.mac-ai-host { background: #1c1c1e; color: #f5f5f7; }
+[data-theme="dark"] .mac-ai-intro p, [data-theme="dark"] .mac-ai-help, [data-theme="dark"] .mac-ai-group-note, [data-theme="dark"] .mac-ai-lock-note, [data-theme="dark"] .mac-ai-status, [data-theme="dark"] .mac-ai-quiet { color: #a1a1a6; }
+[data-theme="dark"] .mac-ai-surface { background: #2c2c2e; border-color: rgba(255,255,255,.10); }
+[data-theme="dark"] .mac-ai-row + .mac-ai-row { border-top-color: rgba(255,255,255,.11); }
+[data-theme="dark"] .mac-ai-label { color: #f5f5f7; }
+[data-theme="dark"] .mac-ai-input, [data-theme="dark"] .mac-ai-select { background: #3a3a3c; color: #f5f5f7; border-color: rgba(255,255,255,.14); }
+[data-theme="dark"] .mac-ai-input::placeholder { color: #a1a1a6; }
+[data-theme="dark"] .mac-ai-segmented { background: #3a3a3c; }
+[data-theme="dark"] .mac-ai-segmented button { color: #d1d1d6; }
+[data-theme="dark"] .mac-ai-segmented button[aria-pressed="true"] { background: #636366; color: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+[data-theme="dark"] .mac-ai-btn { background: #48484a; color: #f5f5f7; border-color: rgba(255,255,255,.08); }
+[data-theme="dark"] .mac-ai-btn:hover { background: #575759; }
+[data-theme="dark"] .mac-ai-btn.primary { background: #0a84ff; border-color: #0a84ff; color: #fff; }
+[data-theme="dark"] .mac-ai-btn.primary:hover { background: #0074df; }
+[data-theme="dark"] .mac-ai-chip { background: #3a3a3c; color: #d1d1d6; border-color: rgba(255,255,255,.10); }
+[data-theme="dark"] .mac-ai-danger { color: #ff6961; }
+[data-theme="dark"] .mac-ai-security.ready { color: #30d158; }
+@media (max-width: 660px) {
+  #settingsPaneBody.mac-ai-host { padding: 17px 16px 13px; }
+  .mac-ai-row { grid-template-columns: 1fr; gap: 8px; padding: 11px 13px; }
+  .mac-ai-controls, .mac-ai-chip-list { justify-content: flex-start; }
+  .mac-ai-controls .mac-ai-input, .mac-ai-controls .mac-ai-select { max-width: none; }
+  .mac-ai-segmented { max-width: none; }
+  .mac-ai-lock-note,.mac-ai-security { text-align: left; }
+  .mac-ai-footer { align-items: flex-start; flex-direction: column; }
+  .mac-ai-footer-actions { justify-content: stretch; width: 100%; }
+  .mac-ai-footer-actions button { flex: 1; }
+}
+
+.mac-ai-installed-controls { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; width:100%; gap:8px; }
+.mac-ai-installed-controls .mac-ai-chip-list { width:auto; flex:1 1 auto; }
+@media(max-width:660px) { .mac-ai-installed-controls { justify-content:flex-start; } }
+
+/* Saved cloud model discovery — follows the restrained native preference-row style. */
+.mac-ai-model-hint { margin-top:5px; font-size:10px; line-height:1.4; color:#86868b; }
+.mac-ai-fetch-controls { width:100%; max-width:360px; display:flex; justify-content:flex-end; align-items:center; gap:10px; flex-wrap:wrap; }
+.mac-ai-fetch-controls .mac-ai-btn { background:#e8f2ff; color:#0066d6; border-color:rgba(0,122,255,.17); font-weight:620; }
+.mac-ai-fetch-controls .mac-ai-btn:hover { background:#dcecff; }
+.mac-ai-fetch-controls .mac-ai-btn:disabled { opacity:.55; cursor:wait; }
+.mac-ai-fetch-note { color:#6e6e73; font-size:10.5px; text-align:right; overflow-wrap:anywhere; }
+.mac-ai-fetched-select { display:flex; flex-direction:column; align-items:flex-end; width:100%; max-width:360px; gap:5px; }
+.mac-ai-fetched-select .mac-ai-select { width:100%; }
+.mac-ai-fetched-select .mac-ai-select:disabled { opacity:.6; cursor:not-allowed; }
+.mac-ai-fetch-count { color:#86868b; font-size:10px; }
+[data-theme="dark"] .mac-ai-model-hint, [data-theme="dark"] .mac-ai-fetch-note, [data-theme="dark"] .mac-ai-fetch-count { color:#a1a1a6; }
+[data-theme="dark"] .mac-ai-fetch-controls .mac-ai-btn { background:rgba(10,132,255,.19); color:#72b8ff; border-color:rgba(10,132,255,.25); }
+[data-theme="dark"] .mac-ai-fetch-controls .mac-ai-btn:hover { background:rgba(10,132,255,.28); }
+@media(max-width:660px) {
+  .mac-ai-fetch-controls { justify-content:flex-start; }
+  .mac-ai-fetch-note { text-align:left; }
+  .mac-ai-fetched-select { max-width:none; align-items:flex-start; }
+}
+
+/* Keyless AWS account connection: native/macOS-like surfaces, no extra toolbars. */
+.mac-aws-connect-action { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:9px; width:100%; }
+.mac-aws-connect-action .mac-ai-btn { min-height:34px; min-width:128px; }
+.mac-aws-connect-action .mac-ai-btn:disabled { opacity:.65; cursor:wait; }
+.mac-aws-connection-status { color:#52525a; font-size:11px; text-align:right; overflow-wrap:anywhere; }
+.mac-aws-services { display:flex; flex-direction:column; gap:8px; width:100%; min-width:0; max-width:390px; }
+.mac-aws-service { display:grid; grid-template-columns:7px minmax(64px,86px) minmax(0,1fr); align-items:center; column-gap:9px; font-size:11px; }
+.mac-aws-service-indicator { width:7px; height:7px; border-radius:50%; background:#a1a1a6; }
+.mac-aws-service-indicator.ready { background:#30a46c; }
+.mac-aws-service-indicator.available { background:#e5a124; }
+.mac-aws-service-name { font-weight:620; color:#303036; }
+.mac-aws-service-detail { color:#73737b; font-size:10.5px; overflow-wrap:anywhere; }
+.mac-aws-advanced { margin:4px 0 20px; padding:8px 12px; border:1px solid rgba(60,60,67,.12); border-radius:11px; }
+.mac-aws-advanced > summary { cursor:pointer; font-weight:550; color:#63636b; font-size:11px; padding:4px 0; user-select:none; }
+.mac-aws-advanced > .mac-ai-surface { margin:9px 0 0; }
+.mac-aws-advanced > .mac-ai-group { margin:15px 0; }
+[data-theme="dark"] .mac-aws-advanced { border-color:rgba(255,255,255,.13); }
+[data-theme="dark"] .mac-aws-advanced > summary,
+[data-theme="dark"] .mac-aws-service-detail,
+[data-theme="dark"] .mac-aws-connection-status { color:#b0b0b7; }
+[data-theme="dark"] .mac-aws-service-name { color:#ebebf0; }
+@media(max-width:660px) {
+  .mac-aws-connect-action { justify-content:flex-start; }
+  .mac-aws-connection-status { text-align:left; }
+  .mac-aws-services { max-width:100%; }
+}
