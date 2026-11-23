@@ -1924,6 +1924,15 @@ async fn route_lucia_intent(
     state: tauri::State<'_, Arc<AppState>>,
     message: String,
 ) -> Result<agent::intent_router::LuciaIntent, String> {
+    // A clear, explicit user navigation command is not ambiguous intent.
+    // Do not turn "open youtube" into chat when the configured intent model
+    // is unavailable, returns malformed JSON, or classifies it incorrectly.
+    if agent::policy::requested_navigation_url(&message).is_some() {
+        return Ok(agent::intent_router::LuciaIntent {
+            mode: agent::intent_router::LuciaMode::BrowserTask,
+            reason: "Explicit website navigation requested by the user".into(),
+        });
+    }
     let router = state.router.lock().await;
     router.route_lucia_intent(&message, &state.creds)
         .await.map_err(|e| e.to_string())
