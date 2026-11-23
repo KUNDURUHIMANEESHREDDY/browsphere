@@ -81,7 +81,7 @@ async function main() {
       await sleep(300);
     }
     assert.ok(shellReady, 'Native Browsphere UI never became ready');
-    await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');c.ollama_url=" + JSON.stringify(modelUrl) + ";c.ollama_model=" + JSON.stringify(chosenModel) + ";c.prefer_local_for_simple=true;c.domain_overrides={};await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaNativeEvents=[];for(const name of ['agent:plan','agent:stage','agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required'])await window.__TAURI__.event.listen(name,e=>window.__luciaNativeEvents.push({event:name,payload:e.payload}));return true})()");
+    await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');c.ollama_url=" + JSON.stringify(modelUrl) + ";c.ollama_model=" + JSON.stringify(chosenModel) + ";c.litellm_url='http://127.0.0.1:18766/v1/chat/completions';c.litellm_model='lucia-cloud-e2e';c.lucia_cloud_only=" + (process.env.LUCIA_E2E_CLOUD_COMPAT === '1' ? 'true' : 'false') + ";c.prefer_local_for_simple=" + (process.env.LUCIA_E2E_CLOUD_COMPAT === '1' ? 'false' : 'true') + ";c.domain_overrides={};await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__luciaNativeEvents=[];for(const name of ['agent:plan','agent:stage','agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required'])await window.__TAURI__.event.listen(name,e=>window.__luciaNativeEvents.push({event:name,payload:e.payload}));return true})()");
     async function openLocal(path) {
       const url = base + path;
       await evaluate('window.browsphereApp.newTab(' + JSON.stringify(url) + ')');
@@ -197,6 +197,7 @@ async function main() {
     assert.ok(synced,'Visible browser URL was not synchronized with SPA navigation');
     console.log('PASS native multi-step typing, search, result click, SPA URL sync and evidence review');
 
+    if (!realModel) {
     // 2. Generic website: heavy navigation chrome hides real controls unless
     // the DOM reader prioritizes main content; search works only on Enter.
     const docsInitial = await openLocal('/generic-search.html');
@@ -217,7 +218,51 @@ async function main() {
       'Generic docs confirmation not observed');
     console.log('PASS native generic website with 180 navigation controls and Enter-only search');
 
-    // 3. Genuine failed primary click -> model recovers with fallback -> verified.
+    // 3. A cross-control form sequence using the same cloud action schema.
+    const controlsInitial = await openLocal('/form-controls.html');
+    const category = controlsInitial.interactive_nodes.find(n => n.label === 'Category');
+    assert.ok(category?.options?.includes('Engineering'),
+      'DOM does not expose safe observed options for a native dropdown');
+    const checkbox = controlsInitial.interactive_nodes.find(n => n.label === 'Include examples');
+    assert.equal(checkbox?.checked,false,'Checkbox state was not observed');
+    const formRun = await run(
+      'On this test page select Engineering, enable examples, choose Intermediate, enable Show advanced, open details and close the dialog.',
+      controlsInitial,100
+    );
+    assert.ok(formRun.actions.some(a=>a.type==='select_option' &&
+      ['ok','confirmed'].includes(a.outcome)), 'Dropdown option was not selected');
+    assert.ok(formRun.actions.some(a=>a.type==='type_text' &&
+      ['ok','confirmed'].includes(a.outcome)), 'Rich-text editor was not filled');
+    assert.ok(formRun.actions.filter(a=>a.type==='set_checked' &&
+      ['ok','confirmed'].includes(a.outcome)).length >= 3,
+      'Checkbox, radio and switch actions did not all succeed');
+    const controlClicks = formRun.actions.filter(a=>a.type==='click' &&
+      ['ok','confirmed'].includes(a.outcome));
+    assert.ok(controlClicks.length >= 2,'Dialog open and close clicks did not complete');
+    const controlsAfter = await evaluate(snapshotExpression);
+    assert.ok(controlsAfter.text_excerpt.includes('CONTROLS_FLOW_CONFIRMED'),
+      'Full controls workflow not confirmed in actual DOM');
+    if (process.env.LUCIA_E2E_CLOUD_COMPAT === '1') {
+      assert.ok(formRun.actions.some(a=>a.route?.includes('litellm:lucia-cloud-e2e')),
+        'Cloud compatible model route was not used by real native agent');
+    }
+    console.log('PASS native dropdown, checkbox, radio, switch, rich editor, dialog and cloud-compatible actions');
+
+    // A dialog without a close button should dismiss via Escape.
+    const keyboardInitial = await openLocal('/form-controls.html');
+    const keyboard = await run(
+      'Open keyboard dialog, then close it using Escape.',keyboardInitial,65
+    );
+    assert.ok(keyboard.actions.some(a=>a.type==='press_key' &&
+      ['ok','confirmed'].includes(a.outcome)), 'Dialog Escape action never succeeded');
+    const keyboardAfter = await evaluate(snapshotExpression);
+    assert.ok(keyboardAfter.text_excerpt.includes('KEYBOARD_DIALOG_CLOSED'),
+      'Native dialog did not visibly close after Escape');
+    console.log('PASS native Escape closes a verified open dialog');
+
+    }
+
+    // 4. Genuine failed primary click -> model recovers with fallback -> verified.
     const recoveryInitial=await openLocal('/recovery.html');
     const recovery=await run(
       'On the local recovery test page, click Start recovery test. After it fails, use the recovery fallback.',

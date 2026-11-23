@@ -231,6 +231,17 @@ fn build_key_script(node_id: &str, key: &str) -> String {
             form.requestSubmit();
           return {{ success: true, detail: "Enter dispatched to observed search control" }};
         }}
+        const dialog = el.tagName === "DIALOG" && el.open ? el
+          : el.closest("dialog[open]");
+        if (dialog && dialog.open) {{
+          // A synthetic Escape does not trigger WebView2's native dialog
+          // default action. Close only this freshly observed DOM dialog.
+          if (!dialog.dispatchEvent(new Event("cancel", {{ cancelable: true }})))
+            return fail("Dialog prevented Escape cancellation");
+          dialog.close();
+          if (dialog.open) return fail("Dialog is still open after Escape");
+          return {{ success: true, detail: "Observed native dialog closed with Escape" }};
+        }}
         el.focus();
         el.dispatchEvent(new KeyboardEvent("keydown",
           {{ key: "Escape", code: "Escape", bubbles: true, cancelable: true }}));
@@ -241,6 +252,100 @@ fn build_key_script(node_id: &str, key: &str) -> String {
         return fail("Key action failed: " + String(error).slice(0, 120));
       }}
     }})();"#, id_json=id_json, key_json=key_json)
+}
+
+fn build_select_script(node_id: &str, option_label: &str) -> String {
+    let id_json = serde_json::to_string(node_id).unwrap_or_else(|_| "\"\"".into());
+    let label_json = serde_json::to_string(option_label).unwrap_or_else(|_| "\"\"".into());
+    format!(r#"(function() {{
+      const targetId = {id_json}, requestedLabel = {label_json}.trim().toLowerCase();
+      const fail = detail => ({{success:false,detail}});
+      function find(root) {{
+        if (!root) return null;
+        const direct = root.querySelector('[data-aether-id="' + CSS.escape(targetId) + '"]');
+        if (direct) return direct;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+        let el;
+        while ((el = walker.nextNode())) {{
+          if (el.shadowRoot) {{
+            const nested = find(el.shadowRoot);
+            if (nested) return nested;
+          }}
+        }}
+        return null;
+      }}
+      try {{
+        const el = find(document);
+        if (!el || el.tagName !== "SELECT" || !el.isConnected ||
+            el.disabled || el.matches(":disabled") || el.getAttribute("aria-disabled") === "true")
+          return fail("Select target unavailable or disabled");
+        const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
+        if (rect.width < 2 || rect.height < 2 || style.display === "none" ||
+            style.visibility === "hidden") return fail("Select is hidden");
+        const options = Array.from(el.options).filter(o =>
+          !o.disabled && !o.parentElement?.disabled &&
+          (o.textContent || "").replace(/\s+/g, " ").trim().toLowerCase() === requestedLabel);
+        if (options.length !== 1) return fail("Option missing or ambiguous");
+        const option = options[0];
+        if (el.multiple) return fail("Multi-select must be handled separately");
+        const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+        if (setter) setter.call(el, option.value);
+        else el.value = option.value;
+        el.dispatchEvent(new Event("input", {{bubbles:true}}));
+        el.dispatchEvent(new Event("change", {{bubbles:true}}));
+        const chosen = el.selectedOptions[0];
+        if (chosen !== option) return fail("Select did not accept requested option");
+        return {{success:true,detail:"Selected an observed dropdown option"}};
+      }} catch (err) {{
+        return fail("Select action failed: " + String(err).slice(0, 120));
+      }}
+    }})();"#, id_json=id_json, label_json=label_json)
+}
+
+fn build_checked_script(node_id: &str, expected: bool) -> String {
+    let id_json = serde_json::to_string(node_id).unwrap_or_else(|_| "\"\"".into());
+    format!(r#"(function() {{
+      const targetId = {id_json}, expected = {expected};
+      const fail = detail => ({{success:false,detail}});
+      function find(root) {{
+        if (!root) return null;
+        const direct = root.querySelector('[data-aether-id="' + CSS.escape(targetId) + '"]');
+        if (direct) return direct;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+        let el;
+        while ((el = walker.nextNode())) {{
+          if (el.shadowRoot) {{
+            const child = find(el.shadowRoot);
+            if (child) return child;
+          }}
+        }}
+        return null;
+      }}
+      try {{
+        const el = find(document);
+        if (!el || !el.isConnected || el.matches(":disabled") ||
+            el.getAttribute("aria-disabled") === "true") return fail("Toggle unavailable");
+        const style = getComputedStyle(el), rect = el.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2 || style.display === "none" ||
+            style.visibility === "hidden") return fail("Toggle is hidden");
+        const native = el.tagName === "INPUT" && ["checkbox","radio"].includes(el.type);
+        const role = native ? el.type : (el.getAttribute("role") || "").toLowerCase();
+        if (!["checkbox","radio","switch"].includes(role)) return fail("Not a toggle");
+        if (role === "radio" && !expected) return fail("Radio options cannot be unchecked");
+        const current = native ? el.checked
+          : el.getAttribute("aria-checked") === "true" ? true
+          : el.getAttribute("aria-checked") === "false" ? false : null;
+        if (current === null) return fail("Toggle has no observable checked state");
+        if (current === expected) return {{success:true,detail:"Toggle already in requested state"}};
+        el.scrollIntoView({{block:"center",inline:"nearest",behavior:"instant"}});
+        el.click();
+        const after = native ? el.checked : el.getAttribute("aria-checked") === "true";
+        if (after !== expected) return fail("Toggle state did not change as requested");
+        return {{success:true,detail:"Observed toggle state changed"}};
+      }} catch (error) {{
+        return fail("Toggle action failed: " + String(error).slice(0,120));
+      }}
+    }})();"#, id_json=id_json, expected=expected)
 }
 
 fn build_scroll_script(request_id: Uuid, delta_y: i32) -> String {
@@ -349,6 +454,16 @@ pub async fn execute_browser_action(
         BrowserAction::TypeText { node_id, text, .. } => {
             let req_id = Uuid::new_v4();
             let script = build_type_script(req_id, node_id, text);
+            eval_in_active_tab(app, webview_label, pending_results, script, req_id, 1800).await
+        }
+        BrowserAction::SetChecked { node_id, checked, .. } => {
+            let req_id = Uuid::new_v4();
+            let script = build_checked_script(node_id, *checked);
+            eval_in_active_tab(app, webview_label, pending_results, script, req_id, 1800).await
+        }
+        BrowserAction::SelectOption { node_id, option_label } => {
+            let req_id = Uuid::new_v4();
+            let script = build_select_script(node_id, option_label);
             eval_in_active_tab(app, webview_label, pending_results, script, req_id, 1800).await
         }
         BrowserAction::PressKey { node_id, key } => {

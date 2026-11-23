@@ -2597,6 +2597,8 @@ async fn start_agent_run(
                     agent::policy::BrowserAction::Click { .. } => "click",
                     agent::policy::BrowserAction::TypeText { .. } => "type_text",
                     agent::policy::BrowserAction::PressKey { .. } => "press_key",
+                    agent::policy::BrowserAction::SelectOption { .. } => "select_option",
+                    agent::policy::BrowserAction::SetChecked { .. } => "set_checked",
                     agent::policy::BrowserAction::Scroll { .. } => "scroll",
                     agent::policy::BrowserAction::Download { .. } => "download",
                     agent::policy::BrowserAction::Complete { .. } => "complete",

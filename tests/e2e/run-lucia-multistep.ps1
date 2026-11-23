@@ -1,8 +1,10 @@
 # Native Lucia end-to-end tests with a loopback-only model and fixture.
 # Never uses the user's actual browser data, accounts, or API credentials.
-param([string]$ExecutablePath = "")
+param([string]$ExecutablePath = "", [switch]$CloudCompat)
 
 $ErrorActionPreference = 'Stop'
+$previousCloudMode = $env:LUCIA_E2E_CLOUD_COMPAT
+if ($CloudCompat) { $env:LUCIA_E2E_CLOUD_COMPAT = '1' }
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $root
 
@@ -92,6 +94,7 @@ try {
 } finally {
     if ($appProcess) { Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue }
     if ($modelProcess) { Stop-Process -Id $modelProcess.Id -Force -ErrorAction SilentlyContinue }
+    $env:LUCIA_E2E_CLOUD_COMPAT = $previousCloudMode
     if (Test-Path $serverOut) { Get-Content $serverOut -Tail 25 }
     if (Test-Path $serverErr) {
         $errors = Get-Content $serverErr -Tail 25

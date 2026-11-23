@@ -18,6 +18,8 @@ pub enum BrowserAction {
     Click { node_id: String, element_label: String, is_submit: bool },
     TypeText { node_id: String, text: String, is_sensitive: bool },
     PressKey { node_id: String, key: String },
+    SelectOption { node_id: String, option_label: String },
+    SetChecked { node_id: String, checked: bool, #[serde(default)] element_label: String },
     Scroll { delta_y: i32 },
     Download { url: String, suggested_filename: Option<String> },
     Complete { summary: String },
@@ -68,6 +70,14 @@ impl TraceEntry {
             BrowserAction::Download { url, .. } =>
                 BrowserAction::Download {
                     url: site_only(&url), suggested_filename: None
+                },
+            BrowserAction::SetChecked { node_id, checked, .. } =>
+                BrowserAction::SetChecked {
+                    node_id, checked, element_label: "[observed toggle]".into()
+                },
+            BrowserAction::SelectOption { node_id, .. } =>
+                BrowserAction::SelectOption {
+                    node_id, option_label: "[observed option]".into()
                 },
             BrowserAction::Click { node_id, is_submit, .. } =>
                 BrowserAction::Click {
@@ -229,6 +239,31 @@ pub fn evaluate_policy(
                 reason: format!("Unsupported keyboard action on {node_id}"),
             }),
         },
+        BrowserAction::SetChecked { node_id, element_label, .. } => {
+            let label = element_label.to_ascii_lowercase();
+            let consequential = ["consent", "terms", "privacy policy", "payment",
+                "purchase", "delete", "revoke", "transfer", "subscribe", "sign up",
+                "authorize", "share my data"];
+            if consequential.iter().any(|word| label.contains(word)) {
+                (RiskLevel::High, PolicyDecision::RequireApproval {
+                    reason: format!("Consent or consequential toggle at {node_id}"),
+                })
+            } else {
+                (RiskLevel::Medium, PolicyDecision::Allow)
+            }
+        }
+        BrowserAction::SelectOption { node_id, option_label } => {
+            let description = option_label.to_ascii_lowercase();
+            let consequential = ["delete", "revoke", "purchase", "transfer", "close account",
+                "publish", "consent", "cancel subscription"];
+            if consequential.iter().any(|word| description.contains(word)) {
+                (RiskLevel::High, PolicyDecision::RequireApproval {
+                    reason: format!("Consequential option selection at {node_id}"),
+                })
+            } else {
+                (RiskLevel::Medium, PolicyDecision::Allow)
+            }
+        }
         BrowserAction::Scroll { .. } | BrowserAction::Complete { .. } => {
             (RiskLevel::Low, PolicyDecision::Allow)
         }
@@ -377,6 +412,25 @@ pub fn evaluate_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn observed_control_policy_requires_approval_for_consequential_changes() {
+        let simple = BrowserAction::SetChecked {
+            node_id: "simple".into(), checked:true, element_label:"Include examples".into()
+        };
+        assert!(matches!(evaluate_policy("https://example.org", &simple, &[]).1,
+            PolicyDecision::Allow));
+        let consent = BrowserAction::SetChecked {
+            node_id: "consent".into(), checked:true, element_label:"Agree to terms".into()
+        };
+        assert!(matches!(evaluate_policy("https://example.org", &consent, &[]).1,
+            PolicyDecision::RequireApproval { .. }));
+        let blocked = BrowserAction::SelectOption {
+            node_id: "option".into(), option_label:"Delete account".into()
+        };
+        assert!(matches!(evaluate_policy("https://example.org", &blocked, &[]).1,
+            PolicyDecision::RequireApproval { .. }));
+    }
+
     #[test]
     fn bounded_keyboard_policy() {
         for key in ["Enter", "Escape"] {

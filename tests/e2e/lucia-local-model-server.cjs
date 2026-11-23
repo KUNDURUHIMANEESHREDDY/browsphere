@@ -54,6 +54,46 @@ function decideAction(prompt) {
     thought: 'Select the next action from the freshly observed local test page.',
     action
   });
+  if (prompt.includes('Original user goal: Open keyboard dialog')) {
+    if (prompt.includes('KEYBOARD_DIALOG_CLOSED'))
+      return reply({type:'complete',summary:'Observed dialog closed after Escape'});
+    if (prompt.includes('Keyboard dialog is open') && has('Keyboard dialog'))
+      return reply({type:'press_key',node_id:has('Keyboard dialog').node_id,key:'Escape'});
+    if (has('Open keyboard dialog'))
+      return reply({type:'click',node_id:has('Open keyboard dialog').node_id,
+        element_label:'Open keyboard dialog',is_submit:false});
+  }
+  if (prompt.includes('CONTROLS_FLOW_CONFIRMED')) {
+    return reply({type:'complete',summary:'Observed full browser controls confirmation'});
+  }
+  if (prompt.includes('Dialog is open') && has('Close details')) {
+    return reply({type:'click',node_id:has('Close details').node_id,
+      element_label:'Close details',is_submit:false});
+  }
+  if (prompt.includes('Advanced is enabled') &&
+      prompt.includes('Dialog not opened') && has('Open details')) {
+    return reply({type:'click',node_id:has('Open details').node_id,
+      element_label:'Open details',is_submit:false});
+  }
+  if (has('Category') && !prompt.includes('Selected category: Engineering')) {
+    return reply({type:'select_option',node_id:has('Category').node_id,option_label:'Engineering'});
+  }
+  if (has('Include examples') && !prompt.includes('Examples enabled')) {
+    return reply({type:'set_checked',node_id:has('Include examples').node_id,
+      element_label:'Include examples',checked:true});
+  }
+  if (has('Intermediate') && !prompt.includes('Mode: Intermediate')) {
+    return reply({type:'set_checked',node_id:has('Intermediate').node_id,
+      element_label:'Intermediate',checked:true});
+  }
+  if (has('Draft note') && !prompt.includes('Note drafted')) {
+    return reply({type:'type_text',node_id:has('Draft note').node_id,
+      text:'Automated note',is_sensitive:false});
+  }
+  if (has('Show advanced') && !prompt.includes('Advanced is enabled')) {
+    return reply({type:'set_checked',node_id:has('Show advanced').node_id,
+      element_label:'Show advanced',checked:true});
+  }
   if (prompt.includes('GENERIC_DOCS_CONFIRMED')) {
     return reply({type:'complete',summary:'Observed documentation reference confirmation'});
   }
@@ -107,6 +147,16 @@ function verifyEvidence(payload) {
     ? data.observed_web_pages_untrusted : [];
   const accepted = [
     {
+      token:'KEYBOARD_DIALOG_CLOSED',
+      quote:'KEYBOARD_DIALOG_CLOSED. Native dialog dismissed by Escape.',
+      claim:'Native dialog closed after observed Escape action'
+    },
+    {
+      token:'CONTROLS_FLOW_CONFIRMED',
+      quote:'CONTROLS_FLOW_CONFIRMED. Engineering selected, examples enabled, Intermediate radio selected, advanced switch enabled and dialog opened then closed, with note drafted.',
+      claim:'Browser dropdown, checkbox, radio, switch and dialog workflow completed'
+    },
+    {
       token:'GENERIC_DOCS_CONFIRMED',
       quote:'GENERIC_DOCS_CONFIRMED. API reference opened successfully after an Enter-key search.',
       claim:'API reference opened after autonomous documentation search'
@@ -159,10 +209,23 @@ function runLocalModel(req, res) {
   if (req.method === 'GET' && req.url === '/api/tags') {
     return send(res, 200, {models:[{name:'lucia-local-e2e',model:'lucia-local-e2e'}]});
   }
-  if (req.method !== 'POST' || !['/api/chat','/api/generate'].includes(req.url)) {
+  if (req.method !== 'POST' ||
+      !['/api/chat','/api/generate','/v1/chat/completions'].includes(req.url)) {
     return send(res, 404, {error:'Not found'});
   }
   boundedBody(req).then(body => {
+    if (req.url === '/v1/chat/completions') {
+      const messages = Array.isArray(body.messages) ? body.messages : [];
+      const system = String(messages.find(m => m.role === 'system')?.content || '');
+      const user = String(messages.find(m => m.role === 'user')?.content || '');
+      const answer = system.includes('browser agent working under Lucia')
+        ? JSON.stringify(decideAction(user))
+        : chat(body).message.content;
+      return send(res, 200, {
+        id:'chatcmpl-lucia-fixture',model:'lucia-cloud-e2e',
+        choices:[{index:0,message:{role:'assistant',content:answer},finish_reason:'stop'}]
+      });
+    }
     if (req.url === '/api/chat') return send(res, 200, chat(body));
     const output = decideAction(String(body.prompt || ''));
     return send(res, 200, {model:'lucia-local-e2e',response:JSON.stringify(output),done:true});
@@ -176,7 +239,8 @@ function runFixture(req, res) {
     '/generic-search.html':'generic-search.html',
     '/recovery.html':'recovery.html',
     '/generic-controls.html':'generic-controls.html',
-    '/generic-document.html':'generic-document.html'
+    '/generic-document.html':'generic-document.html',
+    '/form-controls.html':'form-controls.html'
   }[new URL(req.url || '/', 'http://127.0.0.1').pathname];
   if (!exact || req.method !== 'GET') return send(res, 404, 'Not found', 'text/plain');
   try {

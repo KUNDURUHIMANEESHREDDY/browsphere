@@ -19,6 +19,10 @@ pub struct DomNodeSummary {
     pub tag: String,
     pub role: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
     pub is_submit: bool,
@@ -48,10 +52,10 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   const MAX_TEXT = {max_text_chars};
 
   const SENSITIVE_RE = /(password|passwd|passcode|otp|one[-_]?time|cvv|cvc|card[-_]?num|cc[-_]|ssn|secret|api[-_]?key|token)/i;
-  const INTERACTIVE_TAGS = new Set(["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "SUMMARY", "OPTION"]);
+  const INTERACTIVE_TAGS = new Set(["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "SUMMARY", "OPTION", "DIALOG"]);
   const INTERACTIVE_ROLES = new Set([
     "button", "link", "textbox", "searchbox", "combobox", "listbox",
-    "menuitem", "checkbox", "radio", "switch", "tab", "slider"
+    "menuitem", "checkbox", "radio", "switch", "tab", "slider", "dialog"
   ]);
 
   function isVisible(el) {{
@@ -69,7 +73,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
 
   function isSensitiveField(el) {{
     const tag = el.tagName;
-    if (tag !== "INPUT" && tag !== "TEXTAREA") return false;
+    if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") return false;
     const type = (el.getAttribute("type") || "").toLowerCase();
     if (type === "password") return true;
     const ac = (el.getAttribute("autocomplete") || "").toLowerCase();
@@ -101,6 +105,10 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
       if (txt) return txt.slice(0, 120);
     }}
 
+    const wrappingLabel = el.closest("label");
+    if (wrappingLabel && wrappingLabel.innerText.trim()) {{
+      return wrappingLabel.innerText.replace(/\s+/g, " ").trim().slice(0, 120);
+    }}
     if (el.id) {{
       const root = el.getRootNode();
       const selector = `label[for="${{CSS.escape(el.id)}}"]`;
@@ -207,8 +215,23 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
         nodes.push({{
           node_id: nodeId,
           tag: current.tagName.toLowerCase(),
-          role: (current.getAttribute("role") || current.tagName).toLowerCase(),
+          role: (current.getAttribute("role") ||
+            (current.isContentEditable ? "textbox" :
+            ((current.tagName === "INPUT" && ["checkbox", "radio"].includes(typeAttr))
+              ? typeAttr : current.tagName))).toLowerCase(),
           label: computeAccessibleName(current),
+          options: current.tagName === "SELECT"
+            ? Array.from(current.options)
+                .filter(option => !option.disabled && !option.parentElement?.disabled)
+                .map(option => (option.textContent || "").replace(/\s+/g, " ").trim().slice(0, 100))
+                .filter(Boolean).slice(0, 32)
+            : [],
+          checked: (current.tagName === "INPUT" && ["checkbox", "radio"].includes(typeAttr))
+            ? current.checked === true
+            : ["checkbox", "radio", "switch"].includes((current.getAttribute("role") || "").toLowerCase())
+              ? (current.getAttribute("aria-checked") === "true" ? true
+                : current.getAttribute("aria-checked") === "false" ? false : null)
+              : null,
           // Retain same-origin destinations but strip arbitrary URL query
           // parameters, which might include OAuth codes or other secrets.
           // YouTube watch links retain only the video ID for DOM-based clicks.

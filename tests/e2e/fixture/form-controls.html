@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Browser Controls Lab</title>
+<style>
+body{font:16px system-ui;background:#f7f7f8;color:#1b1b1c;margin:0}
+main{max-width:660px;margin:30px auto;padding:25px;background:white;border-radius:12px}
+label{display:block;padding:12px 0}
+button,select{font:inherit;padding:9px;margin:8px 0}
+output{display:block;padding:4px 0}
+dialog{padding:24px;border:1px solid #ccc;border-radius:12px}
+#draft{min-height:38px;padding:8px;border:1px solid #bbb;border-radius:6px}
+[role=switch]{background:#eaeaea;border:1px solid #ddd;border-radius:15px}
+</style></head>
+<body><nav aria-label="Site navigation"><a href="#main">Skip to content</a></nav>
+<main id="main">
+<h1>Browser Controls Lab</h1>
+<p>This local test page uses actual dropdown, checkbox, radio, switch, and dialog controls.</p>
+<label for="category">Category</label>
+<select id="category" aria-label="Category">
+  <option value="">Choose a category</option>
+  <option value="engineering">Engineering</option>
+  <option value="design">Design</option>
+</select>
+<output id="category-status">Selected category: none</output>
+<label for="examples"><input id="examples" type="checkbox"> Include examples</label>
+<output id="examples-status">Examples disabled</output>
+<fieldset>
+<legend>Experience level</legend>
+<label for="basic"><input id="basic" type="radio" name="level" checked> Basic</label>
+<label for="intermediate"><input id="intermediate" type="radio" name="level"> Intermediate</label>
+</fieldset>
+<output id="level-status">Mode: Basic</output>
+<button id="advanced" type="button" role="switch" aria-label="Show advanced"
+  aria-checked="false">Show advanced</button>
+<output id="advanced-status">Advanced is disabled</output>
+<div id="draft" contenteditable="true" role="textbox" aria-label="Draft note" tabindex="0"></div>
+<output id="draft-status">Note is empty</output>
+<button id="open-details" type="button">Open details</button>
+<output id="dialog-status">Dialog not opened</output>
+<dialog id="details" aria-label="Details dialog">
+  <h2>Documentation details</h2>
+  <p>The details dialog is open.</p>
+  <button id="close-details" type="button">Close details</button>
+</dialog>
+<button id="open-keyboard-dialog" type="button">Open keyboard dialog</button>
+<output id="keyboard-dialog-status">Keyboard dialog not opened</output>
+<dialog id="keyboard-dialog" aria-label="Keyboard dialog" tabindex="0">
+  <h2>Keyboard-only dialog</h2>
+  <p>Press Escape to close this dialog.</p>
+</dialog>
+<p id="completed"></p>
+</main>
+<script>
+const selected = document.getElementById('category');
+const examples = document.getElementById('examples');
+const basic = document.getElementById('basic');
+const intermediate = document.getElementById('intermediate');
+const advanced = document.getElementById('advanced');
+const draft = document.getElementById('draft');
+const keyboardDialog = document.getElementById('keyboard-dialog');
+const dialog = document.getElementById('details');
+const done = document.getElementById('completed');
+let dialogOpened = false, dialogClosed = false;
+function complete() {
+ if(selected.value === 'engineering' && examples.checked &&
+    intermediate.checked && advanced.getAttribute('aria-checked') === 'true' &&
+    draft.textContent === 'Automated note' &&
+    dialogOpened && dialogClosed && !dialog.open) {
+   done.textContent = 'CONTROLS_FLOW_CONFIRMED. Engineering selected, examples enabled, Intermediate radio selected, advanced switch enabled and dialog opened then closed, with note drafted.';
+ }
+}
+selected.addEventListener('change', () => {
+ document.getElementById('category-status').textContent =
+   'Selected category: ' + (selected.selectedOptions[0]?.textContent?.trim() || 'none');
+ complete();
+});
+examples.addEventListener('change', () => {
+ document.getElementById('examples-status').textContent =
+   examples.checked ? 'Examples enabled' : 'Examples disabled';
+ complete();
+});
+intermediate.addEventListener('change', () => {
+ document.getElementById('level-status').textContent =
+   intermediate.checked ? 'Mode: Intermediate' : 'Mode: Basic';
+ complete();
+});
+advanced.addEventListener('click', () => {
+ const enabled = advanced.getAttribute('aria-checked') !== 'true';
+ advanced.setAttribute('aria-checked', String(enabled));
+ document.getElementById('advanced-status').textContent =
+    enabled ? 'Advanced is enabled' : 'Advanced is disabled';
+ complete();
+});
+draft.addEventListener('input', () => {
+ document.getElementById('draft-status').textContent =
+   draft.textContent === 'Automated note' ? 'Note drafted' : 'Note is empty';
+ complete();
+});
+document.getElementById('open-keyboard-dialog').addEventListener('click', () => {
+ document.getElementById('keyboard-dialog-status').textContent = 'Keyboard dialog is open';
+ keyboardDialog.showModal();
+});
+keyboardDialog.addEventListener('close', () => {
+ document.getElementById('keyboard-dialog-status').textContent =
+   'KEYBOARD_DIALOG_CLOSED. Native dialog dismissed by Escape.';
+});
+document.getElementById('open-details').addEventListener('click', () => {
+ dialogOpened = true;
+ document.getElementById('dialog-status').textContent = 'Dialog is open';
+ dialog.showModal();
+});
+document.getElementById('close-details').addEventListener('click', () => {
+ dialogClosed = true;
+ dialog.close();
+ document.getElementById('dialog-status').textContent = 'Dialog closed successfully';
+ complete();
+});
+</script></body></html>

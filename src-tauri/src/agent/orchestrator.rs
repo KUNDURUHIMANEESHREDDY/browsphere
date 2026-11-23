@@ -46,6 +46,8 @@ impl Specialist {
             Self::Verification => matches!(action, BrowserAction::Complete { .. }),
             Self::Research | Self::Comparison | Self::Data => match action {
                 BrowserAction::TypeText { is_sensitive, .. } => !is_sensitive,
+                BrowserAction::SelectOption { .. } => true,
+                BrowserAction::SetChecked { .. } => false,
                 BrowserAction::PressKey { key, .. } => matches!(key.as_str(), "Enter" | "Escape"),
                 BrowserAction::Download { .. } => false,
                 BrowserAction::Click { is_submit, .. } => !is_submit,
@@ -514,7 +516,7 @@ mod tests {
         page.interactive_nodes.push(crate::agent::dom_extractor::DomNodeSummary {
             href: None,
             node_id: "query".into(), tag: "input".into(), role: "searchbox".into(),
-            label: "Search this site".into(), is_submit: false, is_sensitive: false, bbox: None
+            label: "Search this site".into(), is_submit: false, is_sensitive: false, options: vec![], checked: None, bbox: None
         });
         let query = BrowserAction::TypeText {
             node_id: "query".into(), text: "web research".into(), is_sensitive: false
