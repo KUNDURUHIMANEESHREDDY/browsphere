@@ -165,22 +165,24 @@
         isThinking = true;
         setLuciaStatus('Lucia is thinking…');
         try {
-          // The configured LLM decides whether this is conversation or an
-          // explicit browser task. If classification is unavailable, prefer
-          // a harmless chat request, not an unrequested browser action.
-          var intent = { mode: 'chat' };
+          // Never silently downgrade an action request to chat when the
+          // classifier is offline, fails, or returns an invalid response.
+          // A real, explicit chat classification remains ordinary conversation.
+          var intent;
           if (forceTask === true) {
-            // Explicit Run Task should stay a browser-agent request.
             intent = { mode: 'browser_task' };
           } else {
             try {
               intent = await invoke('route_lucia_intent', { message: text });
             } catch (routeError) {
-              console.warn('Lucia intent model unavailable; using chat mode:', routeError);
+              throw new Error('Lucia could not classify this request. No task was started. Check the selected AI model and retry. Details: ' + String(routeError));
             }
           }
+          if (!intent || (intent.mode !== 'chat' && intent.mode !== 'browser_task')) {
+            throw new Error('Lucia returned an invalid task classification. No task was started.');
+          }
 
-          if (intent && intent.mode === 'browser_task') {
+          if (intent.mode === 'browser_task') {
             var snapshot = null;
             try { snapshot = await invoke('capture_live_snapshot'); } catch (_) {}
             if (!snapshot) {

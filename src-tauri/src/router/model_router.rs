@@ -366,7 +366,8 @@ User text: <text>{}</text>"#,
     }
 
     /// Ask the user's configured LLM whether the request is conversation
-    /// or actually requests browser actions. Fail closed to chat.
+    /// or actually requests browser actions. Unavailable or malformed model
+    /// responses are errors, never implicit chat classifications.
     pub async fn route_lucia_intent(
         &self,
         message: &str,
@@ -378,7 +379,9 @@ User text: <text>{}</text>"#,
         let raw = self.model_structured_response(
             LuciaIntent::system_prompt(), message, creds
         ).await?;
-        Ok(LuciaIntent::parse(&raw).unwrap_or_else(LuciaIntent::chat_fallback))
+        LuciaIntent::parse(&raw).ok_or_else(|| anyhow::anyhow!(
+            "Lucia's intent model returned an invalid classification. No task was started. Check the selected model and retry."
+        ))
     }
 
     /// The model chooses task-specific specialists and objectives. Rust
