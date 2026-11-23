@@ -1,7 +1,6 @@
 # Browsphere — AI-Native Windows Desktop Browser (Tauri v2 + WebView2 + Rust)
 
 A production-structured Windows desktop browser scaffold built with **Rust**, **Tauri v2**, and **WebView2**, featuring:
-- **macOS-inspired light minimalist UI** with a **top-right AI Quick Chat popover** (no permanent right sidebar) and **non-intrusive background execution**.
 - **Policy-Gated ReAct Browsing Agent** with deterministic risk classification (`low`, `medium`, `high`, `critical`), human-in-the-loop approval channels, untrusted page-data tagging, and step-by-step **execution trace logs**.
 - **Hybrid Model Router** supporting local **Ollama** (e.g., `qwen3.5:4b`) and **LiteLLM** proxy/multi-provider endpoints with per-domain routing rules.
 - **SQLite WAL** (`PRAGMA journal_mode = WAL;`) persistence for browsing history, downloads, agent runs, and execution traces.
