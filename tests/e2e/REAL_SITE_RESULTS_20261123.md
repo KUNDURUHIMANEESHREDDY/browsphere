@@ -62,3 +62,15 @@ Once the selected 9Router model is usable again, test multiple genuinely distinc
 - Separate native cloud-compatible simulated-model regression exercised multi-step search, SPA transitions, forms, recovery, assigned-tab behavior and independent evidence checks, and **passed**. It does not count as real 9Router inference.
 
 **Remaining gate:** When 9Router's quota actually permits a series of model calls, perform repeated complete agent-driven search/inspect/verify workflows on more than one external site. Record observed action traces and destination URLs. Until then unrestricted website autonomy remains unverified. Run tests in isolated profiles and preserve the approval checks for consequential actions.
+
+## Follow-up: provider diagnostics and live-site retest (23 November 2026)
+
+- Updated `src-tauri/src/router/model_router.rs` to return clear, sanitized errors for HTTP 429, 401/403 and temporary upstream failures from both planning/connection requests and browser-action inference. A numeric `Retry-After` in the 1–3600-second range may be reported; raw provider responses, page content and secrets are not displayed. This does not bypass 9Router quotas, change providers, or weaken action approval policy.
+- Added regression coverage for rate-limit error descriptions, authentication errors, temporary outages and malformed retry-delay headers.
+- `cargo test --workspace --locked --quiet`: **126 passed, 0 failed, 5 ignored** in the final rerun on the current local working tree (which also contains separate, uncommitted agent work).
+- `node --test tests/lucia-*.test.cjs tests/browser-state.test.cjs`: **16 passed, 0 failed**; Windows debug native build passed.
+- Genuine 9Router `oc/hy4-flash-free` + native WebView2 Wiktionary run: the real page loaded with 120 interactive controls; the run started and returned a UUID, but **the provider responded HTTP 429 before producing any action**. Final status correctly reported `failed` with zero model-driven actions and no verified destination.
+- Browser-only public website navigation: **5/5** observed and verified on Python Docs, MDN Web Docs, Wiktionary, GitHub Docs, and Hacker News. This proves native page controls, not model reasoning.
+- Native cloud-compatible **simulated-model** multi-step fixture: **passed** search, typing, clicks, delayed SPA state, widgets, recovery, tab switching/closure and evidence verification. Not a real hosted-model success.
+
+**Production gate remains open:** no repeatable real-model tasks on multiple external websites were demonstrated in this run. Do not count browser-only or simulated-model passes as proof of autonomous model intelligence. Reattempt real-model tasks only when the authorized 9Router provider permits requests.

@@ -145,6 +145,45 @@ async fn send_cloud_inference(
     anyhow::bail!("Cloud inference retries exhausted")
 }
 
+/// Provider errors shown to Lucia must be actionable and must never
+/// contain raw provider JSON, which could echo prompts or credentials.
+fn cloud_inference_error(status: reqwest::StatusCode, retry_after: Option<&str>) -> String {
+    match status.as_u16() {
+        429 => {
+            let delay = retry_after
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|secs| (1..=3600).contains(secs));
+            match delay {
+                Some(secs) => format!(
+                    "Selected cloud model is rate-limited (HTTP 429). Provider requested a {secs}-second retry delay. Lucia stopped without changing providers; retry after the provider allows requests."
+                ),
+                None => "Selected cloud model is rate-limited (HTTP 429). Lucia stopped without changing providers; check the provider quota and retry when service is available.".into(),
+            }
+        }
+        401 | 403 => format!(
+            "Selected cloud model rejected authentication or access (HTTP {}). Check the model and endpoint credentials in Settings > AI & ML.",
+            status.as_u16()
+        ),
+        408 | 502 | 503 | 504 => format!(
+            "Selected cloud model is temporarily unavailable (HTTP {}). The request did not complete; retry when the provider is responsive.",
+            status.as_u16()
+        ),
+        _ => format!(
+            "Selected cloud model returned HTTP {}. Check its configured endpoint, model access and provider status.",
+            status.as_u16()
+        ),
+    }
+}
+
+fn require_cloud_success(response: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let retry_after = response.headers().get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok());
+    anyhow::bail!("{}", cloud_inference_error(response.status(), retry_after))
+}
+
 fn cloud_action_payload(
     model: &str,
     system: &str,
@@ -341,7 +380,7 @@ impl ModelRouter {
             if let Some(key) = key {
                 req = req.bearer_auth(key);
             }
-            let response = send_cloud_inference(req).await?.error_for_status()?;
+            let response = require_cloud_success(send_cloud_inference(req).await?)?;
             let body: serde_json::Value = response.json().await?;
             let answer = body.pointer("/choices/0/message/content").and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Provider response has no choices[0].message.content"))?;
@@ -435,7 +474,7 @@ User text: <text>{}</text>"#,
                 "max_tokens": 1000
             }));
             if let Some(secret) = key { req = req.bearer_auth(secret); }
-            let response = send_cloud_inference(req).await?.error_for_status()?;
+            let response = require_cloud_success(send_cloud_inference(req).await?)?;
             let body: serde_json::Value = response.json().await?;
             Ok(body.pointer("/choices/0/message/content").and_then(|v| v.as_str())
                 .unwrap_or("").to_string())
@@ -738,15 +777,14 @@ Example: {{"thought":"Visit the website requested by the user","action":{{"type"
             })?;
             let status = resp.status();
             if !status.is_success() {
-                // No repeat on rate limits, authentication errors or provider
-                // failures; do not include raw provider content in diagnostics.
-                let err_json = resp.json::<serde_json::Value>().await.ok();
-                let code = err_json.as_ref().and_then(|v|
-                    v.pointer("/error/code").or_else(|| v.pointer("/error/type"))
-                ).and_then(|v| v.as_str()).unwrap_or("unspecified");
+                // Avoid returning raw provider text, which could contain
+                // copied webpage content or credentials. Distinguish quota
+                // failures from errors in Lucia's actual browser controls.
+                let retry_after = resp.headers().get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok());
                 anyhow::bail!(
-                    "Browser-action request failed for {route_label}: HTTP {} ({code}). Check model availability, API permissions, quota and JSON mode support in Settings > AI & ML.",
-                    status.as_u16()
+                    "Browser-action request failed for {route_label}: {}",
+                    cloud_inference_error(status, retry_after)
                 );
             }
             let val = resp.json::<serde_json::Value>().await.map_err(|_| {
@@ -1086,6 +1124,23 @@ mod tests {
         assert!(matches!(action, BrowserAction::Navigate { url } if url == "https://example.org/"));
         assert_eq!(route, "litellm:fixture-cloud-model");
         server.await.unwrap();
+    }
+
+    #[test]
+    fn cloud_provider_errors_explain_quota_without_leaking_provider_content() {
+        let quota = cloud_inference_error(reqwest::StatusCode::TOO_MANY_REQUESTS, None);
+        assert!(quota.contains("HTTP 429"));
+        assert!(quota.contains("without changing providers"));
+        assert!(quota.contains("provider quota"));
+        let retry = cloud_inference_error(reqwest::StatusCode::TOO_MANY_REQUESTS, Some("120"));
+        assert!(retry.contains("120-second retry delay"));
+        assert!(!cloud_inference_error(reqwest::StatusCode::TOO_MANY_REQUESTS, Some("not-a-number"))
+            .contains("not-a-number"));
+        let auth = cloud_inference_error(reqwest::StatusCode::UNAUTHORIZED, None);
+        assert!(auth.contains("credentials"));
+        assert!(!auth.contains("secret"));
+        let unavailable = cloud_inference_error(reqwest::StatusCode::SERVICE_UNAVAILABLE, None);
+        assert!(unavailable.contains("temporarily unavailable"));
     }
 
     #[test]
