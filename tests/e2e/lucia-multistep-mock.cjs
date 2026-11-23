@@ -120,6 +120,33 @@ async function main() {
       return {actions,report};
     }
 
+    // 0. Non-YouTube website: 160 navigation links precede the actual content.
+    // Test real native DOM prioritization, image-only links, unique control IDs,
+    // Shadow DOM labels and article text—not model-supplied page descriptions.
+    const generic = await openLocal('/generic-controls.html');
+    const controls = generic.interactive_nodes || [];
+    const findLabel = label => controls.find(n => n.label === label);
+    assert.ok(generic.text_excerpt.startsWith('INDEPENDENT_SITE_CONTENT:'),
+      'Main article content should precede unrelated global navigation');
+    assert.ok(findLabel('Robotics reference article'),
+      'Image-only link must expose an accessible label');
+    assert.ok(findLabel('Search robotics documentation'),
+      'Shadow-root aria-labelledby input must be observed');
+    assert.ok(findLabel('Search docs'),
+      'Open Shadow DOM button must be observed');
+    const duplicates = controls.filter(n => n.label === 'Show first section' ||
+      n.label === 'Show second section');
+    assert.equal(duplicates.length,2, 'Both initially duplicate-ID buttons must be observed');
+    assert.notEqual(duplicates[0].node_id, duplicates[1].node_id,
+      'Different controls may never share a live DOM node ID');
+    assert.ok(controls.slice(0,8).some(n => n.label === 'Robotics reference article'),
+      'Semantically relevant content should precede 160 unrelated site-menu links');
+    assert.ok(controls.length<=120, 'Native DOM observation must respect its node budget');
+    const documentPage = await openLocal('/generic-document.html');
+    assert.ok(documentPage.text_excerpt.includes('GENERAL_LINK_DESTINATION_CONFIRMED'),
+      'Generic linked article must expose readable success evidence');
+    console.log('PASS generic sites: main-content prioritization, image links, Shadow DOM, duplicate IDs, linked article');
+
     // 1. Search text -> submit local search -> click result -> SPA URL -> verified.
     const initial=await openLocal('/multistep.html');
     const search=await run(
