@@ -52,13 +52,26 @@ async function main() {
   if(action==='help')return output({message:
     'Usage: node tests/e2e/cli-browsphere.cjs [--json] doctor|snapshot|test. Local isolated Windows test instance only.'});
   if(action==='doctor'){
-    const [cdp,model,fixture]=await Promise.all([
-      request('http://127.0.0.1:'+cdpPort+'/json'),
+    const [model,fixture]=await Promise.all([
       request('http://127.0.0.1:'+mockPort+'/health'),
       request('http://127.0.0.1:'+fixturePort+'/health')]);
-    const browser=Boolean(cdp.value?.some?.(t=>t.type==='page'&&t.url?.includes('tauri.localhost')));
+    let cdp, browser=false;
+    // A WebView2 debugging port opens before the app's main page necessarily
+    // exists. Poll for the real renderer rather than failing that race.
+    for(let attempt=0;attempt<30;attempt++){
+      cdp=await request('http://127.0.0.1:'+cdpPort+'/json');
+      browser=Boolean(cdp.value?.some?.(t=>t.type==='page'&&t.url?.includes('tauri.localhost')));
+      if(browser)break;
+      await new Promise(r=>setTimeout(r,400));
+    }
     const ok=browser&&model.ok&&fixture.ok;
+    const targets=(cdp.value||[]).slice(0,10).map(t=>({
+      type:t.type,title:String(t.title||'').slice(0,70),
+      // Never log URLs' query values or CDP websocket tokens.
+      origin:String(t.url||'').split('?')[0].slice(0,140)
+    }));
     return output({browserConnected:browser,modelConnected:model.ok,fixtureConnected:fixture.ok,
+      targets:ok?undefined:targets,
       message:ok?'Native Browsphere test instance and mock dependencies are ready':'Native test dependencies are not ready'},ok);
   }
   if(action==='snapshot'){
