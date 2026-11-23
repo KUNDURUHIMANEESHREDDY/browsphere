@@ -2326,6 +2326,36 @@ async fn start_agent_run(
 ) -> Result<Uuid, String> {
     let private_mode = is_private.unwrap_or(false);
     let memory_enabled = allow_learning.unwrap_or(false) && !private_mode;
+
+    // A fresh Browsphere start page is rendered by the chrome WebView, not a
+    // native website WebView2. Agent actions need a real child tab to control.
+    // The older end-to-end test created that child manually, so it missed this
+    // normal first-run path. Only an explicit user navigation may bootstrap it.
+    let agent_label = state.tabs.active_webview_label().await;
+    let no_visible_site = app.get_webview(&agent_label).is_none()
+        || state.tabs.bounds.lock().await.hidden;
+    if no_visible_site {
+        if let Some(target) = agent::policy::requested_navigation_url(&goal) {
+            let tab_id = state.tabs.active_tab_id.lock().await.clone();
+            let mut bounds = state.tabs.bounds.lock().await.clone();
+            bounds.hidden = false;
+            open_or_navigate_tab(
+                app.clone(),
+                app.state::<Arc<AppState>>(),
+                tab_id,
+                target.to_string(),
+                Some(bounds),
+                Some(private_mode),
+            ).await?;
+            agent_label = state.tabs.active_webview_label().await;
+        } else {
+            return Err("Lucia has no live website tab to control. Open a website first, or ask Lucia to open a specific website.".into());
+        }
+    }
+    if app.get_webview(&agent_label).is_none() {
+        return Err("Lucia could not attach to the active browser WebView2 tab.".into());
+    }
+
     if let Some(prev) = state.active_cancel.lock().await.take() {
         prev.cancel();
     }
