@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::Emitter;
@@ -76,6 +77,17 @@ fn bind_action_to_live_dom(
 fn stop_after_approval_outcome(outcome: &str) -> bool {
     matches!(outcome, "REJECTED BY USER" | "APPROVAL TIMED OUT"
         | "ABORTED: approval channel closed" | "ABORTED: task cancelled")
+}
+
+fn action_state_signature(stage: usize, action: &BrowserAction, snapshot: &DomSnapshot) -> String {
+    let mut state_hash = std::collections::hash_map::DefaultHasher::new();
+    snapshot.origin.hash(&mut state_hash);
+    snapshot.text_excerpt.hash(&mut state_hash);
+    for node in &snapshot.interactive_nodes {
+        node.node_id.hash(&mut state_hash);
+        node.label.hash(&mut state_hash);
+    }
+    format!("stage:{}|{:?}|{:x}", stage, action, state_hash.finish())
 }
 
 async fn execute_gated_action(
@@ -202,6 +214,7 @@ pub async fn run_react_loop(
     let mut next_step_index: u32 = 0;
     let mut recent_outcomes: Vec<String> = Vec::new();
     let mut last_action_failed = false;
+    let mut duplicate_retries: u8 = 0;
     let mut failures_observed: HashSet<RecoveredFailure> = HashSet::new();
     // Lucia delegates the task through real specialist stages; each stage has
     // distinct instructions, action permissions and evidence requirements.
@@ -387,20 +400,68 @@ pub async fn run_react_loop(
             nodes = serde_json::to_string(&snapshot.interactive_nodes).unwrap_or_default()
         );
 
-        let (thought, mut action, model_route) = {
-            let r = router.lock().await;
-            r.propose_specialist_action(&snapshot.origin, &prompt_payload,
-                orchestrator.specialist().instructions(), &creds, voice_mode)
-                .await?
-        };
+        // The verification specialist is read-only. It always requests the
+        // independent evidence gate rather than asking an action model to
+        // decide whether to browse more or produce an unsupported claim.
+        let (thought, mut action, mut model_route) =
+            if orchestrator.specialist() == Specialist::Verification {
+                (
+                    "Request independent read-only source verification".to_string(),
+                    BrowserAction::Complete {
+                        summary: "Verify recorded browser actions and observed page evidence".into()
+                    },
+                    "verification:read_only".to_string(),
+                )
+            } else {
+                let r = router.lock().await;
+                r.propose_specialist_action(&snapshot.origin, &prompt_payload,
+                    orchestrator.specialist().instructions(), &creds, voice_mode)
+                    .await?
+            };
 
         // Treat the model's element label and flags as untrusted claims.
         // Bind to a fresh DOM node before the policy engine sees the action.
-        let action_binding_error =
+        let mut action_binding_error =
             bind_action_to_live_dom(&mut action, &snapshot, freshly_observed).err();
 
-        let signature = format!("stage:{}|{:?}|{}", orchestrator.current, action, snapshot.origin);
+        // Repeating on a different page state may be legitimate, but repeating
+        // on the identical observed state gets an evidence-aware recovery prompt.
+        let signature = action_state_signature(orchestrator.current, &action, &snapshot);
         if !seen_signatures.insert(signature) {
+            // A small local model can repeat a successful click instead of
+            // announcing stage completion. Request independent, read-only
+            // verification against real captured page excerpts before
+            // advancing; never manufacture a completion on repetition alone.
+            let evidence_completion = if freshly_observed
+                && orchestrator.specialist() != Specialist::Verification
+                && orchestrator.can_complete(&snapshot).is_ok()
+            {
+                let comparison = orchestrator.plan.stages.iter()
+                    .any(|s| s.specialist == Specialist::Comparison);
+                let result = {
+                    let router = router.lock().await;
+                    router.verify_browser_task(&goal, &format!(
+                        "Check the completed stage against observed evidence: {}. Success criteria: {}",
+                        orchestrator.stage().objective,
+                        orchestrator.stage().success_criteria
+                    ), &orchestrator.evidence, comparison, &creds).await
+                };
+                result.ok()
+            } else { None };
+            if let Some(report) = evidence_completion {
+                action = BrowserAction::Complete { summary: report.summary };
+                action_binding_error = None;
+                model_route.push_str(" / source_checked_transition");
+                duplicate_retries = 0;
+            } else {
+            duplicate_retries += 1;
+            if duplicate_retries <= 2 {
+                recent_outcomes.push(
+                    "Repeated action on an unchanged page was blocked. Reassess the current page; use a different safe action or complete the assigned stage only if visible evidence supports it.".into()
+                );
+                if recent_outcomes.len() > 5 { recent_outcomes.remove(0); }
+                continue;
+            }
             let entry = TraceEntry {
                 trace_id: Uuid::new_v4(),
                 run_id,
@@ -421,8 +482,10 @@ pub async fn run_react_loop(
             let _ = trace_tx.send(entry.sanitized()).await;
             final_status = "halted".to_string();
             break;
+            }
         }
 
+        duplicate_retries = 0;
         let (risk, mut decision) = evaluate_policy(&snapshot.origin, &action, &allowed_domains);
         let mut verified_report: Option<VerificationReport> = None;
         if !orchestrator.specialist().allows_on_page(&action, &snapshot) {
@@ -796,5 +859,33 @@ mod production_safety_tests {
         assert!(stop_after_approval_outcome("ABORTED: approval channel closed"));
         assert!(!stop_after_approval_outcome("APPROVED & OK: Clicked button"));
         assert!(!stop_after_approval_outcome("FAILED: stale DOM node"));
+    }
+}
+
+#[cfg(test)]
+mod live_loop_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn changed_page_state_allows_a_control_to_be_revisited() {
+        let original = DomSnapshot {
+            origin: "http://127.0.0.1:18764/".into(),
+            title: "Local test page".into(),
+            text_excerpt: "Click Show fixture details to reveal more.".into(),
+            interactive_nodes: Vec::new(),
+        };
+        let mut updated = original.clone();
+        updated.text_excerpt = "The fixture details are visible after the click.".into();
+        let action = BrowserAction::Click {
+            node_id: "n_1".into(),
+            element_label: "Show fixture details".into(),
+            is_submit: false,
+        };
+        assert_eq!(action_state_signature(0, &action, &original),
+            action_state_signature(0, &action, &original));
+        assert_ne!(action_state_signature(0, &action, &original),
+            action_state_signature(0, &action, &updated));
+        assert_ne!(action_state_signature(0, &action, &original),
+            action_state_signature(1, &action, &original));
     }
 }

@@ -226,6 +226,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "webview2-com",
 ]
 
 [[package]]

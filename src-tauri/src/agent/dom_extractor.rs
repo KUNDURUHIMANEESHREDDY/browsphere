@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
-use tauri::Manager;
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
@@ -141,9 +139,20 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
         const rect = current.getBoundingClientRect();
         const inViewport = rect.bottom >= 0 && rect.right >= 0 && rect.top <= vh && rect.left <= vw;
         const typeAttr = (current.getAttribute("type") || "").toLowerCase();
-        const isSubmit =
-          (current.tagName === "BUTTON" && (typeAttr === "" || typeAttr === "submit")) ||
+        // A button without a type is only submit-capable when associated
+        // with a form. Standalone buttons (tabs, menus, theme toggles) are
+        // not implicit form submissions.
+        const formSubmit =
+          (current.tagName === "BUTTON" &&
+            (typeAttr === "submit" || (typeAttr === "" && !!current.form))) ||
           (current.tagName === "INPUT" && (typeAttr === "submit" || typeAttr === "image"));
+        // Custom JS submission controls may use type="button"; require
+        // approval for visibly submission-like controls too.
+        const submissionLabel = /\b(submit|register|sign up|apply now|send application|place order|checkout|confirm purchase)\b/i;
+        const isSubmit = formSubmit || (
+          (current.tagName === "BUTTON" || current.getAttribute("role") === "button") &&
+          submissionLabel.test(computeAccessibleName(current))
+        );
 
         nodes.push({{
           node_id: nodeId,
@@ -185,11 +194,9 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     }}
   }};
 
-  if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {{
-    window.__TAURI__.core.invoke("submit_dom_snapshot", payload).catch(() => {{}});
-  }} else if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {{
-    window.__TAURI_INTERNALS__.invoke("submit_dom_snapshot", payload).catch(() => {{}});
-  }}
+  // Return to the HOST WebView2 ExecuteScript callback. Untrusted pages
+  // are never granted Tauri commands or asked to send their own snapshots.
+  return payload.snapshot;
 }})();"#,
         request_id = request_id,
         max_nodes = max_nodes,
@@ -202,31 +209,14 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
 pub async fn request_live_dom_snapshot(
     app: &tauri::AppHandle,
     webview_label: &str,
-    pending_snapshots: &Arc<Mutex<HashMap<Uuid, oneshot::Sender<DomSnapshot>>>>,
+    _pending_snapshots: &Arc<Mutex<HashMap<Uuid, oneshot::Sender<DomSnapshot>>>>,
     timeout_ms: u64,
 ) -> Option<DomSnapshot> {
-    let tab_wv = app.get_webview(webview_label)?;
-    let req_id = Uuid::new_v4();
-    let (tx, rx) = oneshot::channel();
-
-    {
-        let mut map = pending_snapshots.lock().await;
-        map.insert(req_id, tx);
-    }
-
-    let script = build_snapshot_script(req_id, 120, 2400);
-    if tab_wv.eval(&script).is_err() {
-        let mut map = pending_snapshots.lock().await;
-        map.remove(&req_id);
-        return None;
-    }
-
-    match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
-        Ok(Ok(snapshot)) => Some(snapshot),
-        _ => {
-            let mut map = pending_snapshots.lock().await;
-            map.remove(&req_id);
-            None
-        }
-    }
+    // IPC from remote page origins is intentionally not permitted by Tauri.
+    // Use the native WebView2 script-completion callback to read this result.
+    let script = build_snapshot_script(Uuid::new_v4(), 120, 2400);
+    let value = crate::agent::native_eval::eval_json(
+        app, webview_label, script, timeout_ms
+    ).await.ok()?;
+    serde_json::from_value(value).ok()
 }

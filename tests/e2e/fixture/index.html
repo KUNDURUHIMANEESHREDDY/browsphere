@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Lucia Live E2E Fixture</title>
+<style>body{font-family:system-ui;max-width:600px;margin:60px auto}button,input{padding:8px;margin:8px}</style></head><body>
+<h1>Lucia Browser Fixture</h1>
+<p id="intro">This safe local webpage is used to test browser navigation, reading, ordinary clicks, form approvals, and evidence verification.</p>
+<button id="details" type="button" onclick="document.getElementById('result').hidden=false">Show fixture details</button>
+<p id="result" hidden>The fixture details are visible. This is a successful ordinary button interaction with no form submission.</p>
+<form id="sample" onsubmit="event.preventDefault();document.getElementById('feedback').textContent='Application received. Thank you for submitting this local test form.';">
+<label for="note">Test note</label><input id="note" name="note" type="text" placeholder="Optional sample text">
+<button type="submit">Submit sample application</button></form>
+<p id="feedback">No sample application has been submitted.</p>
+</body></html>

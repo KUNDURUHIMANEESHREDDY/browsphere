@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
@@ -25,12 +24,8 @@ fn build_click_script(request_id: Uuid, node_id: &str) -> String {
   const TARGET_ID = {id_json};
 
   function postResult(success, detail) {{
-    const payload = {{ request_id: REQUEST_ID, result: {{ success, detail }} }};
-    if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {{
-      window.__TAURI__.core.invoke("submit_action_result", payload).catch(() => {{}});
-    }} else if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {{
-      window.__TAURI_INTERNALS__.invoke("submit_action_result", payload).catch(() => {{}});
-    }}
+    // The trusted host receives this value from WebView2 ExecuteScript.
+    return {{ success, detail }};
   }}
 
   function findByAetherId(root, id) {{
@@ -52,7 +47,7 @@ fn build_click_script(request_id: Uuid, node_id: &str) -> String {
   try {{
     const el = findByAetherId(document, TARGET_ID);
     if (!el) {{
-      postResult(false, `Element ${{TARGET_ID}} not found in DOM`);
+      return postResult(false, `Element ${{TARGET_ID}} not found in DOM`);
       return;
     }}
     el.scrollIntoView({{ block: "center", inline: "nearest", behavior: "instant" }});
@@ -67,9 +62,9 @@ fn build_click_script(request_id: Uuid, node_id: &str) -> String {
     el.dispatchEvent(new MouseEvent("mouseup", common));
     el.click();
 
-    postResult(true, `Clicked ${{el.tagName.toLowerCase()}} (${{TARGET_ID}})`);
+    return postResult(true, `Clicked ${{el.tagName.toLowerCase()}} (${{TARGET_ID}})`);
   }} catch (err) {{
-    postResult(false, `Click error: ${{String(err)}}`);
+    return postResult(false, `Click error: ${{String(err)}}`);
   }}
 }})();"#,
         request_id = request_id,
@@ -87,12 +82,8 @@ fn build_type_script(request_id: Uuid, node_id: &str, text: &str) -> String {
   const VALUE = {text_json};
 
   function postResult(success, detail) {{
-    const payload = {{ request_id: REQUEST_ID, result: {{ success, detail }} }};
-    if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {{
-      window.__TAURI__.core.invoke("submit_action_result", payload).catch(() => {{}});
-    }} else if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {{
-      window.__TAURI_INTERNALS__.invoke("submit_action_result", payload).catch(() => {{}});
-    }}
+    // The trusted host receives this value from WebView2 ExecuteScript.
+    return {{ success, detail }};
   }}
 
   function findByAetherId(root, id) {{
@@ -114,7 +105,7 @@ fn build_type_script(request_id: Uuid, node_id: &str, text: &str) -> String {
   try {{
     const el = findByAetherId(document, TARGET_ID);
     if (!el) {{
-      postResult(false, `Input ${{TARGET_ID}} not found in DOM`);
+      return postResult(false, `Input ${{TARGET_ID}} not found in DOM`);
       return;
     }}
     el.scrollIntoView({{ block: "center", inline: "nearest", behavior: "instant" }});
@@ -123,7 +114,7 @@ fn build_type_script(request_id: Uuid, node_id: &str, text: &str) -> String {
       el.textContent = VALUE;
       el.dispatchEvent(new InputEvent("input", {{ bubbles: true, data: VALUE, inputType: "insertText" }}));
       el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-      postResult(true, `Typed into contenteditable (${{TARGET_ID}})`);
+      return postResult(true, `Typed into contenteditable (${{TARGET_ID}})`);
       return;
     }}
 
@@ -138,9 +129,9 @@ fn build_type_script(request_id: Uuid, node_id: &str, text: &str) -> String {
     }}
     el.dispatchEvent(new Event("input", {{ bubbles: true }}));
     el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-    postResult(true, `Typed ${{VALUE.length}} chars into ${{el.tagName.toLowerCase()}} (${{TARGET_ID}})`);
+    return postResult(true, `Typed ${{VALUE.length}} chars into ${{el.tagName.toLowerCase()}} (${{TARGET_ID}})`);
   }} catch (err) {{
-    postResult(false, `Type error: ${{String(err)}}`);
+    return postResult(false, `Type error: ${{String(err)}}`);
   }}
 }})();"#,
         request_id = request_id,
@@ -154,18 +145,14 @@ fn build_scroll_script(request_id: Uuid, delta_y: i32) -> String {
         r#"(function() {{
   const REQUEST_ID = "{request_id}";
   function postResult(success, detail) {{
-    const payload = {{ request_id: REQUEST_ID, result: {{ success, detail }} }};
-    if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {{
-      window.__TAURI__.core.invoke("submit_action_result", payload).catch(() => {{}});
-    }} else if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {{
-      window.__TAURI_INTERNALS__.invoke("submit_action_result", payload).catch(() => {{}});
-    }}
+    // The trusted host receives this value from WebView2 ExecuteScript.
+    return {{ success, detail }};
   }}
   try {{
     window.scrollBy({{ top: {delta_y}, left: 0, behavior: "instant" }});
-    postResult(true, `Scrolled by {delta_y}px (scrollY=${{Math.round(window.scrollY)}})`);
+    return postResult(true, `Scrolled by {delta_y}px (scrollY=${{Math.round(window.scrollY)}})`);
   }} catch (err) {{
-    postResult(false, `Scroll error: ${{String(err)}}`);
+    return postResult(false, `Scroll error: ${{String(err)}}`);
   }}
 }})();"#,
         request_id = request_id,
@@ -176,45 +163,22 @@ fn build_scroll_script(request_id: Uuid, delta_y: i32) -> String {
 async fn eval_in_active_tab(
     app: &tauri::AppHandle,
     webview_label: &str,
-    pending_results: &Arc<Mutex<HashMap<Uuid, oneshot::Sender<ActionResult>>>>,
+    _pending_results: &Arc<Mutex<HashMap<Uuid, oneshot::Sender<ActionResult>>>>,
     script: String,
-    request_id: Uuid,
+    _request_id: Uuid,
     timeout_ms: u64,
 ) -> ActionResult {
-    let Some(tab_wv) = app.get_webview(webview_label) else {
-        return ActionResult {
+    // Untrusted websites are not allowed to invoke Tauri commands.
+    // Capture this action's return value via the native WebView2 callback.
+    match crate::agent::native_eval::eval_json(app, webview_label, script, timeout_ms).await {
+        Ok(value) => serde_json::from_value::<ActionResult>(value).unwrap_or(ActionResult {
             success: false,
-            detail: "No active child WebView2 tab attached".to_string(),
-        };
-    };
-
-    let (tx, rx) = oneshot::channel();
-    {
-        let mut map = pending_results.lock().await;
-        map.insert(request_id, tx);
-    }
-
-    if let Err(e) = tab_wv.eval(&script) {
-        let mut map = pending_results.lock().await;
-        map.remove(&request_id);
-        return ActionResult {
+            detail: "WebView2 returned no valid action acknowledgement".into(),
+        }),
+        Err(problem) => ActionResult {
             success: false,
-            detail: format!("WebView2 eval failed: {e}"),
-        };
-    }
-
-    match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
-        Ok(Ok(res)) => res,
-        _ => {
-            let mut map = pending_results.lock().await;
-            map.remove(&request_id);
-            // Without an IPC acknowledgement, an injected action may have failed.
-            // Never tell the agent an unverified click, input or scroll succeeded.
-            ActionResult {
-                success: false,
-                detail: "WebView2 action was not confirmed before the timeout (IPC acknowledgement missing)".to_string(),
-            }
-        }
+            detail: format!("WebView2 action result unavailable: {problem}"),
+        },
     }
 }
 
