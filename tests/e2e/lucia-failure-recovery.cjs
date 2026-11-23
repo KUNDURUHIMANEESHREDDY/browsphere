@@ -36,9 +36,9 @@ async function main(){
       const config=await window.__TAURI__.core.invoke('get_router_config');
       config.ollama_model='qwen2.5:3b-instruct';config.prefer_local_for_simple=true;
       await window.__TAURI__.core.invoke('update_router_config',{config});
-      await window.__TAURI__.core.invoke('open_or_navigate_tab',{
-        tabId:'lucia-failure-recovery',url:${JSON.stringify(url)},bounds:null,isPrivate:true
-      });
+      // Navigate through the actual browser UI so the active native WebView
+      // and visible-tab geometry are synchronized before the agent starts.
+      window.browsphereApp.newTab(${JSON.stringify(url)});
       return 'configured';
     })()`);
     await sleep(1700);
@@ -74,6 +74,7 @@ async function main(){
     const end=await ev("(async()=>await window.__TAURI__.core.invoke('capture_live_snapshot'))()");
     const verified=relevant.find(x=>x.event==='agent:verification_report');
     console.log('FINAL',JSON.stringify(ended.payload));
+    console.log('ERRORS',JSON.stringify(relevant.filter(x=>x.event==='agent:run_error').map(x=>x.payload?.message)));
     console.log('TRACES',JSON.stringify(traces.map(t=>({action:t.payload?.action?.type,outcome:t.payload?.outcome,route:t.payload?.model_route}))));
     console.log('STAGES',JSON.stringify(relevant.filter(x=>x.event==='agent:stage').map(x=>({specialist:x.payload?.specialist,status:x.payload?.status}))));
     console.log('PAGE',JSON.stringify({origin:end?.origin,success:end?.text_excerpt?.includes('Recovery complete: fallback button succeeded')}));
