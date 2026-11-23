@@ -79,6 +79,8 @@ The agent runner now binds clicks and typing to a fresh live DOM snapshot, uses 
 
 The expanded Lucia backend regression run passed **59 tests, 0 failed, 4 ignored**. A real native Windows WebView2 integration test and one end-to-end Ollama/Qwen Browser → Verification workflow both passed against a harmless local website. Separate desktop tests confirmed that rejected and cancelled form approvals never submit the form. An unsigned Windows NSIS installer was also packaged successfully. These limited passes do **not** certify multi-site reliability, installer installation/upgrade, code signing, or production readiness.
 
+**Autonomous forms update:** Lucia's Form Agent can submit routine low-risk forms (such as feedback) without waiting for approval. The action policy still asks for confirmation before consequential actions, payment/account changes, applications, or submission of sensitive data. Confirmed submissions advance to the independent verifier without clicking submit a second time; ambiguous submission outcomes stop safely rather than retrying.
+
 See [Lucia production gates](LUCIA_PRODUCTION_GATE.md) for exact implementation details and remaining release requirements.
 
 ## Navigation, privacy, and security hardening — 22 November 2026

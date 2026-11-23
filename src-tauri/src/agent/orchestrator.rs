@@ -4,7 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use crate::agent::dom_extractor::DomSnapshot;
-use crate::agent::policy::BrowserAction;
+use crate::agent::policy::{requested_navigation_url, BrowserAction};
+use crate::agent::evidence_verifier::check_navigation_result;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -154,6 +155,7 @@ pub struct Orchestrator {
     fresh_observations: usize,
     last_action_failed: bool,
     form_submitted: bool,
+    confirmed_navigation: Option<String>,
 }
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
@@ -244,6 +246,7 @@ impl Orchestrator {
             actions_in_stage: 0, fresh_observations: 0,
             last_action_failed: false,
             form_submitted: false,
+            confirmed_navigation: None,
         }
     }
 
@@ -276,6 +279,25 @@ impl Orchestrator {
         }
     }
 
+    /// Called only after a fresh, native WebView2 postcondition passed.
+    pub fn confirmed_navigation(&mut self, snapshot: &DomSnapshot) {
+        let Some(target) = requested_navigation_url(&self.plan.goal) else { return };
+        if check_navigation_result(target.as_str(), snapshot).is_err() { return; }
+        self.confirmed_navigation = Some(snapshot.origin.clone());
+        self.fresh_observations += 1;
+        let observed = SourceEvidence {
+            url: snapshot.origin.clone(),
+            title: snapshot.title.chars().take(140).collect(),
+            excerpt: snapshot.text_excerpt.chars().take(1000).collect(),
+        };
+        if let Some(existing) = self.evidence.iter_mut().find(|e| e.url == observed.url) {
+            *existing = observed;
+        } else {
+            self.evidence.push(observed);
+            if self.evidence.len() > 8 { self.evidence.remove(0); }
+        }
+    }
+
     pub fn action_outcome(&mut self, action: &BrowserAction, success: bool) {
         self.last_action_failed = !success;
         if success && !matches!(action, BrowserAction::Complete { .. }) {
@@ -304,6 +326,25 @@ impl Orchestrator {
         if self.last_action_failed {
             return Err("Previous browser action failed; re-observe and recover first".into());
         }
+        if let Some(target) = requested_navigation_url(&self.plan.goal) {
+            if self.confirmed_navigation.as_deref() != Some(snapshot.origin.as_str())
+                || self.successful_actions == 0
+                || self.fresh_observations == 0
+                || !self.evidence.iter().any(|e| e.url == snapshot.origin)
+                || check_navigation_result(target.as_str(), snapshot).is_err()
+            {
+                return Err("Requested navigation has not been independently confirmed from the live browser".into());
+            }
+            if self.specialist() == Specialist::Verification
+                && self.completed_summaries.len() != self.current
+            {
+                return Err("Earlier specialists have not completed".into());
+            }
+            if self.specialist() != Specialist::Verification && self.actions_in_stage == 0 {
+                return Err("No successful navigation action in the current stage".into());
+            }
+            return Ok(());
+        }
         if self.fresh_observations == 0 || self.evidence.is_empty() {
             return Err("No live webpage evidence was observed; do not claim completion".into());
         }
@@ -317,7 +358,12 @@ impl Orchestrator {
         if self.successful_actions == 0 {
             return Err("No browser actions were acknowledged as successful".into());
         }
-        if !is_verifier && self.actions_in_stage == 0 && self.specialist() != Specialist::Comparison {
+        // Observation-only research, comparison, and extraction stages can
+        // reuse fresh recorded source evidence. Requiring an extra click/scroll
+        // after a confirmed submission can cause needless duplicate actions.
+        let read_only_stage = matches!(self.specialist(),
+            Specialist::Research | Specialist::Comparison | Specialist::Data);
+        if !is_verifier && self.actions_in_stage == 0 && !read_only_stage {
             return Err("Specialist has not yet executed a successful browser action".into());
         }
         let terms = goal_terms(&self.plan.goal);
@@ -458,8 +504,28 @@ mod tests {
         orchestrator.observe(&page);
         assert!(orchestrator.can_complete(&page).is_err());
         orchestrator.action_outcome(&BrowserAction::Scroll {delta_y:250}, true);
+        assert!(orchestrator.can_complete(&page).is_err()); // scrolling does not open a website
+        orchestrator.action_outcome(&BrowserAction::Navigate { url: "https://example.com/".into() }, true);
+        orchestrator.confirmed_navigation(&page);
         assert!(orchestrator.can_complete(&page).is_ok());
     }
+    #[test]
+    fn short_navigation_page_still_needs_confirmation_but_can_finish_once_verified() {
+        let mut o = Orchestrator::new("open youtube");
+        o.begin();
+        let page = snapshot("https://www.youtube.com/", "YouTube home");
+        o.observe(&page);
+        o.action_outcome(&BrowserAction::Navigate { url: page.origin.clone() }, true);
+        assert!(o.can_complete(&page).is_err());
+        o.confirmed_navigation(&page);
+        assert!(o.can_complete(&page).is_ok());
+        assert!(!o.complete_stage("Requested destination observed"));
+        o.observe(&page);
+        assert!(o.can_complete(&page).is_ok());
+        let wrong = snapshot("https://youtube.com.evil.test/", "YouTube home");
+        assert!(o.can_complete(&wrong).is_err());
+    }
+
     #[test]
     fn cannot_complete_after_failed_action_or_without_two_comparison_sources() {
         let mut orchestrator = Orchestrator::new("Compare laptop specifications");
@@ -474,5 +540,37 @@ mod tests {
         assert!(orchestrator.can_complete(&page).is_ok());
         orchestrator.action_outcome(&BrowserAction::Scroll {delta_y:200}, false);
         assert!(orchestrator.can_complete(&page).is_err());
+    }
+}
+
+#[cfg(test)]
+mod autonomous_read_only_transition_tests {
+    use super::*;
+
+    #[test]
+    fn data_agent_uses_existing_confirmation_without_artificial_action() {
+        let plan = parse_generated_plan(
+            "Submit feedback on the current page",
+            r#"{"stages":[
+                {"specialist":"browser","objective":"Submit feedback","success_criteria":"Confirm feedback received"},
+                {"specialist":"data","objective":"Read submission confirmation","success_criteria":"Extract confirmation text"}
+            ]}"#
+        ).unwrap();
+        let mut flow = Orchestrator::from_plan(plan);
+        let snapshot = DomSnapshot {
+            origin: "https://example.org/feedback".into(),
+            title: "Feedback".into(),
+            text_excerpt: "Feedback form. Feedback sent successfully on the local test page.".into(),
+            interactive_nodes: vec![],
+        };
+        flow.observe(&snapshot);
+        flow.action_outcome(&BrowserAction::Click {
+            node_id: "send".into(), element_label: "Submit feedback".into(), is_submit: true,
+        }, true);
+        assert!(flow.can_complete(&snapshot).is_ok());
+        assert!(!flow.complete_stage("Observed feedback confirmation"));
+        assert_eq!(flow.specialist(), Specialist::Data);
+        // Data is read-only; a fresh observed confirmation is sufficient.
+        assert!(flow.can_complete(&snapshot).is_ok());
     }
 }

@@ -50,6 +50,12 @@ fn build_click_script(request_id: Uuid, node_id: &str) -> String {
       return postResult(false, `Element ${{TARGET_ID}} not found in DOM`);
       return;
     }}
+    // A disabled control ignores .click(), which must not count as success.
+    // Check immediately before dispatch because the DOM may have changed
+    // since the model's last observation.
+    if (el.matches(":disabled") || el.getAttribute("aria-disabled") === "true") {{
+      return postResult(false, `Control ${{TARGET_ID}} is disabled`);
+    }}
     el.scrollIntoView({{ block: "center", inline: "nearest", behavior: "instant" }});
     const rect = el.getBoundingClientRect();
     const cx = Math.round(rect.left + rect.width / 2);
@@ -291,5 +297,21 @@ pub async fn execute_browser_action(
                 detail: format!("COMPLETED: {summary}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod failure_recovery_execution_tests {
+    use super::*;
+
+    #[test]
+    fn click_script_checks_disabled_controls_before_claiming_success() {
+        let script = build_click_script(Uuid::new_v4(), "n_2");
+        let guard = script.find("el.matches(\":disabled\")").expect("Disabled-control guard missing");
+        let click = script.find("el.click();").expect("Click implementation missing");
+        let success = script.find("return postResult(true,").expect("Successful click result missing");
+        assert!(guard < click && click < success,
+            "Disabled controls must be rejected before executing and claiming a click succeeded");
+        assert!(script.contains("aria-disabled"));
     }
 }

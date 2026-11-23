@@ -9,13 +9,15 @@ use uuid::Uuid;
 
 use crate::agent::action_executor::{execute_browser_action, ActionResult};
 use crate::agent::memory::{can_classify_preference, infer_memories, preference_from_label, RecoveredFailure};
-use crate::agent::orchestrator::{Orchestrator, Specialist};
+use crate::agent::orchestrator::{plan_task, Orchestrator, Specialist};
 use crate::agent::evidence_verifier::{
-    check_navigation_result, check_submission_result, requires_post_action_check, VerificationReport,
+    check_navigation_result, check_submission_result, requires_post_action_check,
+    verify_direct_navigation, VerificationReport,
 };
 use crate::agent::dom_extractor::{request_live_dom_snapshot, DomSnapshot};
 use crate::agent::policy::{
-    evaluate_policy, sanitize_untrusted_page_text, BrowserAction, PolicyDecision, RiskLevel,
+    evaluate_policy, evaluate_user_navigation_policy, requested_navigation_url,
+    sanitize_untrusted_page_text, BrowserAction, PolicyDecision, RiskLevel,
     TraceEntry,
 };
 use crate::privacy::downloads::DownloadManager;
@@ -244,7 +246,12 @@ pub async fn run_react_loop(
     let mut failures_observed: HashSet<RecoveredFailure> = HashSet::new();
     // Lucia delegates the task through real specialist stages; each stage has
     // distinct instructions, action permissions and evidence requirements.
-    let model_plan = {
+    // Simple direct navigation needs one browser specialist and an independent
+    // verifier, not a multi-stage research plan. The LLM still selects the
+    // concrete action; no navigation result is hardcoded.
+    let model_plan = if requested_navigation_url(&goal).is_some() {
+        plan_task(&goal)
+    } else {
         let selected_model = router.lock().await;
         selected_model.plan_specialist_task(&goal, &creds).await?
     };
@@ -438,6 +445,19 @@ pub async fn run_react_loop(
                     },
                     "verification:read_only".to_string(),
                 )
+            } else if orchestrator.specialist() == Specialist::Browser
+                && requested_navigation_url(&goal).is_some()
+            {
+                // A direct user instruction such as "open youtube" is a
+                // deterministic browser command. It does not need a cloud
+                // model call (or rate-limit budget) to choose the URL.
+                // Policy and fresh native verification still run below.
+                let target = requested_navigation_url(&goal).expect("guarded above");
+                (
+                    "Navigate to the website explicitly named by the user".to_string(),
+                    BrowserAction::Navigate { url: target.to_string() },
+                    "direct_navigation:trusted_user_goal".to_string(),
+                )
             } else {
                 let r = router.lock().await;
                 r.propose_specialist_action(&snapshot.origin, &prompt_payload,
@@ -449,6 +469,25 @@ pub async fn run_react_loop(
         // Bind to a fresh DOM node before the policy engine sees the action.
         let mut action_binding_error =
             bind_action_to_live_dom(&mut action, &snapshot, freshly_observed).err();
+
+        // A stale/disabled control after a successful action may mean the page
+        // already advanced. Do not retry the disabled control. Hand off to
+        // the next stage only if live DOM evidence passes the stage gate.
+        // This does NOT declare task success: final independent verification
+        // remains mandatory before the run may report completed.
+        if action_binding_error.is_some()
+            && freshly_observed
+            && !last_action_failed
+            && matches!(action, BrowserAction::Click { .. })
+            && orchestrator.specialist() != Specialist::Verification
+            && orchestrator.can_complete(&snapshot).is_ok()
+        {
+            action = BrowserAction::Complete {
+                summary: "Observed live page after a successful action; verify the result independently".into(),
+            };
+            action_binding_error = None;
+            model_route.push_str(" / stale_control_handoff_to_verifier");
+        }
 
         // Repeating on a different page state may be legitimate, but repeating
         // on the identical observed state gets an evidence-aware recovery prompt.
@@ -512,7 +551,11 @@ pub async fn run_react_loop(
         }
 
         duplicate_retries = 0;
-        let (risk, mut decision) = evaluate_live_action_policy(&snapshot.origin, &action, &allowed_domains, &snapshot);
+        let (risk, mut decision) = if matches!(action, BrowserAction::Navigate { .. }) {
+            evaluate_user_navigation_policy(&snapshot.origin, &action, &allowed_domains, &goal)
+        } else {
+            evaluate_live_action_policy(&snapshot.origin, &action, &allowed_domains, &snapshot)
+        };
         let mut verified_report: Option<VerificationReport> = None;
         if !orchestrator.specialist().allows_on_page(&action, &snapshot) {
             decision = PolicyDecision::Deny {
@@ -551,7 +594,10 @@ pub async fn run_react_loop(
                 } else {
                     let is_comparison = orchestrator.plan.stages.iter()
                         .any(|stage| stage.specialist == Specialist::Comparison);
-                    let result = {
+                    let result = if let Some(target) = requested_navigation_url(&goal) {
+                        verify_direct_navigation(target.as_str(), &snapshot)
+                            .map_err(anyhow::Error::msg)
+                    } else {
                         let router = router.lock().await;
                         router.verify_browser_task(&goal, summary, &orchestrator.evidence,
                             is_comparison, &creds).await
@@ -648,8 +694,26 @@ pub async fn run_react_loop(
             }
         }
 
-        let is_complete = ok && matches!(action, BrowserAction::Complete { .. });
         orchestrator.action_outcome(&action, ok);
+        // Do not claim navigation from an API dispatch: only a fresh native
+        // snapshot whose final URL and readable page passed the postcondition
+        // can transition a direct-navigation stage.
+        let confirmed_navigation = ok
+            && matches!(action, BrowserAction::Navigate { .. })
+            && outcome.starts_with("POSTCONDITION CONFIRMED:")
+            && requested_navigation_url(&goal).is_some_and(|target|
+                matches!(&action, BrowserAction::Navigate { url } if url == target.as_str()));
+        if confirmed_navigation { orchestrator.confirmed_navigation(&snapshot); }
+        // A submission is a one-shot side effect. Once the browser observes
+        // fresh, explicit success evidence, advance to independent verification
+        // instead of allowing the model to click the same submit control again.
+        let confirmed_submit = ok
+            && matches!(action, BrowserAction::Click { is_submit: true, .. })
+            && outcome.starts_with("POSTCONDITION CONFIRMED:")
+            && orchestrator.can_complete(&snapshot).is_ok();
+        let is_complete =
+            (ok && matches!(action, BrowserAction::Complete { .. })) || confirmed_submit
+                || (confirmed_navigation && orchestrator.can_complete(&snapshot).is_ok());
         last_action_failed = !ok;
         recent_outcomes.push(format!("{}: {}", if ok { "success" } else { "failure" }, outcome));
         if recent_outcomes.len() > 5 {
@@ -709,10 +773,16 @@ pub async fn run_react_loop(
             break;
         }
         if is_complete {
-            let summary = match &action_for_summary {
-                BrowserAction::Complete { summary } => summary.as_str(),
-                _ => "",
+            let summary_text = match &action_for_summary {
+                BrowserAction::Complete { summary } => summary.clone(),
+                BrowserAction::Click { is_submit: true, .. } if confirmed_submit =>
+                    format!("A fresh form submission confirmation was observed on {}",
+                        snapshot.origin),
+                BrowserAction::Navigate { .. } if confirmed_navigation =>
+                    format!("Opened and confirmed the requested website at {}", snapshot.origin),
+                _ => String::new(),
             };
+            let summary = summary_text.as_str();
             let just_finished = orchestrator.specialist().label();
             let all_complete = orchestrator.complete_stage(summary);
             let _ = app.emit("agent:stage", serde_json::json!({

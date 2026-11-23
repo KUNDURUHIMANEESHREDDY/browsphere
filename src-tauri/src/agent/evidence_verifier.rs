@@ -125,7 +125,7 @@ pub fn check_model_verification(
 }
 
 /// Navigation dispatch is not completion: require the requested URL and
-/// actual readable content from a later WebView snapshot.
+/// actual document evidence (text or meaningful title) from a later WebView snapshot.
 pub fn check_navigation_result(requested: &str, after: &DomSnapshot) -> Result<(), String> {
     let target = web_url(requested).ok_or("Invalid navigation target")?;
     let actual = web_url(&after.origin).ok_or("Destination has not loaded")?;
@@ -134,10 +134,47 @@ pub fn check_navigation_result(requested: &str, after: &DomSnapshot) -> Result<(
         || target.query() != actual.query() {
         return Err(format!("Opened {actual}, not the requested destination {target}"));
     }
-    if after.text_excerpt.trim().chars().count() < 12 {
-        return Err("Destination has no readable page evidence yet".into());
+    let title = after.title.trim().to_lowercase();
+    let text = after.text_excerpt.trim().to_lowercase();
+    // A real native DOM title also proves that a document was observed, even
+    // when a JS-heavy home page initially has no body text.
+    let browser_error = ["site can't be reached", "site can’t be reached",
+        "this page isn't working", "privacy error", "err_connection",
+        "dns_probe_finished", "page not found", "404 not found"];
+    if browser_error.iter().any(|bad| title.contains(bad) || text.contains(bad)) {
+        return Err("Destination displayed a browser/network error page".into());
+    }
+    let meaningful_title = title.chars().count() >= 4
+        && title != "new tab" && title != "loading..." && title != "about:blank";
+    if after.text_excerpt.trim().chars().count() < 12 && !meaningful_title {
+        return Err("Destination has neither readable text nor a loaded document title".into());
     }
     Ok(())
+}
+
+
+/// A deterministic verifier is more reliable than an LLM quote-generation pass
+/// for the narrow task of opening an explicitly named website.
+pub fn verify_direct_navigation(
+    requested: &str, after: &DomSnapshot,
+) -> Result<VerificationReport, String> {
+    check_navigation_result(requested, after)?;
+    let url = web_url(&after.origin).ok_or("Invalid observed destination")?;
+    let quote = if after.text_excerpt.trim().chars().count() >= 12 {
+        after.text_excerpt.trim().chars().take(140).collect()
+    } else {
+        format!("Observed document title: {}", after.title.trim().chars().take(100).collect::<String>())
+    };
+    Ok(VerificationReport {
+        status: "evidence_checked",
+        summary: format!("Verified: opened {} in the browser.", url.origin().ascii_serialization()),
+        findings: vec![GroundedFinding {
+            claim: "The requested website loaded in the native browser".into(),
+            url: url.to_string(),
+            quote,
+        }],
+        limitations: "Verification confirms the observed destination and document evidence, not the accuracy of external website content.".into(),
+    })
 }
 
 /// A submit click acknowledgment is not proof of a received submission.
@@ -223,13 +260,39 @@ mod tests {
         assert!(check_model_verification(&result.to_string(),&sources[..1],true).is_err());
     }
     #[test]
+    fn exact_destination_is_automatically_verified_without_model_claims() {
+        let snapshot = DomSnapshot {
+            origin: "https://www.youtube.com/".into(),
+            title: "YouTube".into(),
+            text_excerpt: "YouTube home. Browse videos and channels on this site.".into(),
+            interactive_nodes: vec![],
+        };
+        let report = verify_direct_navigation("https://www.youtube.com/", &snapshot).unwrap();
+        assert_eq!(report.status, "evidence_checked");
+        assert_eq!(report.findings.len(), 1);
+        assert!(verify_direct_navigation("https://www.youtube.com/", &DomSnapshot {
+            origin: "https://www.youtube.com.evil.test/".into(), ..snapshot.clone()
+        }).is_err());
+        assert!(verify_direct_navigation("https://www.youtube.com/", &DomSnapshot {
+            text_excerpt: "".into(), ..snapshot.clone()
+        }).is_ok()); // A loaded native document title is valid navigation evidence.
+        assert!(verify_direct_navigation("https://www.youtube.com/", &DomSnapshot {
+            title: "".into(), text_excerpt: "".into(), ..snapshot.clone()
+        }).is_err());
+        assert!(verify_direct_navigation("https://www.youtube.com/", &DomSnapshot {
+            title: "This site can't be reached".into(), text_excerpt: "".into(), ..snapshot
+        }).is_err());
+    }
+
+    #[test]
     fn navigation_needs_actual_destination_not_just_ack() {
         assert!(check_navigation_result("https://example.org/details",
             &dom("https://example.org/details","Page details are visible here.")).is_ok());
         assert!(check_navigation_result("https://example.org/details",
             &dom("https://example.org/login","Please sign in before proceeding.")).is_err());
         assert!(check_navigation_result("https://example.org/details",
-            &dom("https://example.org/details","")).is_err());
+            &DomSnapshot { title: "".into(),
+                ..dom("https://example.org/details","") }).is_err());
     }
     #[test]
     fn submission_needs_changed_page_with_confirmation() {

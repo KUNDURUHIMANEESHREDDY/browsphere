@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Lucia Recovery E2E Fixture</title>
+<style>body{font:16px system-ui;max-width:650px;margin:60px auto}button{padding:12px;margin:10px}</style></head><body>
+<h1>Lucia browser action recovery test</h1>
+<p id="instruction">To complete the test, click Start recovery test. Its first click is deliberately broken. When it fails, use the recovery fallback button shown afterward. Never submit forms or change websites.</p>
+<button id="primary" type="button">Start recovery test</button>
+<button id="fallback" type="button" hidden>Use recovery fallback</button>
+<p id="status" role="status">Recovery test waiting for first action.</p>
+<script>
+(function(){
+  const primary=document.getElementById("primary");
+  const fallback=document.getElementById("fallback");
+  const status=document.getElementById("status");
+  primary.click=function(){
+    primary.remove();
+    fallback.hidden=false;
+    status.textContent="First click failed. Use recovery fallback now.";
+    throw new Error("Simulated stale control: primary click could not be executed");
+  };
+  fallback.addEventListener("click",function(){
+    fallback.disabled=true;
+    status.textContent="Recovery complete: fallback button succeeded after the first click failed.";
+  });
+})();
+</script></body></html>

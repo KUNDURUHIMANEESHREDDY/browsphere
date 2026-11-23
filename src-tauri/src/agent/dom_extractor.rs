@@ -111,6 +111,8 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   }}
 
   function isInteractive(el) {{
+    // Disabled controls cannot be selected as actionable targets.
+    if (el.matches(":disabled") || el.getAttribute("aria-disabled") === "true") return false;
     if (INTERACTIVE_TAGS.has(el.tagName)) return true;
     const role = (el.getAttribute("role") || "").toLowerCase();
     if (INTERACTIVE_ROLES.has(role)) return true;

@@ -113,6 +113,66 @@ fn host_matches_allowlist(host: &str, allowed_domains: &[String]) -> bool {
     })
 }
 
+
+/// Only the user's short, explicit navigation request can authorize opening a
+/// new site without a second approval. Model and webpage text never qualify.
+pub fn requested_navigation_url(goal: &str) -> Option<Url> {
+    let g = goal.trim().trim_end_matches(['.', '!', '?']).trim().to_ascii_lowercase();
+    if g.chars().any(char::is_control) || g.len() > 220 { return None; }
+    let value = ["open ", "visit ", "go to ", "navigate to "].iter()
+        .find_map(|prefix| g.strip_prefix(prefix))?.trim();
+    let value = value.strip_prefix("the ").unwrap_or(value);
+    let value = value.strip_suffix(" in the browser").or_else(|| value.strip_suffix(" in browser"))
+        .or_else(|| value.strip_suffix(" in a new tab")).unwrap_or(value);
+    let value = value.strip_suffix(" website").or_else(|| value.strip_suffix(" site"))
+        .unwrap_or(value).trim();
+    let url = match value {
+        "youtube" | "youtube.com" | "www.youtube.com" => "https://www.youtube.com/".to_string(),
+        "google" => "https://www.google.com/".to_string(),
+        "github" => "https://github.com/".to_string(),
+        "wikipedia" => "https://www.wikipedia.org/".to_string(),
+        other if other.starts_with("https://") || other.starts_with("http://") => other.to_string(),
+        other if other.contains('.')
+            && other.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()
+                || b == b'.' || b == b'-')
+            && !other.starts_with('.') && !other.ends_with('.')
+            && !other.contains("..") =>
+                format!("https://{other}/"),
+        _ => return None,
+    };
+    let parsed = Url::parse(&url).ok()?;
+    if !matches!(parsed.scheme(), "https" | "http")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty() || parsed.password().is_some()
+    { return None; }
+    // Reject local network addresses and localhost: direct navigation is allowed,
+    // but the agent must not silently cross into private services.
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".local")
+        || host.parse::<std::net::IpAddr>().is_ok()
+    { return None; }
+    Some(parsed)
+}
+
+/// Preserve existing approval/deny policy for any target not explicitly and
+/// exactly requested in the user's own goal. Do not override run allowlists.
+pub fn evaluate_user_navigation_policy(
+    active_origin: &str, action: &BrowserAction, allowed_domains: &[String], goal: &str
+) -> (RiskLevel, PolicyDecision) {
+    let base = evaluate_policy(active_origin, action, allowed_domains);
+    let BrowserAction::Navigate { url } = action else { return base };
+    let PolicyDecision::RequireApproval { ref reason } = base.1 else { return base };
+    if !reason.starts_with("Cross-origin navigation to ") { return base; }
+    let Some(expected) = requested_navigation_url(goal) else { return base };
+    let Ok(actual) = Url::parse(url) else { return base };
+    if actual == expected
+        && actual.host_str().is_some_and(|host| host_matches_allowlist(host, allowed_domains))
+    {
+        return (RiskLevel::Low, PolicyDecision::Allow);
+    }
+    base
+}
+
 pub fn evaluate_policy(
     active_origin: &str,
     action: &BrowserAction,
@@ -278,6 +338,33 @@ mod tests {
     fn cross_origin_requires_approval() {
         let (_, decision) = evaluate_policy("https://example.com", &BrowserAction::Navigate { url: "https://another.example/path".into() }, &[]);
         assert!(matches!(decision, PolicyDecision::RequireApproval { .. }));
+    }
+
+    #[test]
+    fn explicit_navigation_skips_only_matching_cross_site_approval() {
+        let navigate = |url: &str| BrowserAction::Navigate { url: url.into() };
+        let origin = "https://example.com/";
+        assert_eq!(requested_navigation_url("open youtube").unwrap().as_str(), "https://www.youtube.com/");
+        assert!(matches!(evaluate_user_navigation_policy(origin,
+            &navigate("https://www.youtube.com/"), &[], "open youtube").1,
+            PolicyDecision::Allow));
+        for goal in ["research youtube", "open youtube and delete my account", "open youtube; buy something",
+            "open youtube.example", "open localhost"] {
+            assert!(!matches!(evaluate_user_navigation_policy(origin,
+                &navigate("https://www.youtube.com/"), &[], goal).1, PolicyDecision::Allow), "{goal}");
+        }
+        assert!(matches!(evaluate_user_navigation_policy(origin,
+            &navigate("https://www.youtube.com.evil.test/"), &[], "open youtube").1,
+            PolicyDecision::RequireApproval { .. }));
+        assert!(matches!(evaluate_user_navigation_policy(origin,
+            &navigate("https://www.youtube.com/account"), &[], "open youtube").1,
+            PolicyDecision::RequireApproval { .. }));
+        assert!(matches!(evaluate_user_navigation_policy(origin,
+            &navigate("https://www.youtube.com/"), &["example.com".into()], "open youtube").1,
+            PolicyDecision::RequireApproval { .. }));
+        assert!(matches!(evaluate_user_navigation_policy(origin,
+            &navigate("javascript:alert(1)"), &[], "open javascript:alert(1)").1,
+            PolicyDecision::Deny { .. }));
     }
 
     #[test]
