@@ -176,6 +176,27 @@ fn goal_terms(goal: &str) -> Vec<String> {
         .collect()
 }
 
+/// A claimed YouTube video-result task needs an actual observed watch page.
+/// This is a postcondition, not a predetermined URL or invented success.
+fn requested_youtube_video_page(goal: &str) -> bool {
+    let g = goal.to_lowercase();
+    g.contains("youtube") && g.contains("video")
+        && (g.contains("open ") || g.contains("click "))
+}
+
+fn observed_youtube_video_page(origin: &str) -> bool {
+    let Ok(url) = url::Url::parse(origin) else { return false; };
+    let Some(host) = url.host_str() else { return false; };
+    if host != "youtube.com" && !host.ends_with(".youtube.com") {
+        return false;
+    }
+    if url.path() == "/watch" {
+        return url.query_pairs().any(|(key, value)| key == "v" && !value.is_empty());
+    }
+    ["/shorts/", "/live/"].iter().any(|prefix|
+        url.path().strip_prefix(prefix).is_some_and(|id| !id.trim_matches('/').is_empty()))
+}
+
 /// A deterministic minimum plan, built from the user's intent.
 /// The selected LLM decides actual actions for each specialist at runtime.
 pub fn plan_task(goal: &str) -> TaskPlan {
@@ -348,6 +369,11 @@ impl Orchestrator {
         if self.fresh_observations == 0 || self.evidence.is_empty() {
             return Err("No live webpage evidence was observed; do not claim completion".into());
         }
+        if requested_youtube_video_page(&self.plan.goal)
+            && !observed_youtube_video_page(&snapshot.origin)
+        {
+            return Err("The requested video-result page has not been observed in the browser".into());
+        }
         if snapshot.text_excerpt.trim().len() < 40 {
             return Err("The current page has insufficient readable evidence".into());
         }
@@ -421,6 +447,19 @@ mod tests {
         DomSnapshot { origin: url.to_string(), title: "Demo".into(),
             text_excerpt: text.to_string(), interactive_nodes: vec![] }
     }
+    #[test]
+    fn video_result_requires_a_real_observed_youtube_watch_url() {
+        assert!(requested_youtube_video_page(
+            "Search YouTube for NASA Artemis and open the first video result"));
+        assert!(!requested_youtube_video_page("Open YouTube"));
+        assert!(!observed_youtube_video_page("https://www.youtube.com/"));
+        assert!(!observed_youtube_video_page("https://www.youtube.com/results?search_query=nasa"));
+        assert!(!observed_youtube_video_page("https://www.youtube.com.evil.test/watch?v=123"));
+        assert!(!observed_youtube_video_page("https://www.youtube.com/watch"));
+        assert!(observed_youtube_video_page("https://www.youtube.com/watch?v=example123"));
+        assert!(observed_youtube_video_page("https://www.youtube.com/shorts/example123"));
+    }
+
     #[test]
     fn model_generated_plans_are_validated_and_ended_with_verification() {
         let raw = r#"{"stages":[
