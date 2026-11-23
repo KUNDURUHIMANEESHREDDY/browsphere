@@ -338,8 +338,10 @@ pub async fn run_react_loop(
     let model_plan = if requested_navigation_url(&goal).is_some() {
         plan_task(&goal)
     } else {
-        let selected_model = router.lock().await;
-        selected_model.plan_specialist_task(&goal, &creds).await?
+        let selected_model = router.lock().await.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(120),
+            selected_model.plan_specialist_task(&goal, &creds))
+            .await.map_err(|_| anyhow::anyhow!("Lucia's task planner timed out. Try a faster or more reliable model in Settings > AI & ML."))??
     };
     let mut orchestrator = Orchestrator::from_plan(model_plan);
     orchestrator.begin();
@@ -560,10 +562,16 @@ pub async fn run_react_loop(
                     "search_bootstrap:trusted_user_goal".to_string(),
                 )
             } else {
-                let r = router.lock().await;
-                r.propose_specialist_action(&snapshot.origin, &prompt_payload,
-                    orchestrator.specialist().instructions(), &creds, voice_mode)
-                    .await?
+                // Never hold the shared model-router mutex during inference.
+                // A slow model must not block settings or unrelated chat commands.
+                let r = router.lock().await.clone();
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok("cancelled".into()),
+                    result = tokio::time::timeout(std::time::Duration::from_secs(90),
+                        r.propose_specialist_action(&snapshot.origin, &prompt_payload,
+                            orchestrator.specialist().instructions(), &creds, voice_mode)) =>
+                        result.map_err(|_| anyhow::anyhow!("Lucia's action model timed out. Choose a faster model in Settings > AI & ML."))??
+                }
             };
 
         // Treat the model's element label and flags as untrusted claims.
@@ -610,7 +618,7 @@ pub async fn run_react_loop(
                 let comparison = orchestrator.plan.stages.iter()
                     .any(|s| s.specialist == Specialist::Comparison);
                 let result = {
-                    let router = router.lock().await;
+                    let router = router.lock().await.clone();
                     router.verify_browser_task(&goal, &format!(
                         "Check the completed stage against observed evidence: {}. Success criteria: {}",
                         orchestrator.stage().objective,
@@ -704,7 +712,7 @@ pub async fn run_react_loop(
                         verify_direct_navigation(target.as_str(), &snapshot)
                             .map_err(anyhow::Error::msg)
                     } else {
-                        let router = router.lock().await;
+                        let router = router.lock().await.clone();
                         let first = router.verify_browser_task(&goal, summary, &orchestrator.evidence,
                             is_comparison, &creds).await;
                         match first {
@@ -959,7 +967,7 @@ pub async fn run_react_loop(
         {
             // Best effort local AI classification, never a cloud call.
             let label = {
-                let model = router.lock().await;
+                let model = router.lock().await.clone();
                 model.classify_preference_locally(&goal).await
             };
             if let Some(candidate) = label.as_deref()

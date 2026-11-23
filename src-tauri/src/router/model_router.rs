@@ -103,6 +103,7 @@ fn cloud_action_payload(
     payload
 }
 
+#[derive(Clone)]
 pub struct ModelRouter {
     config: RouterConfig,
     aws: AwsConfig,
