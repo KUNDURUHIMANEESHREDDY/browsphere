@@ -52,6 +52,9 @@ try {
     }
     Write-Host 'Running genuine Qwen decisions through native WebView2 integration.'
     & (Join-Path $root 'tests\e2e\run-lucia-multistep.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe')
+    if ($LASTEXITCODE -ne 0) {
+        throw "Real Qwen native browser E2E failed with exit code $LASTEXITCODE"
+    }
     Write-Host 'PASS: Real Qwen model browser E2E completed.'
 } finally {
     if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
