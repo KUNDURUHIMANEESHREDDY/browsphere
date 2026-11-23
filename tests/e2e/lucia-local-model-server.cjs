@@ -49,24 +49,40 @@ function boundedBody(req) {
   });
 }
 
+// Match the browser action prompt contract in both its full and compact
+// variants. Both encode observed controls as one JSON array on a single line.
+// The compact variant includes instructions *after* that line, so parsing the
+// entire remaining prompt silently returns [] and produces a fallback scroll.
 function observedNodes(prompt) {
-  const suffix = prompt.split('Interactive nodes JSON: ').at(-1);
+  const markers = ['Interactive nodes JSON: ', 'Freshly observed controls JSON: '];
+  const position = markers
+    .map(marker => ({marker, at: prompt.lastIndexOf(marker)}))
+    .sort((a,b) => b.at - a.at)[0];
+  if (!position || position.at < 0) return [];
+  const start = position.at + position.marker.length;
+  const line = prompt.slice(start).split(/\r?\n/,1)[0].trim();
   try {
-    const value = JSON.parse(suffix);
-    return Array.isArray(value) ? value : [];
+    const value = JSON.parse(line);
+    return Array.isArray(value) && value.every(node =>
+      node && typeof node === 'object' &&
+      typeof node.node_id === 'string' &&
+      typeof node.label === 'string') ? value : [];
   } catch (_) {
     return [];
   }
 }
 
 function currentPageText(prompt) {
-  const marker = '<untrusted_page_data origin="';
-  const index = prompt.lastIndexOf(marker);
+  const compactMarker = '<untrusted_page_data>';
+  const detailedMarker = '<untrusted_page_data origin="';
+  const compactIndex = prompt.lastIndexOf(compactMarker);
+  const detailedIndex = prompt.lastIndexOf(detailedMarker);
+  const index = Math.max(compactIndex,detailedIndex);
   if (index < 0) return prompt;
-  const start = prompt.indexOf('>\n', index);
+  const start = prompt.indexOf('>\n',index);
   if (start < 0) return prompt;
-  const end = prompt.indexOf('\n</untrusted_page_data>', start + 2);
-  return end < 0 ? prompt : prompt.slice(start + 2, end);
+  const end = prompt.indexOf('\n</untrusted_page_data>',start + 2);
+  return end < 0 ? prompt : prompt.slice(start + 2,end);
 }
 
 function decideAction(prompt) {

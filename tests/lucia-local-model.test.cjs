@@ -49,6 +49,37 @@ test('search action sequence reacts to observed controls and page state', () => 
   assert.equal(complete.type,'complete');
 });
 
+test('compact local prompt reads current DOM controls even with instructions after the JSON', () => {
+  const makePrompt = visible =>
+    'Choose ONE next action using only observed DOM node_id values.\n' +
+    'Original user goal: search for robotics video\n' +
+    'Current specialist: Browser Agent\n' +
+    '<untrusted_page_data>\n' + visible + '\n</untrusted_page_data>\n' +
+    'Freshly observed controls JSON: ' + JSON.stringify(search) + '\n' +
+    'Use type_text for observed text fields, click for observed buttons. Do not guess node IDs.';
+  const initial = makePrompt('Search the local robotics catalog.');
+  assert.deepEqual(observedNodes(initial),search);
+  const typed = decideAction(initial).action;
+  assert.equal(typed.type,'type_text');
+  assert.equal(typed.text,'robotics video');
+  const afterTyping = decideAction(makePrompt('Query: robotics video')).action;
+  assert.equal(afterTyping.type,'click');
+  assert.equal(afterTyping.element_label,'Search');
+  assert.equal(afterTyping.node_id,'invalid-search-button-id');
+});
+
+test('compact page excerpt excludes stale history and rejects invalid control data', () => {
+  const stale = 'Previous action outcomes: VIDEO_PAGE_CONFIRMED from old page\n' +
+    '<untrusted_page_data>\nThe new page is a blank search interface.\n</untrusted_page_data>\n' +
+    'Freshly observed controls JSON: ' + JSON.stringify(search) + '\n' +
+    'Do not claim success without observed evidence.';
+  assert.equal(decideAction(stale).action.type,'type_text');
+  assert.deepEqual(observedNodes('Freshly observed controls JSON: not-json\nContinue'),[]);
+  assert.deepEqual(observedNodes('No current controls provided'),[]);
+  assert.deepEqual(observedNodes('Freshly observed controls JSON: ' +
+    JSON.stringify([{label:'Search'}]) + '\nContinue'),[]);
+});
+
 test('recovery action sequence handles a failed primary click', () => {
   const primary = decideAction(prompt('Recovery waiting',[
     {node_id:'primary',label:'Start recovery test',tag:'button'}
