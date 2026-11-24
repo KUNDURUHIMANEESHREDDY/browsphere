@@ -778,7 +778,13 @@ fn material_page_change(before: &DomSnapshot, after: &DomSnapshot) -> bool {
     if normalized(&before.text_excerpt) != normalized(&after.text_excerpt) {
         return true;
     }
-    after.interactive_nodes.iter().any(|next| {
+    // A disappearing disabled button is not progress. Only an observed
+    // dialog closing or an option list resolving is a semantic transition.
+    let resolved_popup = (before.text_excerpt.starts_with("Active dialog:") && !after.text_excerpt.starts_with("Active dialog:"))
+        || (before.interactive_nodes.iter().any(|n|n.role=="option") &&
+            !after.interactive_nodes.iter().any(|n|n.role=="option") &&
+            after.interactive_nodes.iter().any(|n|n.search_state.as_deref()==Some("filled")));
+    resolved_popup || after.interactive_nodes.iter().any(|next| {
         let old = before.interactive_nodes.iter().find(|old|
             old.tag == next.tag && old.role == next.role &&
             old.label.eq_ignore_ascii_case(&next.label) &&
@@ -797,6 +803,7 @@ fn needs_settle_observation(action: &BrowserAction) -> bool {
     matches!(action,
         BrowserAction::Click { is_submit: false, .. }
         | BrowserAction::PressKey { .. }
+        | BrowserAction::TypeText { is_sensitive:false, .. }
         | BrowserAction::SelectOption { .. }
         | BrowserAction::SetChecked { .. }
     )
@@ -1059,6 +1066,11 @@ pub async fn run_react_loop(
     let mut auth_recovery_attempts: u8 = 0;
     let mut supervisor_reviews: u8 = 0;
     let mut run_core=crate::agent::semantic_core::RunCore::default();
+    let mut review_budget=4u8;
+    let mut last_review_step=0u32;
+    let mut used_reviewer=false;
+    let mut used_visual=false;
+    let mut advisory:Option<crate::agent::deliberation::Advisory>=None;
     // Retry a delayed watch-page transition only through a freshly observed same-site link.
     let mut pending_observed_youtube_watch: Option<String> = None;
     // Never force the same deterministic navigation after it fails. The
@@ -1441,12 +1453,13 @@ pub async fn run_react_loop(
                 n.node_id, n.tag, n.role, n.label))
             .collect::<Vec<_>>().join("; ");
         let vision_config = router.lock().await.get_config();
+        let mut visual_ids:Vec<String>=Vec::new();
         let vision_context = if !vision_config.vision_model.trim().is_empty()
             && !vision_config.lucia_cloud_only && vision_config.prefer_local_for_simple
             && vision_config.domain_overrides.is_empty()
             && snapshot.origin.starts_with("http")
             && orchestrator.specialist() == Specialist::Browser
-            && (last_action_failed || snapshot.interactive_nodes.len() < 3)
+            && (last_action_failed || run_core.escalate() || snapshot.interactive_nodes.len() < 3)
             && last_vision_step.map_or(true, |previous| (step as u32).saturating_sub(previous) >= 3)
         {
             last_vision_step = Some(step as u32);
@@ -1457,6 +1470,7 @@ pub async fn run_react_loop(
                 Ok(hint) => {
                     let _ = app.emit("agent:vision", serde_json::json!({"run_id":run_id,"step_index":step,"status":"observed"}));
                     let matches=crate::agent::semantic_core::visual_matches(&snapshot,&hint);
+                    visual_ids=crate::agent::deliberation::visual_targets(&snapshot,&hint);
                     format!("\nUntrusted local visual hint (not proof or permission; use only to interpret observed DOM): {}. Matched visible DOM labels: {}", sanitize_untrusted_page_text(&hint, 1000).replace(['\r','\n'], " "), sanitize_untrusted_page_text(&matches.join(", "),300))
                 },
                 Err(_) => {
@@ -1485,10 +1499,36 @@ pub async fn run_react_loop(
             recovery_directive = crate::agent::recovery::RESULTS_HINT;
         }
         let changed=run_core.observe(&snapshot,orchestrator.current);
+        if changed {advisory=None;}
+        let native_assessment=crate::agent::deliberation::native_phase(&snapshot,run_core.stalled());
+        if freshly_observed && orchestrator.specialist()!=Specialist::Verification &&
+            review_budget>0 && (step as u32).saturating_sub(last_review_step)>=2 &&
+            (run_core.escalate() || (changed && !recorded_steps.is_empty() && crate::agent::deliberation::read_only(&goal))) &&
+            router.lock().await.select_backend(&snapshot.origin)=="ollama" &&
+            !matches!(native_assessment.phase,crate::agent::deliberation::Phase::Blocked|crate::agent::deliberation::Phase::ResolveDialog) {
+            review_budget-=1;last_review_step=step as u32;
+            let _=app.emit("agent:review",serde_json::json!({"run_id":run_id,"step_index":step,"status":"reviewing"}));
+            let result=tokio::select!{
+                _=cancel.cancelled()=>return Ok("cancelled".into()),
+                r=crate::agent::deliberation::review(&vision_config,&goal,&snapshot,&recent_outcomes)=>r
+            };
+            if let Some(review)=result {
+                let _=app.emit("agent:review",serde_json::json!({"run_id":run_id,"step_index":step,"status":"observed","phase":review.phase.label(),"ready":review.ready}));
+                advisory=Some(review);
+            }
+        }
+        let assessment=advisory.as_ref().unwrap_or(&native_assessment);
+        let ready_for_review=assessment.ready_on(&snapshot)&&freshly_observed&&orchestrator.can_complete(&snapshot).is_ok()
+            && result_opening_observed(&goal,&initial_origin,&snapshot,&recorded_steps)
+            && requested_named_link_title(&goal).is_none()&&requested_named_result_title(&goal).is_none()
+            && orchestrator.specialist()!=Specialist::Form&&orchestrator.specialist()!=Specialist::Comparison;
+        let mut preferred_ids=visual_ids.clone();
+        if let Some(id)=assessment.target.as_ref(){preferred_ids.insert(0,id.clone());}
+        let navigation=crate::agent::deliberation::navigation_candidates(&goal,&snapshot);
         let task_state=run_core.hint(&snapshot,orchestrator.current,orchestrator.plan.stages.len());
         let failed_choices=run_core.blocked(&snapshot,orchestrator.current);
         let _=app.emit("agent:orchestration",serde_json::json!({"run_id":run_id,"step_index":step,"page_changed":changed,"stage":orchestrator.current,"stalled":run_core.stalled(),"excluded_choices":failed_choices.len()}));
-        let prompt_payload = format!("Task state: {task_state}\nFailed choices JSON: {}\n{recovery_directive}\n{prompt_payload}{vision_context}",serde_json::to_string(&failed_choices).unwrap_or_default());
+        let prompt_payload = format!("Task state: {task_state}\nProgress assessment: {}\nPreferred live IDs JSON: {}\nAllowed navigation JSON: {}\nFailed choices JSON: {}\n{recovery_directive}\n{prompt_payload}{vision_context}",assessment.hint(),serde_json::to_string(&preferred_ids).unwrap_or_default(),serde_json::to_string(&navigation).unwrap_or_default(),serde_json::to_string(&failed_choices).unwrap_or_default());
         let _ = app.emit("agent:activity", serde_json::json!({
             "run_id": run_id,
             "phase": if orchestrator.specialist() == Specialist::Verification {
@@ -1519,6 +1559,8 @@ pub async fn run_react_loop(
         let (mut thought, mut action, mut model_route) =
             if let Some((action,phase)) = prerequisite {
                 ("Resolve the next explicitly grounded prerequisite".to_string(),action,format!("prerequisite:{phase}"))
+            } else if ready_for_review && orchestrator.specialist()!=Specialist::Verification {
+                ("Read-only progress evaluator found supporting evidence; request independent final verification".into(),BrowserAction::Complete{summary:"Review the observed evidence against every requested objective".into()},"review:observed_stage_handoff".into())
             } else if orchestrator.specialist() == Specialist::Verification {
                 (
                     "Request independent read-only source verification".to_string(),
@@ -1908,6 +1950,17 @@ pub async fn run_react_loop(
 
         // Repeating on a different page state may be legitimate, but repeating
         // on the identical observed state gets an evidence-aware recovery prompt.
+        if model_route.contains("ollama:")||model_route.contains("litellm:")||model_route.contains("groq:")||model_route.contains("bedrock:") {
+            if let BrowserAction::Navigate{url}=&action {
+                if !crate::agent::deliberation::navigation_grounded(&goal,&snapshot,url) {
+                    action_binding_error=Some("Unobserved navigation target; select a live link or explicit user destination".into());
+                }
+            }
+        }
+        let visual_used_for_action=match &action {
+            BrowserAction::Click{node_id,..}|BrowserAction::TypeText{node_id,..}|BrowserAction::SelectOption{node_id,..}|BrowserAction::PressKey{node_id,..}=>visual_ids.contains(node_id),
+            _=>false
+        };
         let semantic_attempt=run_core.prepare(&action,&snapshot,orchestrator.current);
         let signature = action_state_signature(orchestrator.current, &action, &snapshot);
         let redundant_navigation = matches!(&action, BrowserAction::Navigate { url }
@@ -2103,7 +2156,8 @@ pub async fn run_react_loop(
                             &orchestrator.evidence,
                         ).map_err(anyhow::Error::msg)
                     } else {
-                        let router = router.lock().await.clone();
+                        let selected = router.lock().await.clone();
+                        let router=if used_reviewer {selected.local_supervisor(&snapshot.origin).unwrap_or(selected)} else {selected};
                         let first = router.verify_browser_task(&goal, summary, &orchestrator.evidence,
                             is_comparison, &creds).await;
                         match first {
@@ -2372,6 +2426,10 @@ pub async fn run_react_loop(
             else if outcome.contains("NO MEANINGFUL PAGE CHANGE") || outcome.contains("PAGE CHANGE NOT OBSERVED") {
                 "executed; no observed progress"
             } else { "executed" };
+        if ok&&progress=="executed" {
+            used_reviewer|=model_route=="review:observed_stage_handoff";
+            used_visual|=visual_used_for_action;
+        }
         run_core.record(semantic_attempt,ok && progress=="executed");
         recent_outcomes.push(format!("{action_kind}: {progress} | {}",
             sanitize_untrusted_page_text(&outcome, 200)));
@@ -2489,6 +2547,7 @@ pub async fn run_react_loop(
     {
         let failures: Vec<RecoveredFailure> = failures_observed.iter().copied().collect();
         let mut candidates = infer_memories(&initial_origin, &goal, true, &failures);
+        candidates.extend(crate::agent::memory::verified_strategy(&goal,used_reviewer,used_visual));
         if !candidates.iter().any(|c| c.kind == "preference")
             && can_classify_preference(&initial_origin, &goal)
         {

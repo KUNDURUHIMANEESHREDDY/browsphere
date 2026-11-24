@@ -144,6 +144,9 @@ pub fn check_navigation_result(requested: &str, after: &DomSnapshot) -> Result<(
         || target.query() != actual.query() {
         return Err(format!("Opened {actual}, not the requested destination {target}"));
     }
+    if super::deliberation::error_page(after) {
+        return Err("Destination displayed an error or access restriction".into());
+    }
     let title = after.title.trim().to_lowercase();
     let text = after.text_excerpt.trim().to_lowercase();
     // A real native DOM title also proves that a document was observed, even
@@ -168,13 +171,15 @@ pub fn check_navigation_result(requested: &str, after: &DomSnapshot) -> Result<(
 /// research task can take this deterministic completion path.
 pub fn requested_named_result_title(goal: &str) -> Option<String> {
     let lowered = goal.to_lowercase();
-    if !lowered.contains("report") || !lowered.contains("title") {
+    if !title_only_goal(&lowered) {
         return None;
     }
     let begin = lowered.find("search for ")? + "search for ".len();
     let rest = goal.get(begin..)?;
     let end = rest.to_lowercase().find(" and open")?;
     let subject = rest.get(..end)?.trim();
+    let subject = ["the word ","the planet ","the term ","the article "].iter()
+        .find_map(|prefix|subject.get(..prefix.len()).filter(|s|s.eq_ignore_ascii_case(prefix)).and_then(|_|subject.get(prefix.len()..))).unwrap_or(subject);
     if !(3..=100).contains(&subject.chars().count()) ||
         !subject.chars().any(char::is_alphanumeric) {
         return None;
@@ -234,13 +239,21 @@ pub fn verify_observed_named_result_title(
 /// A narrowly scoped, read-only link-and-title task such as
 /// "click the Tutorial link ... report the page title". Do not use this for
 /// forms, purchases, arbitrary navigation, or tasks without a named link.
+fn title_only_goal(lower:&str)->bool{
+    let g=lower.trim().trim_end_matches(['.','!','?']).trim();
+    ["report its page title","report the page title","report page title","report its title","report the title"].iter().any(|s|g.ends_with(s))
+        && !["meaning","explain","summarize","compare","extract","purchase","buy ","book ","submit","pay ","download","publish","register","send "].iter().any(|s|g.contains(s))
+}
 pub fn requested_named_link_title(goal: &str) -> Option<String> {
     let lower = goal.to_ascii_lowercase();
-    if !lower.contains("report") || !lower.contains("title") { return None; }
-    let start = lower.find("click the ").map(|i| i + "click the ".len())
-        .or_else(|| lower.find("click ").map(|i| i + "click ".len()))?;
+    if !title_only_goal(&lower) { return None; }
+    let (start,via_visible) = if let Some(i)=lower.find("click the "){(i+"click the ".len(),false)}
+        else if let Some(i)=lower.find("click "){(i+"click ".len(),false)}
+        else if let Some(i)=lower.find("open the "){(i+"open the ".len(),true)}
+        else{return None};
     let suffix = goal.get(start..)?;
-    let end = suffix.to_ascii_lowercase().find(" link")?;
+    let end = if via_visible {suffix.to_ascii_lowercase().find(" using its visible link")?}
+        else {suffix.to_ascii_lowercase().find(" link")?};
     let label = suffix.get(..end)?.trim();
     if !(3..=64).contains(&label.chars().count())
         || !label.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-')
@@ -269,7 +282,7 @@ pub fn verify_observed_named_link_title(
     }
     let expected = normalized(&label);
     let title = normalized(&after.title);
-    let path = normalized(&url.path().replace(['-', '_'], " "));
+    let path = normalized(&url.path().replace(['-', '_', '/'], " "));
     if !title.contains(&expected) || !path.contains(&expected)
         || after.text_excerpt.trim().chars().count() < 40
         || title.contains("search results") || title.contains("not found")
@@ -550,6 +563,9 @@ mod tests {
         let goal = "On this documentation site, search for Ada Lovelace and open the corresponding article. Then report its page title.";
         assert_eq!(requested_named_result_title(goal).as_deref(), Some("Ada Lovelace"));
         assert!(requested_named_result_title("Search for Ada Lovelace and compare biographies").is_none());
+        assert!(requested_named_result_title("Search for the word serendipity and open its entry. Report the page title and English meaning.").is_none());
+        assert_eq!(requested_named_result_title("Search for the word serendipity and open its entry. Report the page title.").as_deref(),Some("serendipity"));
+        assert_eq!(requested_named_link_title("Open the JavaScript Guide using its visible link. Then report the page title.").as_deref(),Some("JavaScript Guide"));
         let start = "https://en.wikipedia.org/wiki/Main_Page";
         let article = DomSnapshot {
             origin: "https://en.wikipedia.org/wiki/Ada_Lovelace".into(),

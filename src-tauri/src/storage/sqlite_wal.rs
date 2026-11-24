@@ -253,7 +253,9 @@ impl BrowserDatabase {
         let key = candidate.key.trim().to_lowercase();
         let content = candidate.content.trim();
         anyhow::ensure!(matches!(kind, "preference" | "workflow" | "lesson"), "Unknown memory type");
-        anyhow::ensure!(scope == "global" && kind == "preference" ||
+        anyhow::ensure!(scope == "global" && (kind == "preference" || (kind == "lesson" &&
+            matches!((key.as_str(),content),("strategy:review","For research and lookup tasks, review the current evidence and remaining goal before selecting another browser action.")|
+            ("strategy:vision","For browser search or form controls, use visual hints only when matched to current native accessible controls.")))) ||
             scope != "global" && scope.len() <= 253 &&
             scope.contains('.') && scope.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'),
             "Invalid memory scope");
@@ -358,6 +360,9 @@ impl BrowserDatabase {
             let overlap = relevant_overlap(goal, &m.content) as i64;
             let score = if m.scope == "global" && (m.kind == "preference" || m.kind == "legacy") {
                 100
+            } else if m.kind == "lesson" && m.scope == "global" && m.key.starts_with("strategy:")
+                && crate::agent::deliberation::read_only(goal) {
+                9 + m.evidence_count.min(4)
             } else if m.kind == "lesson" && m.scope == host {
                 10 + overlap * 4
             } else if overlap > 0 {

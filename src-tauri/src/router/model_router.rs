@@ -992,6 +992,7 @@ User text: <text>{}</text>"#,
         for (prefix, limit) in [
             ("Supervisor directive:", 700usize),
             ("Task state:", 500usize),
+            ("Progress assessment:", 340usize),
             ("Recovery directive:", 650usize),
             ("User request:", 350usize), ("The user requests:", 350),
             ("Original user goal:", 450), ("Assigned stage objective:", 200),
@@ -1017,8 +1018,14 @@ User text: <text>{}</text>"#,
             .and_then(|value|serde_json::from_str::<Vec<Value>>(value).ok()).unwrap_or_default();
         let excluded=|kind:&str,node_id:&str,key:Option<&str>|failed.iter().any(|f|
             f["type"]==kind&&f["node_id"]==node_id&&f["key"].as_str()==key);
-        // Prioritize real search controls, but keep reading order otherwise.
-        nodes.sort_by_key(|node| if node["role"] == "option" { 0 } else if node["search_state"].is_string() { 1 } else { 2 });
+        let preferred=raw.lines().find_map(|l|l.strip_prefix("Preferred live IDs JSON: "))
+            .and_then(|s|serde_json::from_str::<Vec<String>>(s).ok()).unwrap_or_default();
+        let allowed_navigation=raw.lines().find_map(|l|l.strip_prefix("Allowed navigation JSON: "))
+            .and_then(|s|serde_json::from_str::<Vec<String>>(s).ok());
+        // Keep current options first, then grounded reviewer/vision suggestions.
+        nodes.sort_by_key(|node| if node["role"]=="option"{0}
+            else if node["node_id"].as_str().is_some_and(|id|preferred.iter().any(|p|p==id)){1}
+            else if node["search_state"].is_string(){2}else{3});
         let mut aliases = HashMap::new();
         let mut seen = std::collections::HashSet::new();
         let (mut clicks, mut texts, mut enters, mut escapes, mut selects, mut toggles) =
@@ -1101,7 +1108,11 @@ User text: <text>{}</text>"#,
         if !toggles.is_empty() {
             variants.push(variant("set_checked",json!({"node_id":ids(&toggles),"checked":{"type":"boolean"}})));
         }
-        variants.push(variant("navigate",json!({"url":{"type":"string"}})));
+        match &allowed_navigation {
+            Some(urls) if !urls.is_empty()=>variants.push(variant("navigate",json!({"url":{"type":"string","enum":urls}}))),
+            None=>variants.push(variant("navigate",json!({"url":{"type":"string"}}))), // legacy direct connection probe
+            _=>{}
+        }
         variants.push(variant("scroll",json!({"delta_y":{"type":"integer","minimum":-1400,"maximum":1400}})));
         variants.push(variant("download",json!({"url":{"type":"string"}})));
         variants.push(variant("complete",json!({"summary":{"type":"string"}})));
@@ -1249,6 +1260,7 @@ User text: <text>{}</text>"#,
             // prompt. Keep that request or the local model sees no actual task.
             ("Supervisor directive:", 700usize),
             ("Task state:", 500usize),
+            ("Progress assessment:", 340usize),
             ("Recovery directive:", 650usize),
             ("User request:", 450usize),
             ("The user requests:", 450usize),

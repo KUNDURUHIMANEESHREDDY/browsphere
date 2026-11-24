@@ -97,8 +97,18 @@ pub fn named_link(goal:&str,page:&DomSnapshot)->Option<(BrowserAction,String)> {
 pub fn named_search_control(goal:&str,page:&DomSnapshot)->Option<BrowserAction>{
     if !super::orchestrator::is_simple_named_title_task(goal)||page.text_excerpt.starts_with("Active dialog:"){return None;}
     if page.interactive_nodes.iter().any(|n|!n.is_sensitive&&n.tag=="input"&&(n.role=="searchbox"||normalized(&n.label).contains("search"))){return None;}
-    unique(page.interactive_nodes.iter().filter(|n|safe(n)&&n.role=="button"
-        && matches!(normalized(&n.label).as_str(),"search"|"search wikipedia"|"open search"))).map(click)
+    let origin=url::Url::parse(&page.origin).ok()?;
+    let site=origin.host_str()?.split('.').filter(|s|*s!="www"&&*s!="en").rev().nth(1).unwrap_or_default().to_lowercase();
+    unique(page.interactive_nodes.iter().filter(|n|{
+        if !safe(n)||!matches!(n.role.as_str(),"button"|"link"|"a")&&n.tag!="a"{return false;}
+        // Native accessibility names may append a keyboard shortcut, e.g. [f].
+        let full=normalized(&n.label);
+        let label=full.rsplit_once(" [").filter(|(_,key)|key.ends_with(']')&&key.len()<=16)
+            .map(|(text,_)|text).unwrap_or(&full);
+        let exact=matches!(label,"search"|"open search")||(!site.is_empty()&&label==format!("search {site}"));
+        exact && n.href.as_deref().map_or(true,|href|url::Url::parse(href).ok()
+            .is_some_and(|u|u.origin()==origin.origin()&&u.username().is_empty()&&u.password().is_none()))
+    })).map(click)
 }
 pub fn named_result(goal:&str,page:&DomSnapshot)->Option<BrowserAction>{
     if !super::orchestrator::is_simple_named_title_task(goal)||page.text_excerpt.starts_with("Active dialog:"){return None;}
@@ -177,6 +187,16 @@ mod tests {
         DomSnapshot{origin:"https://example.org".into(),title:"Test".into(),text_excerpt:text.into(),interactive_nodes:nodes}
     }
     const GOAL:&str="Test a train booking search only. Choose English if a language dialog appears. Find trains from Bengaluru to New Delhi for 2026-11-24.";
+    #[test]
+    fn search_opener_accepts_observed_link_and_access_key(){
+        let goal="On this site, search for Ada Lovelace and open the corresponding article. Then report its page title.";
+        let mut n=node("search","a","a","Search Example [f]",None);
+        n.href=Some("https://example.org/search".into());
+        let mut p=page("Public homepage",vec![n]);
+        assert!(matches!(named_search_control(goal,&p),Some(BrowserAction::Click{node_id,..}) if node_id=="search"));
+        p.interactive_nodes[0].href=Some("https://other.example/search".into());
+        assert!(named_search_control(goal,&p).is_none());
+    }
     #[test]
     fn named_link_is_unique_same_origin_and_exact(){
         let goal="Click the Tutorial link. Then report the page title.";

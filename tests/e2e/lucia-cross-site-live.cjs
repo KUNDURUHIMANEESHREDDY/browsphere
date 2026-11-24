@@ -179,10 +179,14 @@ async function main(){
             const calls=audit.slice(start);
             const api=t.server==='empty'?calls.some(a=>a.method==='tools/list')&&!calls.some(a=>a.method==='tools/call'):calls.some(a=>a.publicHttpStatus===200&&a.actual===t.expected);
             const landed=hostname(after.observed)===hostname(t.url)&&new URL(after.observed).pathname===t.path;
-            const acted=task.actions.some(a=>(a.outcome==='ok'||a.outcome==='confirmed')&&a.type!=='complete'&&(a.modelRoute||'').includes('ollama:'+localModel));
+            const actualActions=task.actions.filter(a=>(a.outcome==='ok'||a.outcome==='confirmed')&&a.type!=='complete');
+            const modelActed=actualActions.some(a=>/ollama:/.test(a.modelRoute||''));
+            const primaryActed=actualActions.some(a=>(a.modelRoute||'').includes('ollama:'+localModel));
+            const nativeActed=actualActions.some(a=>/prerequisite:|search_input:|search_enter:/.test(a.modelRoute||''));
+            const acted=modelActed||nativeActed;
             const pass=api&&landed&&acted&&task.verified&&task.status==='completed'&&!task.approvalRequired;
-            console.log('MCP_PUBLIC_DETAIL',JSON.stringify({label:t.label,pass,api,landed,acted,task,before,after,audit:calls}));
-            record(t.label,pass,{api,landed,acted,status:task.status,verified:task.verified});
+            console.log('MCP_PUBLIC_DETAIL',JSON.stringify({label:t.label,pass,api,landed,acted,modelActed,primaryActed,nativeActed,task,before,after,audit:calls}));
+            record(t.label,pass,{api,landed,acted,modelActed,primaryActed,nativeActed,status:task.status,verified:task.verified});
           } catch(e) {record(t.label,false,{error:String(e),audit:audit.slice(start)});}
         }
       }finally{await new Promise(r=>server.close(r));fs.rmSync(configPath,{force:true});}

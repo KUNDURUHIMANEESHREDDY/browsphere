@@ -196,9 +196,25 @@ pub fn infer_memories(
     result
 }
 
+/// Only fixed, non-personal strategy lessons transfer between websites.
+pub fn verified_strategy(goal:&str,used_reviewer:bool,used_visual:bool)->Vec<MemoryCandidate>{
+    if is_sensitive(goal)||!super::deliberation::read_only(goal){return Vec::new()}
+    let mut lessons=Vec::new();
+    if used_reviewer{lessons.push(("strategy:review","For research and lookup tasks, review the current evidence and remaining goal before selecting another browser action."));}
+    if used_visual{lessons.push(("strategy:vision","For browser search or form controls, use visual hints only when matched to current native accessible controls."));}
+    lessons.into_iter().map(|(key,content)|MemoryCandidate{scope:"global".into(),kind:"lesson",key:key.into(),content:content.into(),ttl_days:Some(60)}).collect()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn global_strategy_lessons_are_fixed_and_not_learned_from_private_goals() {
+        let lessons=verified_strategy("Find the public guide",true,true);
+        assert_eq!(lessons.len(),2);
+        assert!(lessons.iter().all(|m|m.scope=="global"&&m.kind=="lesson"&&m.ttl_days==Some(60)));
+        assert!(verified_strategy("Find my private account details",true,true).is_empty());
+        assert!(verified_strategy("Find the public guide",false,false).is_empty());
+    }
     #[test]
     fn learns_preferences_and_replaces_contradictory_pref_keys() {
         let a = infer_memories("https://docs.rs", "I prefer concise responses", true, &[]);

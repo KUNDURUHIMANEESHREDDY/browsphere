@@ -384,6 +384,7 @@ impl Orchestrator {
     /// Reject model-declared completion when there is no real page evidence.
     /// This is an evidence gate, not a factual truth oracle.
     pub fn can_complete(&self, snapshot: &DomSnapshot) -> Result<(), String> {
+        if super::deliberation::error_page(snapshot) {return Err("The current page is an error or access restriction".into());}
         if let Some(reason) = crate::agent::prerequisites::completion_blocker(&self.plan.goal,snapshot) { return Err(reason.into()); }
         if self.last_action_failed {
             return Err("Previous browser action failed; re-observe and recover first".into());
