@@ -75,7 +75,7 @@
           !Array.isArray(n.depends_on)||n.depends_on.some(d=>!Number.isInteger(d)||d<0||d>=raw.nodes.length||d===n.id)) return null;
       nodes.push({id:n.id,label:graphKinds[n.kind],state:n.state,depends_on:n.depends_on.slice()});
     }
-    return {revision:raw.revision,nodes};
+    return {revision:raw.revision,nodes,checkpointSaved:payload.checkpoint_saved===true,checkpointResumable:payload.checkpoint_saved===true&&payload.checkpoint_resumable===true};
   }
   function trace(payload) {
     const action = typeof payload?.action?.type === 'string' ? payload.action.type : '';

@@ -31,3 +31,5 @@ pub mod page_understanding;
 pub mod multimodal_perception;
 pub mod requirements;
 pub mod evidence_acquisition;
+pub mod checkpoint;
+pub mod research;

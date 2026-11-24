@@ -839,7 +839,7 @@ mod tests {
         assert_eq!(report.status, "evidence_checked");
         assert_eq!(report.findings.len(), 1);
         assert!(verify_direct_navigation("https://www.youtube.com/", &DomSnapshot {
-            origin: "https://www.youtube.com.evil.test/".into(), ..snapshot.clone()
+            structure: Default::default(), origin: "https://www.youtube.com.evil.test/".into(), ..snapshot.clone()
         }).is_err());
         assert!(verify_direct_navigation("https://www.youtube.com/", &DomSnapshot {
             text_excerpt: "".into(), ..snapshot.clone()
@@ -899,13 +899,13 @@ mod tests {
         assert!(verify_observed_named_result_title(goal, start, &article, &[]).is_err());
         assert!(verify_observed_named_result_title(goal, article.origin.as_str(), &article, &sources).is_err());
         let search_listing = DomSnapshot {
-            origin: "https://en.wikipedia.org/w/index.php?search=Ada_Lovelace".into(),
+            structure: Default::default(), origin: "https://en.wikipedia.org/w/index.php?search=Ada_Lovelace".into(),
             title: "Ada Lovelace - Search results".into(),
             ..article.clone()
         };
         assert!(verify_observed_named_result_title(goal, start, &search_listing, &sources).is_err());
         let other = DomSnapshot {
-            origin: "https://en.wikipedia.org/wiki/Other".into(),
+            structure: Default::default(), origin: "https://en.wikipedia.org/wiki/Other".into(),
             title: "Other - Wikipedia".into(),
             ..article
         };
@@ -934,13 +934,13 @@ mod tests {
         assert!(verify_observed_named_link_title(goal, start, &page, &[]).is_err());
         assert!(verify_observed_named_link_title(goal, &page.origin, &page, &evidence).is_err());
         let wrong = DomSnapshot {
-            origin: "https://docs.python.org/3/library/index.html".into(),
+            structure: Default::default(), origin: "https://docs.python.org/3/library/index.html".into(),
             title: "The Python Library — Python documentation".into(),
             ..page.clone()
         };
         assert!(verify_observed_named_link_title(goal, start, &wrong, &evidence).is_err());
         let forged = DomSnapshot {
-            origin: "https://docs.python.org.evil.test/3/tutorial/index.html".into(),
+            structure: Default::default(), origin: "https://docs.python.org.evil.test/3/tutorial/index.html".into(),
             ..page
         };
         assert!(verify_observed_named_link_title(goal, start, &forged, &evidence).is_err());

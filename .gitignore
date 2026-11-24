@@ -42,3 +42,7 @@ Thumbs.db
 # Locally staged offline AI weights (do not commit large model binaries)
 /src-tauri/bundled-ai/
 /src-tauri/offline-installer-hooks.nsh
+
+# Python test artifacts
+__pycache__/
+*.pyc
