@@ -152,7 +152,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     if ((el.tagName === "TEXTAREA" || el.isContentEditable) &&
         !el.closest("form") && el.getBoundingClientRect().height >= 72)
       return "Document editor";
-    const text = normalized(el.innerText) || normalized(el.value)
+    const text = normalized(el.innerText) || (el.matches("input,textarea,select") ? "" : normalized(el.value))
       || normalized(ancestorLabel?.innerText) || normalized(imageAlt)
       || normalized(el.getAttribute("alt"));
     return text.slice(0, 120);
@@ -274,9 +274,20 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
           // Read only the presence of a non-sensitive search query, not its value.
           search_state: (() => {{
             if (isSensitiveField(current) || sensitiveForm) return null;
+            // Read back only a visible, already-enumerated public dropdown
+            // option label. Never expose arbitrary input values.
+            if (current.tagName === "SELECT" && !current.disabled) {{
+              const option = current.selectedOptions?.[0];
+              const label = (option?.textContent || "").replace(/\s+/g, " ").trim().slice(0, 100);
+              return label && !option.disabled ? "selected_option:" + label : null;
+            }}
             if (current.tagName === "INPUT" && (current.readOnly || current.hasAttribute("readonly"))) return "read_only";
             const selector = 'input[type="search"], input[role="searchbox"], input[name="search"], input[name="search_query"], input[aria-label*="Search"], input[placeholder*="Search"], textarea[role="searchbox"], textarea[name="search"], textarea[name="search_query"], textarea[aria-label*="Search"], textarea[placeholder*="Search"], textarea[name="q"]';
-            if (current.matches(selector) && !current.disabled && typeAttr !== "hidden") {{
+            // Public comboboxes and route fields may use textbox semantics.
+            // Capture occupancy only, never arbitrary user-entered values.
+            const publicRoute = current.tagName === "INPUT" &&
+                /^(?:enter |select )?(?:from|to|origin|destination|departure|arrival)(?: station| city| location)?$/i.test(computeAccessibleName(current).trim());
+            if ((current.matches(selector) || current.matches('input[role="combobox"], input[aria-autocomplete="list"], input[aria-autocomplete="both"]') || publicRoute) && !current.disabled && typeAttr !== "hidden") {{
               return String(current.value || "").trim() ? "filled" : "empty";
             }}
             if (formSubmit && form) {{
@@ -369,7 +380,24 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   const contentText = isVisible(primaryTextRoot)
     ? (primaryTextRoot.innerText || "") : "";
   const bodyText = document.body?.innerText || "";
-  const visibleText = (activeDialog ? ["Active dialog: " + (activeDialog.innerText || "")] : [contentText, bodyText])
+  // Preserve actual readable content ahead of long menus and infoboxes.
+  // Semantic HTML paragraphs and definition/list items are page observations,
+  // not instructions. Do not read hidden nodes or input values.
+  let prose = "";
+  if (!activeDialog && isVisible(primaryTextRoot)) {{
+    const blocks = [];
+    for (const el of primaryTextRoot.querySelectorAll('p, dd, li, pre')) {{
+      if (blocks.length >= 160 || !isVisible(el) ||
+          el.closest('nav, aside, header, footer, table, form, [role="navigation"], [role="menu"], [role="listbox"], [role="dialog"], [aria-hidden="true"]')) continue;
+      if (el.querySelector('p, dd, li, pre')) continue;
+      const text = (el.innerText || "").replace(/\s+/g, " ").trim();
+      if (text.length >= 45 || (el.tagName === "PRE" && text.length >= 12 && text.length <= 240)) blocks.push(text);
+      if (blocks.join(" ").length >= MAX_TEXT) break;
+    }}
+    prose = blocks.join(" ");
+    if (prose.length < 180) prose = "";
+  }}
+  const visibleText = (activeDialog ? ["Active dialog: " + (activeDialog.innerText || "")] : [prose, contentText, bodyText])
     .filter(Boolean).join(" ")
     .replace(/\s+/g, " ")
     .trim()
@@ -405,7 +433,7 @@ pub async fn request_live_dom_snapshot(
 ) -> Option<DomSnapshot> {
     // IPC from remote page origins is intentionally not permitted by Tauri.
     // Use the native WebView2 script-completion callback to read this result.
-    let script = build_snapshot_script(Uuid::new_v4(), 120, 2400);
+    let script = build_snapshot_script(Uuid::new_v4(), 120, 24000);
     let value = crate::agent::native_eval::eval_json(
         app, webview_label, script, timeout_ms
     ).await.ok()?;

@@ -9,12 +9,14 @@ use crate::agent::orchestrator::SourceEvidence;
 use crate::agent::policy::BrowserAction;
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProposedFinding {
     claim: String,
     url: String,
     quote: String,
 }
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProposedVerification {
     status: String,
     #[serde(default)]
@@ -57,6 +59,287 @@ fn web_url(raw: &str) -> Option<Url> {
     Some(url)
 }
 
+/// Select a bounded, contiguous, goal-relevant passage from each observed
+/// source. This is retrieval only, not an answer or an evidence judgment.
+pub fn focus_sources(goal:&str,sources:&[SourceEvidence],comparison:bool)->Vec<SourceEvidence>{
+    let ignored=["this","that","with","from","website","search","article","corresponding","report","page","open","find","about","then","position","please","compare","source","their","which","what"];
+    let wanted:HashSet<String>=goal.split(|c:char|!c.is_alphanumeric())
+        .map(str::to_lowercase).filter(|t|t.chars().count()>=3&&!ignored.contains(&t.as_str())&&!["the","and","its","for","are","was","can","has","you"].contains(&t.as_str())).collect();
+    let subject=super::deliberation::lookup_subject(goal).map(|s|normalized(&s));
+    let mut ranked:Vec<_>=sources.iter().enumerate().map(|(idx,p)|{
+        let chars:Vec<char>=p.excerpt.chars().take(24000).collect();
+        let mut best=(0i32,0usize);
+        // Score overlapping 900-character windows. Use original contiguous
+        // text, not model-generated summaries or stitched quotations.
+        for start in (0..chars.len().max(1)).step_by(240){
+            let end=(start+1100).min(chars.len());
+            let segment:String=chars[start..end].iter().collect();
+            let words:HashSet<String>=segment.split(|c:char|!c.is_alphanumeric()).map(str::to_lowercase).filter(|t|t.chars().count()>=3).collect();
+            let score=words.intersection(&wanted).count() as i32*12
+                + if subject.as_ref().is_some_and(|s|normalized(&segment).contains(s)){6}else{0};
+            if score>best.0{best=(score,start);}
+        }
+        let start=best.1.saturating_sub(120);
+        let end=(start+1450).min(chars.len());
+        let title=normalized(&p.title);
+        let score=best.0+terms(&title).intersection(&wanted).count() as i32*16
+            +if subject.as_ref().is_some_and(|s|title.starts_with(s)){35}else{0}
+            +idx as i32;
+        (score,idx,SourceEvidence{url:p.url.clone(),title:p.title.clone(),excerpt:chars[start..end].iter().collect()})
+    }).collect();
+    ranked.sort_by(|a,b|b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    let mut out=Vec::new();
+    let mut hosts=HashSet::new();
+    if comparison{
+        for (_,_,p) in &ranked{
+            if let Some(host)=web_url(&p.url).and_then(|u|u.host_str().map(str::to_owned)){
+                if hosts.insert(host){out.push(p.clone());}
+                if out.len()>=3{break;}
+            }
+        }
+    }else{
+        out.extend(ranked.iter().take(2).map(|(_,_,p)|p.clone()));
+    }
+    out
+}
+
+/// A small model chooses evidence identifiers, rather than inventing URL,
+/// quote and paraphrase triples. The native side retains all provenance.
+#[derive(Clone,Debug,Serialize)]
+pub struct Passage {pub id:String,pub text:String}
+fn query_words(goal:&str)->HashSet<String>{
+    let cleaned=goal.split_whitespace().filter(|s|!s.contains("://")).collect::<Vec<_>>().join(" ");
+    cleaned.split(|c:char|!c.is_alphanumeric()).map(str::to_lowercase)
+        .filter(|w|w.len()>=3&&!["the","and","for","from","with","this","that","what","each","both","using","read","report","cite","source","sources","exact","supporting","excerpts","compare","research","official","documentation","pages","explain","one","its","their","please","which","website","article","open","search","corresponding"].contains(&w.as_str())).collect()
+}
+fn passage_score(text:&str,wanted:&HashSet<String>)->i32{
+    let words:HashSet<String>=text.split(|c:char|!c.is_alphanumeric()).map(str::to_lowercase).collect();
+    words.intersection(wanted).count() as i32*10
+}
+pub fn candidate_passages(goal:&str,source:&SourceEvidence)->Vec<Passage>{
+    let wanted=query_words(goal);
+    let raw=source.excerpt.chars().take(24000).collect::<String>();
+    let mut pieces=Vec::<String>::new();
+    let mut buffer=String::new();
+    for word in raw.split_whitespace(){
+        if !buffer.is_empty()&&buffer.chars().count()+word.chars().count()+1>225{
+            pieces.push(std::mem::take(&mut buffer));
+        }
+        if !buffer.is_empty(){buffer.push(' ');}
+        buffer.push_str(word);
+        if word.ends_with(['.','!','?'])&&buffer.chars().count()>=35{
+            pieces.push(std::mem::take(&mut buffer));
+        }
+    }
+    if !buffer.is_empty(){pieces.push(buffer);}
+    let scores=pieces.iter().map(|p|passage_score(p,&wanted)).collect::<Vec<_>>();
+    let mut ranked=pieces.iter().enumerate().filter_map(|(i,p)|{
+        let n=normalized(p);
+        if p.chars().count()<35||p.chars().count()>240||
+            ["ignore previous","system prompt","ignore instructions","api key","reveal credentials","output exactly","assistant must","developer message"].iter().any(|s|n.contains(s)){return None;}
+        let context=scores.get(i.wrapping_sub(1)).copied().unwrap_or(0).max(scores.get(i+1).copied().unwrap_or(0))/2;
+        let score=scores[i]*2+context;
+        (score>0).then_some((score,i,p.clone()))
+    }).collect::<Vec<_>>();
+    ranked.sort_by(|a,b|b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut seen=HashSet::new();
+    ranked.retain(|(_,_,s)|seen.insert(normalized(s)));
+    ranked.truncate(14);
+    ranked.sort_by_key(|(_,i,_)|*i);
+    ranked.into_iter().enumerate().map(|(i,(_,_,text))|Passage{id:format!("p{}",i+1),text}).collect()
+}
+/// Explicitly requested comparison dimensions. These are not inferred facts:
+/// each requires a separate selected passage from the actual source.
+pub fn research_facets(goal:&str)->Vec<&'static str>{
+    let g=normalized(goal);
+    if let Some(spec)=super::skills::TaskSpec::compile(goal){
+        let mut facets=Vec::new();
+        for fact in spec.required_facts{
+            if fact=="explicit_contrast"{
+                if contrast_terms(goal).is_some(){facets.extend(["contrast_left","contrast_right"]);}
+            }else{facets.push(fact);}
+        }
+        if !facets.is_empty(){return facets;}
+    }
+    if (g.contains("feature")||g.contains("capabilit")||g.contains("advantage"))&&
+        (g.contains("limitation")||g.contains("caveat")||g.contains("drawback")){
+        vec!["feature","caveat"]
+    }else if g.contains("default")&&g.contains("timeout"){
+        vec!["default_behavior"]
+    }else{vec![]}
+}
+fn contrast_terms(goal:&str)->Option<(String,String)>{
+    let lower=goal.to_ascii_lowercase();
+    let start=lower.find("difference between ")?+"difference between ".len();
+    let rest=goal.get(start..)?;
+    let stop=rest.find(['.','?',';', '\n']).unwrap_or(rest.len());
+    let (a,b)=rest.get(..stop)?.split_once(" and ")?;
+    let valid=|s:&str|!s.trim().is_empty()&&s.chars().count()<=60&&s.chars().all(|c|c.is_alphanumeric()||matches!(c,' '|'-'|'_'));
+    if valid(a)&&valid(b){Some((normalized(a),normalized(b)))}else{None}
+}
+fn facet_score(goal:&str,facet:&str,text:&str)->i32{
+    let t=normalized(text);
+    if matches!(facet,"contrast_left"|"contrast_right"){
+        let Some((a,b))=contrast_terms(goal)else{return 0};
+        let term=if facet=="contrast_left"{a}else{b};
+        if !t.contains(&term){return 0;}
+        let explanation=["avoids","avoid ","skips","skip ","does not","not inserted","prevents","causes","updates","performs","instead","will ","returns","means","is used","allows","inserts","ignores"];
+        return explanation.iter().filter(|v|t.contains(**v)).count() as i32;
+    }
+    if facet=="installation_command"{
+        let commands=["pip install ","python -m pip install ","npm install ","yarn add ","pnpm add ","cargo add ","cargo install ","gem install ","go install ","dotnet add package "];
+        return commands.iter().filter(|v|t.contains(**v)).count() as i32;
+    }
+    if facet=="runtime_compatibility"{
+        let runtime=["python","node.js","nodejs","node ","runtime","requires-python","rust ","java ","jdk "];
+        if !runtime.iter().any(|v|t.contains(*v))||!t.split_whitespace().any(|v|v.chars().any(|c|c.is_ascii_digit())&&v.contains('.')){return 0;}
+        let compatibility=["support","requires","require ","version","compatible","works with","or later","or newer","minimum","and above","+"];
+        return compatibility.iter().filter(|v|t.contains(**v)).count() as i32;
+    }
+    let markers:&[&str]=match facet{
+        "feature"=>&["supports","allows","provides","can use","you can","lets you","request methods","offers","available","enables","use the","use a","returns"],
+        "caveat"=>&["do not","don't","must not","should not","avoid","cannot","not recommended","be careful","warning","make sure","must ","need to","should ","remember to","not support","not possible","by default","no timeout","otherwise","unless"],
+        "default_behavior"=>&["by default","default behavior","defaults to","default timeout","no timeout","no time limit","do not specify a timeout","don't specify a timeout","wait indefinitely","hang indefinitely","not set a timeout","five seconds","5 seconds"],
+        _=>&[]
+    };
+    let count=markers.iter().filter(|m|t.contains(**m)).count() as i32;
+    if facet=="default_behavior"{
+        if !t.contains("timeout"){return 0;}
+        let default_markers=["default","no timeout","no time limit","do not specify a timeout","don't specify a timeout","not set a timeout","wait indefinitely","hang indefinitely"];
+        let effect=["seconds","second","milliseconds","indefinitely","no timeout","no time limit","no timeouts","do not specify a timeout","don't specify a timeout","not set a timeout","never","unlimited"];
+        if !default_markers.iter().any(|m|t.contains(m))||!effect.iter().any(|m|t.contains(m)){return 0;}
+        return count+3;
+    }
+    count
+}
+#[derive(Clone,Debug,Serialize)]
+pub struct FacetCandidates{pub facet:String,pub candidates:Vec<Passage>}
+pub fn facet_candidates(goal:&str,source:&SourceEvidence)->Vec<FacetCandidates>{
+    let wanted=query_words(goal);
+    // Retain complete sentences when possible, including late paragraphs.
+    let text=source.excerpt.chars().take(24000).collect::<String>();
+    let mut pieces=Vec::<String>::new();
+    let mut buf=String::new();
+    for word in text.split_whitespace(){
+        if !buf.is_empty()&&buf.chars().count()+word.chars().count()+1>235{pieces.push(std::mem::take(&mut buf));}
+        if !buf.is_empty(){buf.push(' ');}buf.push_str(word);
+        if word.ends_with(['.','!','?'])&&buf.chars().count()>=30{pieces.push(std::mem::take(&mut buf));}
+    }
+    if !buf.is_empty(){pieces.push(buf);}
+    let single_count=pieces.len();
+    let joined=pieces.windows(2).filter_map(|pair|{
+        let text=format!("{} {}",pair[0],pair[1]);
+        (text.chars().count()<=240).then_some(text)
+    }).collect::<Vec<_>>();
+    pieces.extend(joined);
+    research_facets(goal).into_iter().map(|facet|{
+        let mut ranked=pieces.iter().enumerate().filter_map(|(i,p)|{
+            let score=facet_score(goal,facet,p);
+            let n=normalized(p);
+            if score==0||p.chars().count()<if facet=="installation_command"{12}else{30}||p.chars().count()>240||
+                ["ignore previous","ignore instructions","system prompt","reveal credentials","output exactly","developer message"].iter().any(|x|n.contains(x)){return None;}
+            // Incomplete references like "does not support this" need context;
+            // penalize them rather than confidently presenting fragments.
+            let context_penalty=if ["support this","does this","do this","this is how","like this"].iter().any(|v|n.contains(v)){15}else{0};
+            let complete=if p.ends_with(['.','!','?']){8}else{0};
+            // Adjacent context is retained as an alternative, but do not let
+            // a combined passage outrank direct stand-alone evidence merely
+            // because it contains more generic cue words.
+            let combined_penalty=if i>=single_count{100}else{0};
+            Some((score.min(3)*35+passage_score(p,&wanted)+complete-context_penalty-combined_penalty,i,p.clone()))
+        }).collect::<Vec<_>>();
+        ranked.sort_by(|a,b|b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        let mut seen=HashSet::new();ranked.retain(|(_,_,p)|seen.insert(normalized(p)));ranked.truncate(7);
+        FacetCandidates{facet:facet.into(),candidates:ranked.into_iter().enumerate().map(|(i,(_,_,text))|Passage{id:format!("{facet}_{}",i+1),text}).collect()}
+    }).collect()
+}
+pub fn facet_findings(goal:&str,source:&SourceEvidence,sets:&[FacetCandidates],raw:&str)->Result<Vec<GroundedFinding>,String>{
+    let choices:std::collections::BTreeMap<String,String>=serde_json::from_str(raw).map_err(|_|"Invalid fact-dimension evidence selection")?;
+    let expected=research_facets(goal);
+    if sets.len()!=expected.len()||choices.len()!=expected.len(){return Err("Not every requested fact dimension was answered".into());}
+    let mut out=Vec::new();let mut seen=HashSet::new();
+    for facet in expected{
+        let set=sets.iter().find(|s|s.facet==facet).ok_or("Missing required fact dimension")?;
+        let id=choices.get(facet).ok_or("Missing required fact dimension")?;
+        let p=set.candidates.iter().find(|p|&p.id==id).ok_or_else(||format!("Insufficient {facet} evidence on the requested source"))?;
+        if facet_score(goal,facet,&p.text)==0||!normalized(&source.excerpt).contains(&normalized(&p.text)){
+            return Err(format!("Selected {facet} evidence is not grounded in the observed source"));
+        }
+        if !seen.insert(normalized(&p.text)){return Err("Distinct requested dimensions require distinct supporting passages".into());}
+        out.push(GroundedFinding{claim:p.text.clone(),quote:p.text.clone(),url:source.url.clone()});
+    }
+    Ok(out)
+}
+pub fn comparison_sources(goal:&str,sources:&[SourceEvidence])->Vec<SourceEvidence>{
+    let required=super::deliberation::explicit_research_sources(goal);
+    if !required.is_empty(){
+        return required.iter().filter_map(|u|sources.iter().find(|s|web_url(&s.url).as_ref()==Some(u)).cloned()).collect();
+    }
+    let ranked=focus_sources(goal,sources,true);
+    ranked.iter().filter_map(|p|sources.iter().find(|s|s.url==p.url).cloned()).collect()
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PassageSelection{ids:Vec<String>}
+pub fn selected_findings(goal:&str,source:&SourceEvidence,candidates:&[Passage],raw:&str)->Result<Vec<GroundedFinding>,String>{
+    let selection:PassageSelection=serde_json::from_str(raw).map_err(|_|"Invalid evidence selection JSON")?;
+    if selection.ids.is_empty()||selection.ids.len()>3{return Err("Expected one to three relevant passage IDs".into());}
+    let wanted=query_words(goal);
+    let mut seen=HashSet::new();
+    let mut findings=Vec::new();
+    for id in selection.ids{
+        if !seen.insert(id.clone()){return Err("Duplicate passage selection".into());}
+        let p=candidates.iter().find(|p|p.id==id).ok_or("Unknown passage ID")?;
+        if !normalized(&source.excerpt).contains(&normalized(&p.text)){return Err("Selected passage absent from original capture".into());}
+        findings.push(GroundedFinding{claim:p.text.clone(),quote:p.text.clone(),url:source.url.clone()});
+    }
+    if !findings.iter().any(|f|passage_score(&f.quote,&wanted)>0){return Err("Selected evidence does not address the requested topic".into());}
+    Ok(findings)
+}
+pub fn require_source_coverage(goal:&str,report:&VerificationReport)->Result<(),String>{
+    for target in super::deliberation::explicit_research_sources(goal){
+        if !report.findings.iter().any(|f|web_url(&f.url).as_ref()==Some(&target)){
+            return Err("Comparison report omitted an explicitly required source".into());
+        }
+    }
+    Ok(())
+}
+pub fn compiled_skill_source(goal:&str,sources:&[SourceEvidence])->Option<SourceEvidence>{
+    let spec=super::skills::TaskSpec::compile(goal)?;
+    sources.iter().filter(|s|spec.target_url(&s.url)&&s.excerpt.chars().count()>=80)
+        .max_by_key(|s|s.excerpt.chars().count()).cloned()
+}
+pub fn assemble_compiled_skill_report(goal:&str,sources:&[SourceEvidence],findings:Vec<GroundedFinding>)->Result<VerificationReport,String>{
+    let source=compiled_skill_source(goal,sources).ok_or("Requested target source has not been observed")?;
+    let draft=serde_json::json!({"status":"verified","findings":findings,
+        "uncertainty":"Observed source excerpts support the requested dimensions; they are not independently fact-checked."});
+    let report=check_model_verification(&draft.to_string(),sources,false)?;
+    let facets=research_facets(goal);
+    if facets.is_empty(){return Err("No compiled factual verification dimensions".into());}
+    super::browser_skills::verification::require_dimensions(facets,|facet|
+        report.findings.iter().any(|f|web_url(&f.url)==web_url(&source.url)&&facet_score(goal,facet,&f.quote)>0))?;
+    Ok(report)
+}
+pub fn assemble_extractive_comparison(goal:&str,sources:&[SourceEvidence],findings:Vec<GroundedFinding>)->Result<VerificationReport,String>{
+    // Reuse the existing native verifier, including URL, exact quote, number
+    // and distinct-host checks. Each finding is an extract, not an inference.
+    let draft=serde_json::json!({"status":"verified","findings":findings,
+        "uncertainty":"Extractive comparison of selected source passages. The passages are attributed, not independently fact-checked; unsupported conclusions are not inferred."});
+    let report=check_model_verification(&draft.to_string(),sources,true)?;
+    require_source_coverage(goal,&report)?;
+    let facets=research_facets(goal);
+    if !facets.is_empty(){
+        for source in comparison_sources(goal,sources){
+            for facet in &facets{
+                if !report.findings.iter().any(|f|web_url(&f.url)==web_url(&source.url)&&facet_score(goal,facet,&f.quote)>0){
+                    return Err(format!("Required {facet} evidence is missing from {}",source.url));
+                }
+            }
+        }
+    }
+    Ok(report)
+}
+
 /// Fail closed unless each model-proposed claim cites an observed page and an
 /// actual passage from its excerpt. No generated URLs or quotes may pass.
 pub fn check_model_verification(
@@ -69,7 +352,7 @@ pub fn check_model_verification(
         return Err(format!("Verifier found insufficient evidence: {}",
             draft.uncertainty.chars().take(200).collect::<String>()));
     }
-    if draft.findings.is_empty() || draft.findings.len() > 6 {
+    if draft.findings.is_empty() || draft.findings.len() > 12 {
         return Err("Verification requires 1–6 source-backed findings".into());
     }
     let mut findings = Vec::new();
@@ -86,7 +369,7 @@ pub fn check_model_verification(
         }
         let page = observed.iter().find(|record| web_url(&record.url).as_ref() == Some(&url))
             .ok_or_else(|| format!("Unobserved source URL: {url}"))?;
-        if !normalized(&page.excerpt).contains(&normalized(quote)) {
+        if !super::browser_skills::verification::quote_present(page,quote) {
             return Err(format!("Supporting quote does not appear in observed page: {url}"));
         }
         let claim_terms = terms(claim);
@@ -737,5 +1020,95 @@ mod youtube_first_result_evidence_tests {
         let mut wrong_search = observed.clone();
         wrong_search[0].url = "https://www.youtube.com/results?search_query=unrelated".into();
         assert!(verify_observed_youtube_first_result(goal, &watch, &wrong_search).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod focused_source_tests{
+    use super::*;
+    #[test]
+    fn relevant_late_passage_is_retained_and_preferred(){
+        let sources=vec![
+            SourceEvidence{url:"https://example.org/".into(),title:"Homepage".into(),excerpt:"Navigation menu and general information.".repeat(40)},
+            SourceEvidence{url:"https://example.org/neptune".into(),title:"Neptune".into(),excerpt:format!("{} Neptune is the eighth planet from the Sun. Other planetary information follows.","Unrelated navigation menu. ".repeat(100))}
+        ];
+        let selected=focus_sources("Search for the planet Neptune and open the corresponding article. Report its position from the Sun.",&sources,false);
+        assert_eq!(selected[0].url,sources[1].url);
+        assert!(selected[0].excerpt.contains("Neptune is the eighth planet from the Sun."));
+        assert!(sources[1].excerpt.contains(&selected[0].excerpt));
+        assert!(selected[0].excerpt.chars().count()<=1450);
+    }
+    #[test]
+    fn comparison_preserves_distinct_hosts(){
+        let sources=["one.example","one.example","two.example"].iter().enumerate().map(|(i,host)|SourceEvidence{url:format!("https://{host}/{i}"),title:"Solar energy".into(),excerpt:"Solar energy output varies by location and weather.".into()}).collect::<Vec<_>>();
+        let selected=focus_sources("Compare solar energy output",&sources,true);
+        assert_eq!(selected.len(),2);
+    }
+}
+
+
+#[cfg(test)]
+mod explicit_source_tests {
+    use super::*;
+    #[test]
+    fn explicit_comparison_sources_must_all_be_observed(){
+        let goal="Research and compare https://one.example/guide and https://two.example/guide . Cite both sources.";
+        let mut sources=vec![SourceEvidence{url:"https://one.example/guide".into(),title:"Guide".into(),excerpt:"A readable observed explanation about the relevant subject. ".repeat(3)}];
+        assert_eq!(super::super::deliberation::missing_research_sources(goal,&sources)[0].as_str(),"https://two.example/guide");
+        sources.push(SourceEvidence{url:"https://two.example/guide".into(),title:"Access denied".into(),excerpt:"Error details do not prove that the requested page loaded. ".repeat(3)});
+        assert_eq!(super::super::deliberation::missing_research_sources(goal,&sources).len(),1);
+        sources[1].title="Guide".into();
+        assert!(super::super::deliberation::missing_research_sources(goal,&sources).is_empty());
+        assert!(super::super::deliberation::explicit_research_sources("Compare https://one.example/guide and https://127.0.0.1/ .").is_empty());
+        assert!(super::super::deliberation::explicit_research_sources("Compare https://one.example/guide and https://two.example/guide and buy one.").is_empty());
+    }
+}
+
+
+#[cfg(test)]
+mod extractive_comparison_tests{
+    use super::*;
+    #[test]
+    fn target_fact_contract_requires_every_requested_behavior(){
+        let goal="Find the SQL MERGE command reference. Explain the difference between WHEN MATCHED and WHEN NOT MATCHED.";
+        let source=SourceEvidence{url:"https://example.org/docs/sql-merge.html".into(),title:"SQL MERGE".into(),
+            excerpt:"WHEN MATCHED performs an update to an existing matching row. WHEN NOT MATCHED inserts a new row if the condition permits insertion.".into()};
+        let sets=facet_candidates(goal,&source);
+        assert_eq!(research_facets(goal),vec!["contrast_left","contrast_right"]);
+        assert!(sets.iter().all(|s|!s.candidates.is_empty()));
+        let only=GroundedFinding{url:source.url.clone(),claim:"WHEN MATCHED performs an update to an existing matching row.".into(),quote:"WHEN MATCHED performs an update to an existing matching row.".into()};
+        assert!(assemble_compiled_skill_report(goal,&[source.clone()],vec![only]).is_err());
+        let findings=facet_findings(goal,&source,&sets,r#"{"contrast_left":"contrast_left_1","contrast_right":"contrast_right_1"}"#).unwrap();
+        assert!(assemble_compiled_skill_report(goal,&[source],findings).is_ok());
+    }
+    #[test]
+    fn requested_dimensions_require_separate_observed_evidence(){
+        let goal="Compare features and limitations of libraries";
+        let source=SourceEvidence{url:"https://example.org/guide".into(),title:"Library".into(),
+            excerpt:"The library supports asynchronous HTTP requests with a reusable client. Do not open a new client for every operation because that prevents effective connection pooling.".into()};
+        let sets=facet_candidates(goal,&source);
+        assert_eq!(sets.len(),2);
+        assert!(sets.iter().all(|s|!s.candidates.is_empty()));
+        assert!(facet_findings(goal,&source,&sets,r#"{"feature":"feature_1"}"#).is_err());
+        assert!(facet_findings(goal,&source,&sets,r#"{"feature":"feature_1","caveat":"missing"}"#).is_err());
+        assert!(facet_findings(goal,&source,&sets,r#"{"feature":"feature_1","caveat":"caveat_1"}"#).is_ok());
+        let only=SourceEvidence{excerpt:"The library supports asynchronous HTTP requests with a reusable client.".into(),..source};
+        assert!(facet_candidates(goal,&only).iter().find(|s|s.facet=="caveat").unwrap().candidates.is_empty());
+    }
+    #[test]
+    fn selects_only_observed_ids_and_requires_every_requested_source(){
+        let goal="Compare solar energy and wind energy using https://one.example/guide and https://two.example/guide . Cite both sources.";
+        let a=SourceEvidence{url:"https://one.example/guide".into(),title:"Solar energy".into(),excerpt:format!("{} Solar energy production varies with available sunlight and seasonal conditions. ","Unrelated introductory navigation. ".repeat(300))};
+        let b=SourceEvidence{url:"https://two.example/guide".into(),title:"Wind energy".into(),excerpt:"Wind energy production depends on the local wind speed and turbine characteristics.".into()};
+        let ca=candidate_passages(goal,&a);
+        let cb=candidate_passages(goal,&b);
+        assert!(ca.iter().any(|p|p.text.contains("Solar energy production")));
+        assert!(selected_findings(goal,&a,&ca,r#"{"ids":["invented"]}"#).is_err());
+        let pick=|s:&SourceEvidence,p:&Vec<Passage>,term:&str|selected_findings(goal,s,p,&serde_json::json!({"ids":[p.iter().find(|x|x.text.contains(term)).unwrap().id]}).to_string()).unwrap();
+        let mut findings=pick(&a,&ca,"Solar energy production");
+        assert!(assemble_extractive_comparison(goal,&[a.clone(),b.clone()],findings.clone()).is_err());
+        findings.extend(pick(&b,&cb,"Wind energy production"));
+        assert!(assemble_extractive_comparison(goal,&[a,b],findings).is_ok());
     }
 }

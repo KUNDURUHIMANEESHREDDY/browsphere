@@ -3746,7 +3746,7 @@
 
       function rerenderAiPreservingDraft() {
         // Rebuilding the rule chips should never discard unsaved provider settings or a new key.
-        var ids = ['cfgOllamaUrl', 'cfgOllamaModel', 'cfgWriterModel', 'cfgVisionModel', 'cfgSupervisorModel', 'cfgLiteLlmUrl',
+        var ids = ['cfgOllamaUrl', 'cfgOllamaModel', 'cfgWriterModel', 'cfgVisionModel', 'cfgSupervisorModel', 'cfgPlannerModel', 'cfgLiteLlmUrl',
           'cfgLiteLlmModel', 'cfgProviderPreset', 'cfgLiteLlmKey',
           'cfgAwsProfile', 'cfgAwsRegion', 'cfgAwsModel', 'cfgAwsBucket',
           'cfgAwsKey', 'cfgAwsTable', 'cfgAwsNamespace', 'cfgAwsCognitoClient',
@@ -3837,7 +3837,12 @@
           var model = installed.includes('qwen2.5:3b-instruct') ? 'qwen2.5:3b-instruct' :
             (installed.includes(nativeRouterConfig.ollama_model) ? nativeRouterConfig.ollama_model :
               installed.find(function (name) { return /qwen|llama|mistral|deepseek|gemma/i.test(name); }));
-          if (requestedModel) {
+          if (requestedModel === 'role-team') {
+            var requiredRoles = ['qwen2.5:3b-instruct','qwen3.5:0.8b','lfm3:1.7b','lfm3-vl:2b'];
+            var missingRoles = requiredRoles.filter(function(id){return !installed.includes(id);});
+            if (missingRoles.length) throw new Error('Install missing local role models: ' + missingRoles.join(', '));
+            model = 'qwen3.5:0.8b';
+          } else if (requestedModel) {
             if (!['lfm3:1.7b', 'qwen3.5:0.8b'].includes(requestedModel)) throw new Error('Unknown local profile');
             if (!installed.includes(requestedModel)) {
               if (requestedModel === 'lfm3:1.7b' && installed.includes('lfm3:latest')) model = 'lfm3:latest';
@@ -3850,7 +3855,9 @@
           var localConfig = Object.assign({}, original, {
             ollama_url: 'http://127.0.0.1:11434',
             ollama_model: model,
-            vision_model: requestedModel === 'lfm3:1.7b' && installed.includes('lfm3-vl:2b') ? 'lfm3-vl:2b' : original.vision_model || '',
+            planner_model: requestedModel === 'role-team' ? 'qwen2.5:3b-instruct' : '',
+            supervisor_model: requestedModel === 'role-team' ? 'lfm3:1.7b' : original.supervisor_model,
+            vision_model: (requestedModel === 'role-team' || requestedModel === 'lfm3:1.7b') && installed.includes('lfm3-vl:2b') ? 'lfm3-vl:2b' : original.vision_model || '',
             prefer_local_for_simple: true,
             lucia_cloud_only: false,
             litellm_api_key: null
@@ -3881,6 +3888,7 @@
         var cfg = {
           ollama_url: (document.getElementById('cfgOllamaUrl')?.value || '').trim() || 'http://127.0.0.1:11434',
           ollama_model: (document.getElementById('cfgOllamaModel')?.value || '').trim() || 'qwen3.5:4b',
+          planner_model: (document.getElementById('cfgPlannerModel')?.value ?? nativeRouterConfig.planner_model ?? '').trim(),
           writer_model: (document.getElementById('cfgWriterModel')?.value ?? 'qwen2.5:3b-instruct').trim(),
           vision_model: (document.getElementById('cfgVisionModel')?.value || '').trim(),
           supervisor_model: (document.getElementById('cfgSupervisorModel')?.value ?? nativeRouterConfig.supervisor_model ?? 'lfm3:1.7b').trim(),
@@ -4373,7 +4381,7 @@
         window.addEventListener('aether:downloads-updated', hydrateDownloadsFromNative);
         window.addEventListener('aether:itp-updated', hydrateItpFromNative);
         window.addEventListener('aether:traces-updated', hydrateTracesFromNative);
-        ['plan','stage','activity','trace','approval','status','error','verification'].forEach(function (type) {
+        ['plan','stage','activity','trace','approval','status','error','verification','review','vision','supervisor','orchestration','workflow_graph'].forEach(function (type) {
           window.addEventListener('aether:agent-' + type, function (event) {
             applyLuciaAgentEvent(type, event.detail || {});
           });
@@ -4613,6 +4621,14 @@
                 '<small>' + esc(stage.objective) + '</small></div>' +
                 '<span class="main-chat-stage-status">' + esc(labels[stage.status] || stage.status) + '</span></div>';
             }).join('') + '</div>' +
+            (task.workflowGraph ? '<div class="main-chat-agent-plan" aria-label="Adaptive workflow dependencies"><strong>Workflow graph</strong>' +
+              task.workflowGraph.nodes.map(function(node) {
+                return '<div class="main-chat-agent-stage" data-state="' + esc(node.state) + '">' +
+                  '<span class="main-chat-stage-index">' + (node.id+1) + '</span>' +
+                  '<div class="main-chat-stage-name">' + esc(node.label) +
+                  '<small>' + esc(node.depends_on.length ? 'Depends on '+node.depends_on.map(d=>d+1).join(', ') : 'No dependencies') + '</small></div>' +
+                  '<span class="main-chat-stage-status">' + esc(node.state) + '</span></div>';
+              }).join('')+'</div>' : '') +
             '<div class="main-chat-agent-activity" aria-label="Lucia live activity">' +
             '<div class="main-chat-activity-heading"><strong>Live activity</strong>' +
             '<small>Actions and decision summaries, not private internal reasoning</small></div>' +
@@ -4754,9 +4770,15 @@
         } else if (kind === 'verification' && payload.report?.status === 'evidence_checked') {
           task.verificationReport = payload.report;
           task.verificationSummary = payload.report.summary;
+        } else if (kind === 'workflow_graph') {
+          const graph=window.BrowsphereLuciaActivity?.workflowGraph(payload);
+          if (graph && (!task.workflowGraph || graph.revision>=task.workflowGraph.revision)) task.workflowGraph=graph;
         } else if (kind === 'activity') {
           window.BrowsphereLuciaActivity?.append(
             task, window.BrowsphereLuciaActivity.activity(payload));
+        } else if (['review','vision','supervisor','orchestration'].includes(kind)) {
+          window.BrowsphereLuciaActivity?.append(
+            task, window.BrowsphereLuciaActivity.specialist(kind,payload));
         } else if (kind === 'trace') {
           task.actions = (task.actions || 0) + 1;
           window.BrowsphereLuciaActivity?.append(
@@ -4766,6 +4788,11 @@
         } else if (kind === 'error') {
           task.error = payload.message || 'The agent could not complete this step.';
         } else if (kind === 'status') {
+          if (task.workflowGraph && payload.status !== 'completed') {
+            for (const node of task.workflowGraph.nodes) {
+              if (node.state === 'active' || node.state === 'pending') node.state = payload.status === 'cancelled' ? 'cancelled' : 'blocked';
+            }
+          }
           task.status = payload.status === 'completed' && task.verificationReport ? 'Completed' :
             (payload.status === 'cancelled' || payload.status === 'tab_closed') ? 'Stopped' : 'Not verified';
           task.approval = null;

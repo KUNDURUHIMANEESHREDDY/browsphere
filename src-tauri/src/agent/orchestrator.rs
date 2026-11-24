@@ -239,8 +239,14 @@ pub(crate) fn is_simple_named_title_task(goal: &str) -> bool {
 /// The selected LLM decides actual actions for each specialist at runtime.
 pub fn plan_task(goal: &str) -> TaskPlan {
     let lower = goal.to_lowercase();
-    let mut roles: Vec<Specialist> = if crate::agent::prerequisites::route_values(goal).is_some() || is_simple_named_title_task(goal) {
+    let mut roles: Vec<Specialist> = if crate::agent::prerequisites::route_values(goal).is_some() || crate::agent::prerequisites::filter_constraints(goal).is_some() || is_simple_named_title_task(goal) {
         vec![Specialist::Browser]
+    } else if super::skills::TaskSpec::compile(goal).is_some(){
+        vec![Specialist::Research]
+    } else if !super::deliberation::explicit_research_sources(goal).is_empty(){
+        // Source acquisition is one stage; comparison is done by the final
+        // independent source verifier, not a redundant browsing stage.
+        vec![Specialist::Research]
     } else if contains_any(
         &lower, &["compare", "comparison", "versus", " vs ", "difference between", "best among"],
     ) {
@@ -320,23 +326,18 @@ impl Orchestrator {
     }
 
     pub fn observe(&mut self, snapshot: &DomSnapshot) {
-        if !snapshot.origin.starts_with("https://") && !snapshot.origin.starts_with("http://") {
-            return;
-        }
-        if snapshot.text_excerpt.trim().len() < 40 {
-            return;
-        }
-        self.fresh_observations += 1;
-        let evidence = SourceEvidence {
-            url: snapshot.origin.clone(),
-            title: snapshot.title.chars().take(140).collect(),
-            excerpt: snapshot.text_excerpt.chars().take(1000).collect(),
-        };
+        let Some(evidence)=super::browser_skills::extraction::capture(snapshot)else{return;};
+        self.fresh_observations+=1;
         if let Some(old) = self.evidence.iter_mut().find(|e| e.url == evidence.url) {
             *old = evidence;
         } else {
             self.evidence.push(evidence);
-            if self.evidence.len() > 8 { self.evidence.remove(0); }
+            if self.evidence.len()>8{
+                let required=super::deliberation::explicit_research_sources(&self.plan.goal);
+                if let Some(index)=self.evidence.iter().position(|e|url::Url::parse(&e.url).ok().map_or(true,|u|!required.contains(&u))){
+                    self.evidence.remove(index);
+                }
+            }
         }
     }
 
@@ -349,13 +350,18 @@ impl Orchestrator {
         let observed = SourceEvidence {
             url: snapshot.origin.clone(),
             title: snapshot.title.chars().take(140).collect(),
-            excerpt: snapshot.text_excerpt.chars().take(1000).collect(),
+            excerpt: snapshot.text_excerpt.chars().take(24000).collect(),
         };
         if let Some(existing) = self.evidence.iter_mut().find(|e| e.url == observed.url) {
             *existing = observed;
         } else {
             self.evidence.push(observed);
-            if self.evidence.len() > 8 { self.evidence.remove(0); }
+            if self.evidence.len()>8{
+                let required=super::deliberation::explicit_research_sources(&self.plan.goal);
+                if let Some(index)=self.evidence.iter().position(|e|url::Url::parse(&e.url).ok().map_or(true,|u|!required.contains(&u))){
+                    self.evidence.remove(index);
+                }
+            }
         }
     }
 
@@ -386,6 +392,9 @@ impl Orchestrator {
     pub fn can_complete(&self, snapshot: &DomSnapshot) -> Result<(), String> {
         if super::deliberation::error_page(snapshot) {return Err("The current page is an error or access restriction".into());}
         if let Some(reason) = crate::agent::prerequisites::completion_blocker(&self.plan.goal,snapshot) { return Err(reason.into()); }
+        if super::skills::TaskSpec::compile(&self.plan.goal).is_some_and(|spec|!spec.observed_target(snapshot)){
+            return Err("Compiled target acquisition objective has not been independently observed".into());
+        }
         if self.last_action_failed {
             return Err("Previous browser action failed; re-observe and recover first".into());
         }
@@ -410,6 +419,9 @@ impl Orchestrator {
         }
         if self.fresh_observations == 0 || self.evidence.is_empty() {
             return Err("No live webpage evidence was observed; do not claim completion".into());
+        }
+        if !crate::agent::deliberation::missing_research_sources(&self.plan.goal,&self.evidence).is_empty(){
+            return Err("Not all explicitly requested research sources have been observed".into());
         }
         if requested_youtube_video_page(&self.plan.goal)
             && !observed_youtube_video_page(&snapshot.origin)
@@ -477,6 +489,18 @@ impl Orchestrator {
         }
     }
 
+    pub fn can_reopen_research(&self)->bool{
+        self.specialist()==Specialist::Verification&&self.current>0&&
+            matches!(self.plan.stages[self.current-1].specialist,Specialist::Browser|Specialist::Research|Specialist::Comparison)&&
+            super::deliberation::read_only(&self.plan.goal)
+    }
+    pub fn reopen_research(&mut self)->bool{
+        if !self.can_reopen_research(){return false;}
+        self.plan.stages[self.current].status="pending";
+        self.current-=1;self.plan.stages[self.current].status="active";
+        self.completed_summaries.pop();self.actions_in_stage=0;self.last_action_failed=false;
+        true
+    }
     pub fn begin(&mut self) {
         self.plan.stages[self.current].status = "active";
     }

@@ -859,6 +859,9 @@
       emitUiEvent('aether:traces-updated', st);
     });
 
+    listen('agent:workflow_graph', (event) => {
+      emitUiEvent('aether:agent-workflow_graph', event.payload || {});
+    });
     listen('agent:plan', (event) => {
       emitUiEvent('aether:agent-plan', event.payload || {});
     });
@@ -872,6 +875,10 @@
     listen('agent:activity', (event) => {
       emitUiEvent('aether:agent-activity', event.payload || {});
     });
+
+    for (const kind of ['review', 'vision', 'supervisor', 'orchestration']) {
+      listen('agent:' + kind, (event) => emitUiEvent('aether:agent-' + kind, event.payload || {}));
+    }
 
     listen('agent:run_error', (event) => {
       emitUiEvent('aether:agent-error', event.payload || {});

@@ -24,8 +24,11 @@ def main():
     <script>const snapshot=()=>""" + js.rstrip(";") + """;
     const dialog=document.querySelector('#welcome'); dialog.showModal();
     const modal=snapshot(); dialog.close(); const form=snapshot();
+    const main=document.querySelector('main');
+    main.innerHTML='<nav>'+('Navigation menu '.repeat(300))+'</nav><table><tr><td>'+('Unrelated table numbers '.repeat(300))+'</td></tr></table><p style="display:none">HIDDEN PRIVATE TEST TEXT</p><p>The public field guide explains how an orchard produces fruit. The orchard receives sunlight and rain throughout the growing season. Its harvest depends on conditions including temperature and water availability.</p><p>Pollinators support many flowering plants.</p>';
+    const article=snapshot();
     const result=document.createElement('pre'); result.id='probe-result';
-    result.textContent=JSON.stringify({modal,form}); document.body.append(result);
+    result.textContent=JSON.stringify({modal,form,article}); document.body.append(result);
     </script></body></html>"""
     with tempfile.TemporaryDirectory(prefix="lucia-dom-") as work:
         root = Path(work)
@@ -43,8 +46,11 @@ def main():
     assert {n["label"] for n in modal["interactive_nodes"]} == {"English", "Hindi"}, modal
     assert not any("station" in n["label"].lower() for n in modal["interactive_nodes"]), modal
     assert any(n["role"]=="option" and n["label"]=="Central Station" for n in form["interactive_nodes"]), form
+    assert any(n["role"]=="combobox" and n["label"]=="From station" and n.get("search_state")=="empty" for n in form["interactive_nodes"]), form
     assert any(n["label"]=="Journey date" and n.get("search_state")=="read_only" for n in form["interactive_nodes"]), form
     assert any(n["label"]=="Search trains" for n in form["interactive_nodes"]), form
-    print("PASS real browser DOM: modal scope, autocomplete option, read-only date, post-modal form")
+    assert result["article"]["text_excerpt"].startswith("The public field guide"), result["article"]
+    assert "HIDDEN PRIVATE TEST TEXT" not in result["article"]["text_excerpt"], result["article"]
+    print("PASS real browser DOM: modal scope, autocomplete option, read-only date, post-modal form, prose-first evidence")
 if __name__ == "__main__":
     main()

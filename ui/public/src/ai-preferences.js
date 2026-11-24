@@ -121,13 +121,15 @@
       : '<span class="mac-ai-quiet">' + esc(state.localModelsError || 'No models detected.') + '</span>';
     var local = section('Local Models', '',
       row('Ollama server', 'Local API address.', input('cfgOllamaUrl', cfg.ollama_url, 'http://127.0.0.1:11434', 'url')) +
+      row('Lucia complex planner', 'Independent local reasoning model for planning and factual review. Leave empty for legacy routing.', input('cfgPlannerModel', cfg.planner_model || '', 'qwen2.5:3b-instruct')) +
       row('Lucia supervisor model', 'Independent local model reviews stalled actions and proposes a recovery. Leave empty to disable. Existing approvals still apply.', input('cfgSupervisorModel', cfg.supervisor_model ?? 'lfm3:1.7b', 'lfm3:1.7b')) +
       row('Lucia writer model', 'Local content generation before browser typing; leave blank to disable.', input('cfgWriterModel', cfg.writer_model ?? 'qwen2.5:3b-instruct', 'qwen2.5:3b-instruct')) +
       row('Lucia vision model (Eyes)', 'Optional local visual perception on recovery. Leave empty to disable. Screenshots stay with local Ollama; visual hints are advisory.', input('cfgVisionModel', cfg.vision_model || '', 'lfm3-vl:2b')) +
       row('Lucia local profiles', 'Test and activate an installed reasoning model. LFM3 pairs with local LFM3-VL when installed; Qwen remains selectable. Per-domain routing overrides still apply.',
         '<div class="mac-ai-installed-controls">' +
         '<button type="button" class="mac-ai-btn" data-action="use-local-lucia-profile" data-model="lfm3:1.7b">LFM3 + Eyes</button>' +
-        '<button type="button" class="mac-ai-btn" data-action="use-local-lucia-profile" data-model="qwen3.5:0.8b">Qwen 0.8B</button></div>') +
+        '<button type="button" class="mac-ai-btn" data-action="use-local-lucia-profile" data-model="qwen3.5:0.8b">Qwen 0.8B</button>' +
+        '<button type="button" class="mac-ai-btn" data-action="use-local-lucia-profile" data-model="role-team">Role-based local team</button></div>') +
       row('Installed models', 'Select an installed model to use it.',
         '<div class="mac-ai-installed-controls">' + chips + btn('refresh-ai-models', 'Refresh') + '</div>') +
       row('Connection', 'Send a small prompt to Ollama.', btn('test-local-model', 'Test local connection')) +

@@ -1992,6 +1992,9 @@ async fn aws_invoke_lambda(state: tauri::State<'_, Arc<AppState>>, payload: Stri
 }
 
 #[tauri::command]
+fn lucia_runtime_revision()-> &'static str {agent::objective_gate::REVISION}
+
+#[tauri::command]
 async fn get_router_config(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<RouterConfig, String> {
@@ -3036,6 +3039,7 @@ fn main() {
             submit_action_result,
             capture_live_snapshot,
             record_navigation,
+            lucia_runtime_revision,
             get_router_config,
             get_aws_config,
             update_aws_config,
