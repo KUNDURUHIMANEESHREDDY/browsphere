@@ -397,7 +397,12 @@ pub fn evaluate_policy(
                 || lower.contains("password")
                 || lower.contains("otp")
                 || lower.contains("cvv")
-                || lower.contains("secret");
+                // Ordinary prose such as "the library's secret" is not a
+                // credential. Keep explicit secret assignments and credential
+                // labels gated, as well as all sensitive DOM fields.
+                || ["secret:", "secret :", "secret=", "secret =", "api secret",
+                    "client secret", "access token", "private key", "recovery phrase",
+                    "seed phrase"].iter().any(|marker| lower.contains(marker));
             if secret_like {
                 return (
                     RiskLevel::High,
@@ -570,6 +575,23 @@ mod tests {
             PolicyDecision::RequireApproval { .. }));
         assert_eq!(requested_search_host("I do not want to use YouTube"), None);
         assert_eq!(requested_search_host("search another site for youtube videos"), None);
+    }
+
+    #[test]
+    fn ordinary_fiction_does_not_require_credential_approval() {
+        let draft = |text: &str, sensitive| BrowserAction::TypeText {
+            node_id: "editor".into(), text: text.into(), is_sensitive: sensitive,
+        };
+        assert!(matches!(evaluate_policy("https://example.org", &draft(
+            "The lantern revealed a secret passage through the library.", false), &[]).1,
+            PolicyDecision::Allow));
+        for text in ["client secret", "secret: example", "secret = example",
+            "password", "OTP", "CVV", "private key", "recovery phrase"] {
+            assert!(matches!(evaluate_policy("https://example.org",
+                &draft(text, false), &[]).1, PolicyDecision::RequireApproval { .. }));
+        }
+        assert!(matches!(evaluate_policy("https://example.org",
+            &draft("a harmless story", true), &[]).1, PolicyDecision::RequireApproval { .. }));
     }
 
     #[test]
