@@ -1,16 +1,16 @@
 //! Shared bounded DAG runtime. Native callers supply receipts only after their
 //! existing policy and evidence checks. The graph never dispatches actions.
 use anyhow::{ensure,Context,Result};
-use serde::Serialize;
+use serde::{Serialize,Deserialize};
 use std::collections::BTreeSet;
 const MAX_NODES:usize=32;
-#[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize)]
+#[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(rename_all="snake_case")]
 pub enum Kind{Browser,Verification,Tool,Comparison,Review,Observation,Handoff,Recovery}
-#[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize)]
+#[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(rename_all="snake_case")]
 pub enum State{Pending,Active,Completed,Failed,Blocked,Cancelled}
-#[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize)]
+#[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(rename_all="snake_case")]
 pub enum Receipt{StageGate,FinalReport,ToolCheck,ComparisonCheck,QuoteCheck,NativeObservation,ObservedProgress}
 impl Kind{
@@ -21,7 +21,7 @@ impl Kind{
    (Self::Recovery,Receipt::ObservedProgress))
  }
 }
-#[derive(Clone,Debug,Serialize)]
+#[derive(Clone,Debug,Serialize,Deserialize)]
 pub struct Node{
  pub id:usize,pub kind:Kind,pub depends_on:Vec<usize>,pub state:State,
  pub receipt:Option<Receipt>,pub attempts:u8,
@@ -30,7 +30,7 @@ pub struct Node{
  #[serde(skip)] pub objective:String,
  #[serde(skip)] pub criterion:String,
 }
-#[derive(Clone,Debug,Serialize)]
+#[derive(Clone,Debug,Serialize,Deserialize)]
 pub struct WorkflowGraph{pub nodes:Vec<Node>,pub revision:u32}
 impl WorkflowGraph{
  pub fn new(spec:Vec<(Kind,Vec<usize>)>)->Result<Self>{
@@ -56,6 +56,56 @@ impl WorkflowGraph{
   n.objective=objective.chars().filter(|c|!c.is_control()).take(400).collect();
   n.criterion=criterion.chars().filter(|c|!c.is_control()).take(400).collect();
   Ok(())
+ }
+ /// Validate a persisted or amended graph before any scheduling.
+ pub fn validate(&self)->Result<()>{
+  let spec=self.nodes.iter().map(|n|(n.kind,n.depends_on.clone())).collect();
+  Self::new(spec)?;
+  for (i,n) in self.nodes.iter().enumerate(){
+   ensure!(n.id==i,"Invalid node identity");
+   ensure!(match (n.state,n.receipt){
+    (State::Completed,Some(r))=>n.kind.accepts(r)&&n.attempts>0,
+    (State::Completed,None)=>false,
+    (_,Some(_))=>false,
+    (State::Active,None)=>n.attempts>0,
+    _=>true
+   },"Invalid graph receipt");
+   if matches!(n.state,State::Active|State::Completed){
+    ensure!(n.depends_on.iter().all(|d|self.nodes[*d].state==State::Completed),"Unmet dependency");
+   }
+  }
+  Ok(())
+ }
+ /// Transactional, bounded amendment of a stalled read-only browser stage.
+ /// New recovery nodes depend on the original completed prerequisites, or
+ /// other new nodes; old completed nodes and all original edges survive.
+ /// The caller still uses the native observation and action policy.
+ pub fn amend_recovery(&mut self,parent:usize,steps:&[(Kind,Vec<usize>)])->Result<Vec<usize>>{
+  let n=self.nodes.get(parent).context("Unknown recovery parent")?;
+  ensure!(n.kind==Kind::Browser&&n.state==State::Active&&n.attempts<=3,"Recovery is not eligible");
+  ensure!(!steps.is_empty()&&steps.len()<=4&&self.nodes.len()+steps.len()<=MAX_NODES,"Recovery graph budget exhausted");
+  ensure!(steps.iter().all(|(k,_)|matches!(k,Kind::Observation|Kind::Recovery)),"Recovery cannot add tool permissions or skip verification");
+  let local=Self::new(steps.to_vec())?;
+  let mut candidate=self.clone();
+  let base=candidate.nodes.len();
+  let inherited=n.depends_on.clone();
+  let leaves:Vec<_>=(0..steps.len()).filter(|i|!local.nodes.iter().any(|n|n.depends_on.contains(i))).collect();
+  ensure!(!leaves.is_empty(),"Missing recovery terminal");
+  for (offset,node) in local.nodes.iter().enumerate(){
+   let id=base+offset;
+   let mut deps=inherited.clone();
+   deps.extend(node.depends_on.iter().map(|d|base+d));
+   candidate.nodes.push(Node{id,kind:node.kind,depends_on:deps,state:State::Pending,receipt:None,attempts:0,objective:String::new(),criterion:String::new()});
+   let (objective,criterion)=if node.kind==Kind::Observation{("Re-observe stalled page","Fresh native page observation")}else{("Recover stalled objective","Meaningful observed progress or existing stage gate")};
+   candidate.describe(id,objective,criterion)?;
+  }
+  candidate.nodes[parent].depends_on=inherited;
+  candidate.nodes[parent].depends_on.extend(leaves.iter().map(|d|base+d));
+  candidate.nodes[parent].state=State::Pending;
+  candidate.revision+=1;
+  candidate.validate()?;
+  *self=candidate;
+  Ok((base..base+steps.len()).collect())
  }
  pub fn ready(&self)->Vec<usize>{
   self.nodes.iter().filter(|n|n.state==State::Pending&&n.depends_on.iter().all(|d|self.nodes[*d].state==State::Completed)).map(|n|n.id).collect()
@@ -108,15 +158,8 @@ impl WorkflowGraph{
  /// Suspend an active browser stage behind one bounded recovery prerequisite.
  /// Completed predecessors are immutable; recovery inherits dependencies.
  pub fn insert_recovery(&mut self,id:usize)->Result<usize>{
-  ensure!(self.nodes.len()<MAX_NODES,"Recovery graph budget exhausted");
-  let n=self.nodes.get(id).context("Unknown recovery parent")?;
-  ensure!(n.kind==Kind::Browser&&n.state==State::Active&&n.attempts<=3,"Recovery is not eligible");
-  let deps=n.depends_on.clone();
-  let next=self.nodes.len();
-  self.nodes.push(Node{id:next,kind:Kind::Recovery,depends_on:deps,state:State::Pending,receipt:None,attempts:0,objective:String::new(),criterion:String::new()});
-  self.nodes[id].depends_on=vec![next];self.nodes[id].state=State::Pending;
-  self.describe(next,"Recover the stalled objective","Observe meaningful progress or pass the existing stage gate")?;
-  self.revision+=1;self.start(next)?;Ok(next)
+  let next=self.amend_recovery(id,&[(Kind::Recovery,vec![])])?[0];
+  self.start(next)?;Ok(next)
  }
 }
 #[cfg(test)]
@@ -151,6 +194,19 @@ mod tests{
   assert!(g.complete(ids[1],Receipt::StageGate).is_err());
   g.complete(ids[1],Receipt::FinalReport).unwrap();
   assert!(g.is_complete());assert_eq!(g.nodes[0].receipt,Some(Receipt::ToolCheck));
+ }
+ #[test]fn atomic_amendment_preserves_prior_edges_and_rejects_cycles_and_new_tools(){
+  let mut g=WorkflowGraph::chain(&[Kind::Tool,Kind::Browser,Kind::Verification]).unwrap();
+  g.start(0).unwrap();g.complete(0,Receipt::ToolCheck).unwrap();g.start(1).unwrap();
+  let before=serde_json::to_string(&g).unwrap();
+  assert!(g.amend_recovery(1,&[(Kind::Tool,vec![])]).is_err());
+  assert!(g.amend_recovery(1,&[(Kind::Observation,vec![1]),(Kind::Recovery,vec![0])]).is_err());
+  assert_eq!(serde_json::to_string(&g).unwrap(),before);
+  let ids=g.amend_recovery(1,&[(Kind::Observation,vec![]),(Kind::Recovery,vec![0])]).unwrap();
+  assert_eq!(g.ready(),vec![ids[0]]);assert!(g.start(1).is_err());
+  g.start(ids[0]).unwrap();g.complete(ids[0],Receipt::NativeObservation).unwrap();
+  g.start(ids[1]).unwrap();g.complete(ids[1],Receipt::ObservedProgress).unwrap();
+  g.start(1).unwrap();assert_eq!(g.nodes[0].receipt,Some(Receipt::ToolCheck));g.validate().unwrap();
  }
  #[test]fn cancellation_never_reopens_completed_or_pending_nodes(){
   let mut g=WorkflowGraph::chain(&[Kind::Browser,Kind::Verification]).unwrap();

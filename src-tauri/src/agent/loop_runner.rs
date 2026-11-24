@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -951,6 +952,28 @@ pub async fn run_react_loop(
     private_mode: bool,
 ) -> anyhow::Result<String> {
     use crate::agent::adaptive_graph::{WorkflowGraph,Kind as GraphKind,Receipt as GraphReceipt};
+    let checkpoint_path=crate::resolve_data_dir().join("workflow-checkpoints.sqlite3");
+    let mut checkpoint_store=if private_mode{None}else{crate::agent::checkpoint::Store::open(&checkpoint_path).ok()};
+    let mut checkpoint_proof:Option<crate::agent::checkpoint::ResumeProof>=None;
+    if crate::agent::checkpoint::requested(&goal){
+        anyhow::ensure!(!private_mode,"Checkpoint recovery is disabled in Private Browsing");
+        let (id,original)=crate::agent::checkpoint::parse(&goal)?;
+        let live=request_live_dom_snapshot(&app,&webview_label,&pending_snapshots,1800).await.context("Fresh checkpoint destination unavailable")?;
+        if cancel.is_cancelled(){return Ok("cancelled".into())}
+        let store=checkpoint_store.as_mut().context("Checkpoint store unavailable")?;
+        let (graph,report)=store.recover(id,original,&live)?;
+        if cancel.is_cancelled(){return Ok("cancelled".into())}
+        let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
+        let _=app.emit("agent:verification_report",serde_json::json!({"run_id":run_id,"report":report}));
+        let _=app.emit("agent:run_completed",report.summary);
+        return Ok("completed".into());
+    }
+    macro_rules! publish_graph{($g:expr)=>{
+        {let current_graph=$g;
+         let saved=checkpoint_store.as_mut().is_some_and(|store|store.save(run_id,current_graph,checkpoint_proof.as_ref()).is_ok());
+         let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":current_graph,"checkpoint_saved":saved,"checkpoint_resumable":saved&&checkpoint_proof.is_some()}));
+        }
+    }}
     let mut inherited_graph:Option<(WorkflowGraph,usize)>=None;
     let mut inherited_checks:Option<String>=None;
     let mut initial_snapshot=initial_snapshot;
@@ -991,7 +1014,7 @@ pub async fn run_react_loop(
             })
         });
         let result=crate::agent::workflow::run_with_browser(plan,&crate::resolve_data_dir().join("mcp-servers.json"),&cfg.ollama_url,model,cancel.clone(),pause_rx,|index,id,status,graph|{
-            let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":graph}));
+            publish_graph!(graph);
             let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"Workflow Agent","objective":id,"status":if status=="handoff"{"active"}else{status},"index":index}));
         },&mut *observe).await;
         drop(observe);
@@ -1128,7 +1151,8 @@ pub async fn run_react_loop(
     };
     for (i,s) in orchestrator.plan.stages.iter().enumerate(){graph.describe(stage_nodes[i],&s.objective,&s.success_criteria)?;}
     let mut recovery_node:Option<usize>=None;
-    let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
+    let mut recovery_observation:Option<usize>=None;
+    publish_graph!(&graph);
     orchestrator.begin();
     let _ = app.emit("agent:plan", serde_json::json!({
         "run_id": run_id, "plan": &orchestrator.plan
@@ -1308,6 +1332,11 @@ pub async fn run_react_loop(
         observation_failures = 0;
         snapshot = live;
         orchestrator.observe(&snapshot);
+        if let Some(id)=recovery_observation.take(){
+            graph.complete(id,GraphReceipt::NativeObservation)?;
+            graph.start(recovery_node.context("Missing recovery action node")?)?;
+            publish_graph!(&graph);
+        }
         // A dedicated, local writer handles explicit drafting in the current
         // page. Native binding, policy, and readback remain mandatory.
         if graph.completed()==0 && recovery_node.is_none() && graph.nodes.len()==stage_nodes.len() && crate::agent::writer::requested(&goal) {
@@ -1328,7 +1357,7 @@ pub async fn run_react_loop(
                     graph.describe(0,"Write draft in the observed editor","Native type action succeeds")?;
                     graph.describe(1,"Verify the live draft","Exact native editor readback matches the validated draft")?;
                     graph.start(0)?;
-                    let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
+                    publish_graph!(&graph);
                     let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"Writer Agent","objective":"Generate original draft","status":"active","index":0}));
                     let text = tokio::select!{
                         _=cancel.cancelled()=>return Ok("cancelled".into()),
@@ -1351,14 +1380,14 @@ pub async fn run_react_loop(
                         return Ok(if cancel.is_cancelled(){"cancelled"}else{"unverified"}.into());
                     }
                     graph.complete(0,GraphReceipt::StageGate)?;graph.start(1)?;
-                    let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
+                    publish_graph!(&graph);
                     let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"Writer Agent","status":"completed","index":0,"summary":"Draft entered; readback pending"}));
                     let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"Verification Agent","objective":"Compare live editor to the generated draft","status":"active","index":1}));
                     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                     let (_,matched)=crate::agent::writer::readback(&app,&webview_label,&origin,&node_id,&text).await?;
                     anyhow::ensure!(matched&&!cancel.is_cancelled(),"Editor readback differs from generated draft or task cancelled");
                     graph.complete(1,GraphReceipt::FinalReport)?;
-                    let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
+                    publish_graph!(&graph);
                     let summary=format!("Wrote and independently confirmed {} words in the live editor.",text.split_whitespace().count());
                     let report=VerificationReport{status:"evidence_checked",summary:summary.clone(),findings:vec![],limitations:"Native editor readback matched the validated draft exactly. No publishing or remote save was verified.".into()};
                     let _=app.emit("agent:verification_report",serde_json::json!({"run_id":run_id,"report":report}));
@@ -2026,9 +2055,10 @@ pub async fn run_react_loop(
             duplicate_retries += 1;
             if duplicate_retries <= 2 {
                 if recovery_node.is_none()&&orchestrator.specialist()!=Specialist::Verification&&crate::agent::deliberation::read_only(&goal){
-                    if let Ok(id)=graph.insert_recovery(stage_nodes[orchestrator.current]){
-                        recovery_node=Some(id);
-                        let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
+                    if let Ok(ids)=graph.amend_recovery(stage_nodes[orchestrator.current],&[(GraphKind::Observation,vec![]),(GraphKind::Recovery,vec![0])]){
+                        graph.start(ids[0])?;
+                        recovery_observation=Some(ids[0]);recovery_node=Some(ids[1]);
+                        publish_graph!(&graph);
                     }
                 }
                 recent_outcomes.push(
@@ -2470,7 +2500,7 @@ pub async fn run_react_loop(
             if let Some(id)=recovery_node.take(){
                 graph.complete(id,GraphReceipt::ObservedProgress)?;
                 graph.start(stage_nodes[orchestrator.current])?;
-                let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
+                publish_graph!(&graph);
             }
         }
         run_core.record(semantic_attempt,ok && progress=="executed");
@@ -2547,8 +2577,23 @@ pub async fn run_react_loop(
             }else{GraphReceipt::StageGate};
             graph.complete(stage_nodes[orchestrator.current],receipt)?;
             let all_complete = orchestrator.complete_stage(summary);
-            if !all_complete{graph.start(stage_nodes[orchestrator.current])?;}
-            let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
+            if !all_complete{
+                graph.start(stage_nodes[orchestrator.current])?;
+                if !private_mode && orchestrator.specialist()==Specialist::Verification &&
+                    crate::agent::checkpoint::resumable_goal(&goal) {
+                    let verified_destination=if let Some(target)=requested_navigation_url(&goal){
+                        verify_direct_navigation(target.as_str(),&snapshot).is_ok()
+                    }else if requested_named_link_title(&goal).is_some(){
+                        named_link_destination.as_ref().is_some_and(|u|check_navigation_result(u,&snapshot).is_ok())&&
+                        verify_observed_named_link_title(&goal,&initial_origin,&snapshot,&orchestrator.evidence).is_ok()
+                    }else if requested_named_result_title(&goal).is_some(){
+                        (confirmed_named_search_navigation||recorded_steps.iter().any(|a|matches!(a,BrowserAction::Click{is_submit:false,..})))&&
+                        verify_observed_named_result_title(&goal,&initial_origin,&snapshot,&orchestrator.evidence).is_ok()
+                    }else{false};
+                    if verified_destination{checkpoint_proof=crate::agent::checkpoint::ResumeProof::from_checked_destination(&goal,&snapshot,&graph);}
+                }
+            }
+            publish_graph!(&graph);
             let _ = app.emit("agent:stage", serde_json::json!({
                 "run_id": run_id,
                 "specialist": just_finished,
@@ -2633,7 +2678,8 @@ pub async fn run_react_loop(
 
     if final_status!="completed" {
         graph.stop(final_status=="cancelled");
-        let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
+        checkpoint_proof=None;
+        publish_graph!(&graph);
     }
     if final_status == "max_steps" {
         let _ = app.emit("agent:run_error", serde_json::json!({

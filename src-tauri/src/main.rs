@@ -2042,6 +2042,12 @@ async fn route_lucia_intent(
     // A clear, explicit user navigation command is not ambiguous intent.
     // Do not turn "open youtube" into chat when the configured intent model
     // is unavailable, returns malformed JSON, or classifies it incorrectly.
+    if agent::checkpoint::requested(&message) {
+        return Ok(agent::intent_router::LuciaIntent {
+            mode:agent::intent_router::LuciaMode::BrowserTask,
+            reason:"Explicit read-only checkpoint recovery".into(),
+        });
+    }
     if agent::mcp::requested(&message) {
         return Ok(agent::intent_router::LuciaIntent {
             mode: agent::intent_router::LuciaMode::BrowserTask,
@@ -2194,7 +2200,8 @@ async fn get_history(
 #[tauri::command]
 async fn clear_history(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
     let mut db = state.db.lock().await;
-    db.clear_history().map_err(|e| e.to_string())
+    db.clear_history().map_err(|e| e.to_string())?;
+    agent::checkpoint::Store::clear(&resolve_data_dir().join("workflow-checkpoints.sqlite3")).map_err(|e|e.to_string())
 }
 
 #[tauri::command]
