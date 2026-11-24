@@ -53,6 +53,9 @@ fn build_chat_messages(turns: &[ChatTurn], voice_mode: bool) -> Vec<serde_json::
 pub struct RouterConfig {
     pub ollama_url: String,
     pub ollama_model: String,
+    /// Empty disables optional local screenshot perception.
+    #[serde(default)]
+    pub vision_model: String,
     pub litellm_url: String,
     pub litellm_model: String,
     pub litellm_api_key: Option<String>,
@@ -73,6 +76,7 @@ impl Default for RouterConfig {
         Self {
             ollama_url: "http://127.0.0.1:11434".to_string(),
             ollama_model: "qwen3.5:4b".to_string(),
+            vision_model: String::new(),
             litellm_url: "http://127.0.0.1:4000/v1/chat/completions".to_string(),
             litellm_model: "gpt-4o-mini".to_string(),
             litellm_api_key: None,
@@ -729,6 +733,10 @@ User text: <text>{}</text>"#,
         voice_mode: bool,
     ) -> anyhow::Result<(String, BrowserAction, String)> {
         let backend = self.select_backend(origin);
+        // A configuration change during capture must never forward visual hints to a cloud route.
+        let prompt_payload = if backend == "ollama" { prompt_payload } else {
+            prompt_payload.split("\nUntrusted local visual hint").next().unwrap_or(prompt_payload)
+        };
 
         if backend == "ollama" {
             let route_label = format!("ollama:{}", self.config.ollama_model);
@@ -874,6 +882,7 @@ User text: <text>{}</text>"#,
             ("Title:", 180),
             ("Previous action outcomes:", 380),
             ("Observed search controls", 560),
+            ("Untrusted local visual hint", 600),
         ] {
             if let Some(line) = raw.lines().find(|line| line.starts_with(prefix)) {
                 out.push_str(&line.chars().take(limit).collect::<String>());

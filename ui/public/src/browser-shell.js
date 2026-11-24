@@ -3731,7 +3731,7 @@
 
       function rerenderAiPreservingDraft() {
         // Rebuilding the rule chips should never discard unsaved provider settings or a new key.
-        var ids = ['cfgOllamaUrl', 'cfgOllamaModel', 'cfgLiteLlmUrl',
+        var ids = ['cfgOllamaUrl', 'cfgOllamaModel', 'cfgVisionModel', 'cfgLiteLlmUrl',
           'cfgLiteLlmModel', 'cfgProviderPreset', 'cfgLiteLlmKey',
           'cfgAwsProfile', 'cfgAwsRegion', 'cfgAwsModel', 'cfgAwsBucket',
           'cfgAwsKey', 'cfgAwsTable', 'cfgAwsNamespace', 'cfgAwsCognitoClient',
@@ -3855,6 +3855,7 @@
         var cfg = {
           ollama_url: (document.getElementById('cfgOllamaUrl')?.value || '').trim() || 'http://127.0.0.1:11434',
           ollama_model: (document.getElementById('cfgOllamaModel')?.value || '').trim() || 'qwen3.5:4b',
+          vision_model: (document.getElementById('cfgVisionModel')?.value || '').trim(),
           litellm_url: (document.getElementById('cfgLiteLlmUrl')?.value || '').trim() || 'http://127.0.0.1:4000/v1/chat/completions',
           litellm_model: (document.getElementById('cfgLiteLlmModel')?.value || '').trim() ||
             (Object.values(window.browsphereCloudPresets || {}).some(function (preset) {
