@@ -2,7 +2,7 @@
 
 **An AI-native Windows browser with Lucia, a policy-gated agent that can plan, use real webpage controls, and verify what happened.**
 
-Built with **Rust + Tauri v2 + Microsoft WebView2**. Browsphere combines a desktop browsing interface, privacy-focused local storage, and optional local or cloud AI models.
+Built with **Rust + Tauri v2 + Microsoft WebView2**. Browsphere combines a desktop browsing interface, privacy-focused local storage, and a hybrid AI architecture combining browser-integrated local model inference, optional cloud providers, and Model Context Protocol (MCP) tools.
 
 > **Project status — 23 November 2026:** Working research prototype, **not production-ready**. Browsphere's native browser features and several agent workflows have passed targeted tests. **General-purpose, reliably autonomous browsing across arbitrary sites has not been demonstrated.** The latest repeated 9Router live-model tests are blocked by provider HTTP 429 limits. See [verified results](#verification-snapshot) before interpreting capabilities.
 
@@ -21,6 +21,48 @@ Built with **Rust + Tauri v2 + Microsoft WebView2**. Browsphere combines a deskt
 | Optional AWS | AWS CLI-profile-based account connection/resource discovery for Bedrock, S3, DynamoDB, Cognito, and Lambda; cloud services are not required for everyday browsing. |
 
 **A successful website load is not the same as successful AI autonomy.** Direct navigation, deterministic/simulated-model tests, and genuine hosted-model agent tests are reported separately.
+
+## Local-first AI and MCP architecture
+
+Browsphere is evolving beyond a browser that merely calls an external chatbot. Lucia's architecture brings local inference, browser controls, and external tools into one coordinated desktop experience.
+
+### Embedded local models
+
+The browser-integrated model stack targets the following specialist roles:
+
+| Model | Intended role |
+| --- | --- |
+| Qwen3.5 0.8B | Lightweight browser decisions and structured actions |
+| LFM3 1.7B | Planning, reasoning, and recovery supervision |
+| LFM3-VL 2B | Screenshot understanding and visual grounding |
+
+The embedded-model design uses a local inference runtime within the desktop application architecture, rather than requiring every task to go through a remote API. Optional Ollama and cloud routes remain useful for compatibility and more demanding tasks. Model packaging, runtime availability, offline operation and clean-machine installation must be verified for each release; this description is not a claim that all weights are already distributed in the public installer.
+
+### Model Context Protocol (MCP)
+
+MCP extends Lucia beyond webpage interaction through a standardized interface to external tools and services. The hybrid orchestration design combines:
+
+- MCP tool discovery and capability-aware selection.
+- Browser actions and MCP calls within a shared task workflow.
+- Specialist model routing, adaptive planning and failure recovery.
+- Permission checks, explicit approval for consequential operations, and result verification.
+
+MCP servers are separate trust boundaries. Their outputs are untrusted data, and connecting a server does not grant unrestricted access to its tools. Individual server compatibility and end-to-end hybrid workflows require validation.
+
+~~~text
+User request
+    |
+Lucia orchestration and policy checks
+    |
+    +-- Local model stack (reasoning / actions / vision)
+    +-- Optional cloud inference
+    +-- Native WebView2 browser controls
+    +-- MCP tools and connected services
+    |
+Observation, recovery and result verification
+~~~
+
+The architecture above describes the integration direction and specialist roles; the dated verification snapshot below remains the evidence for tested capabilities.
 
 ## Quick start (Windows)
 
@@ -47,7 +89,7 @@ cd src-tauri
 cargo tauri dev
 ~~~
 
-The browser can be explored without configuring a model; **Lucia's model-driven tasks require a functioning model provider**. Browser rendering and model connectivity are separate checks.
+The browser can be explored without configuring a model; **Lucia's model-driven tasks require a functioning inference runtime or model provider**. Browser rendering and model connectivity are separate checks.
 
 ### Build the Windows installer
 
@@ -59,7 +101,7 @@ From the repository root, run:
 
 This builds the UI assets and a Tauri NSIS installer, then copies it to `dist\Browsphere-setup.exe` when successful. The ordinary development installer is **unsigned** unless release signing has been configured. A built installer is not evidence of successful clean-machine installation, upgrades, or production readiness. See [release signing](RELEASE_SIGNING.md).
 
-## Configure Lucia models
+## Configure Lucia models and provider routes
 
 Open **Settings → AI & ML** and configure a model route. API credentials are managed separately from ordinary UI preferences through **Windows Credential Manager**; do not put keys in the README, source control, logs, or screenshots.
 
@@ -140,7 +182,8 @@ SQLite (WAL mode) stores browsing and agent data locally. Credentials are kept o
 
 ## Known limitations and release gates
 
-- **Autonomy:** repeated **real hosted-model** plan → act → recover → verify workflows must pass on multiple structurally different public websites. Navigation-only and simulated-model results do not satisfy this gate.
+- **Embedded inference and MCP:** verify bundled model availability, offline inference, installer behavior, server permissions and repeated browser–MCP workflows.
+- **Autonomy:** repeated **real local or hosted-model** plan → act → recover → verify workflows must pass on multiple structurally different public websites. Navigation-only and simulated-model results do not satisfy this gate.
 - **Providers:** service availability, key permissions, rate limits, malformed model actions, and latency can stop tasks. No implicit quota bypass or undocumented provider fallback.
 - **Web compatibility:** complex SPAs, embedded frames, authentication/popup flows, file uploads, accessibility, and site-specific controls need broader live testing. Extension hosting is not available.
 - **Safety and privacy:** continue testing site permissions, user approvals, history/private-mode isolation, redaction and prompt-injection resistance. Evidence checks verify correspondence to observed pages, not the independent truth of page content.
