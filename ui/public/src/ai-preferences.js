@@ -138,14 +138,14 @@
           '<span class="mac-ai-quiet">Install or refresh an Ollama model first.</span>'));
     var mcp = section('MCP Tools', 'Connect a trusted local or HTTPS MCP server. This manual connection requires confirmation for each tool call.',
       row('MCP marketplace', 'Browse the official registry. Discovery only; review servers independently before configuring them.', input('cfgMcpSearch', '', 'Search server names') + btn('mcp-marketplace','Search registry')) +
-      row('Search provider sign-in', 'OAuth first. Choose an official provider, then open the reviewed sign-in URL and approve access yourself.', btn('mcp-preset-exa','Sign in to Exa') + btn('mcp-preset-tavily','Sign in to Tavily')) +
+      row('Search provider sign-in', 'OAuth first. Choose an official provider and the external browser to open for sign-in.', btn('mcp-preset-exa','Sign in to Exa') + btn('mcp-preset-tavily','Sign in to Tavily')) +
       row('Optional API key', 'Alternative to OAuth for Exa or Tavily. Keys are stored in Windows Credential Manager, never in URLs. Brave uses its separately configured MCP server.', input('cfgMcpProviderKey', '', 'Provider API key', 'password') + btn('mcp-provider-key-save','Save key') + btn('mcp-provider-key-clear','Remove key')) +
       row('Server endpoint', 'Use HTTPS remotely or literal loopback HTTP locally. Connect only to servers you trust.', input('cfgMcpUrl', '', 'http://127.0.0.1:8765/mcp', 'url')) +
       row('OAuth issuer', 'Official presets fill the issuer automatically. Custom servers require a registered client.', input('cfgMcpIssuer', '', 'https://auth.example.com', 'url')) +
       row('OAuth client ID', 'Leave blank for official presets. Custom clients must support loopback redirects and S256 PKCE.', input('cfgMcpClientId', '', 'Registered public client ID')) +
       row('OAuth scope', 'Optional, request only the minimum necessary scope.', input('cfgMcpScope', '', 'Read-only scope')) +
-      row('Authorization', 'Start, open the reviewed URL in your browser, then finish. Tokens stay in Windows Credential Manager.',
-        btn('mcp-oauth-begin','Start authorization') + btn('mcp-oauth-copy','Copy authorization URL') + btn('mcp-oauth-finish','Finish authorization') + btn('mcp-oauth-forget','Forget authorization')) +
+      row('Authorization', 'Choose your browser and sign in. Authorization completes automatically. Tokens stay in Windows Credential Manager.',
+        btn('mcp-oauth-begin','Start authorization') + btn('mcp-oauth-open','Open sign-in browser') + btn('mcp-oauth-copy','Copy authorization URL') + btn('mcp-oauth-finish','Finish authorization') + btn('mcp-oauth-forget','Forget authorization')) +
       row('Connection', 'Discover the server tools, or disconnect.', btn('mcp-connect','Discover tools') + btn('mcp-disconnect','Disconnect')) +
       row('Discovered tools', 'Select an exact tool. Server-provided annotations are not permission grants.', '<select id="cfgMcpTool" class="mac-ai-select" aria-label="MCP tool"><option value="">Connect first</option></select>') +
       row('Lucia server name', 'Approve only a reviewed read-only tool for explicit mcp auto / mcp hybrid tasks.', input('cfgMcpAlias','','my-server')) +

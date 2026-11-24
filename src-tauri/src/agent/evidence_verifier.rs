@@ -168,7 +168,7 @@ pub fn research_facets(goal:&str)->Vec<&'static str>{
         vec!["default_behavior"]
     }else{vec![]}
 }
-fn contrast_terms(goal:&str)->Option<(String,String)>{
+pub fn contrast_terms(goal:&str)->Option<(String,String)>{
     let lower=goal.to_ascii_lowercase();
     let start=lower.find("difference between ")?+"difference between ".len();
     let rest=goal.get(start..)?;
@@ -193,9 +193,13 @@ fn facet_score(goal:&str,facet:&str,text:&str)->i32{
     if matches!(facet,"contrast_left"|"contrast_right"){
         let Some((a,b))=contrast_terms(goal)else{return 0};
         let term=if facet=="contrast_left"{a}else{b};
-        if !t.contains(&term){return 0;}
+        if !super::browser_skills::phrase(&t,&term){return 0;}
         let explanation=["avoids","avoid ","skips","skip ","does not","not inserted","prevents","causes","updates","performs","instead","will ","returns","means","is used","allows","inserts","ignores"];
-        return explanation.iter().filter(|v|t.contains(**v)).count() as i32;
+        let Some(at)=t.find(&term)else{return 0;};
+        let tail=&t[at+term.len()..];
+        let direct=tail.trim_start_matches(|c:char|c.is_whitespace()||matches!(c,','|':'|';')).split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+        let score=explanation.iter().filter(|v|tail.contains(**v)).count() as i32;
+        return score+if score>0&&["avoids","skips","does not","prevents","updates","performs","inserts","returns","causes","means","ignores","allows"].iter().any(|v|super::browser_skills::phrase(&direct,v)){4}else{0};
     }
     if facet=="installation_command"{
         let commands=["pip install ","python -m pip install ","npm install ","yarn add ","pnpm add ","cargo add ","cargo install ","gem install ","go install ","dotnet add package "];
@@ -248,6 +252,9 @@ fn facet_score(goal:&str,facet:&str,text:&str)->i32{
 fn quality_tier(goal:&str,facet:&str,text:&str)->u8{
     let t=semantic_text(text);
     if facet_score(goal,facet,text)==0{return 0;}
+    if matches!(facet,"contrast_left"|"contrast_right"){
+        return if facet_score(goal,facet,text)>=5{3}else{1};
+    }
     if normalized(goal).contains("http client librar"){
         if facet=="caveat"{
             let lifecycle=["connection pool","session per request","session per application","reuse","close the","close()","context manager","hot loop","streaming response"];
@@ -281,6 +288,18 @@ pub fn facet_candidates(goal:&str,source:&SourceEvidence)->Vec<FacetCandidates>{
         if word.ends_with(['.','!','?'])&&buf.chars().count()>=20{pieces.push(std::mem::take(&mut buf));}
     }
     if !buf.is_empty(){pieces.push(buf);}
+    if let Some((a,b))=contrast_terms(goal){
+        // Keep sentence-sized literal windows around each exact term.
+        // The old fixed-size chunks can split a term from its explanation.
+        let terms=[a,b];
+        for sentence in text.split_inclusive(['.','!','?']){
+            let sentence=sentence.trim();
+            if sentence.chars().count()>240||sentence.chars().count()<30{continue;}
+            if terms.iter().any(|term|super::browser_skills::phrase(sentence,term)){
+                pieces.push(sentence.to_string());
+            }
+        }
+    }
     let single_count=pieces.len();
     let joined=pieces.windows(2).filter_map(|pair|{
         let text=format!("{} {}",pair[0],pair[1]);
@@ -1173,6 +1192,17 @@ mod explicit_source_tests {
 #[cfg(test)]
 mod extractive_comparison_tests{
     use super::*;
+    #[test]
+    fn contrast_retains_complete_literal_behavior_clauses_after_chunk_boundary(){
+        let goal="Find the SQL INSERT command reference. Locate the ON CONFLICT clause and explain the difference between DO NOTHING and DO UPDATE. Cite observed source evidence for each behavior.";
+        let source=SourceEvidence{url:"https://example.org/docs/sql-insert.html".into(),title:"SQL INSERT".into(),
+            excerpt:format!("{} ON CONFLICT DO NOTHING simply avoids inserting a row as its alternative action. ON CONFLICT DO UPDATE updates the existing row that conflicts with the row proposed for insertion as its alternative action.","Unrelated context ".repeat(13))};
+        let sets=facet_candidates(goal,&source);
+        assert_eq!(sets.len(),2);
+        assert!(sets[0].candidates[0].text.contains("DO NOTHING simply avoids"),"{:?}",sets[0]);
+        assert!(sets[1].candidates[0].text.contains("DO UPDATE updates"),"{:?}",sets[1]);
+        assert!(sets.iter().all(|s|super::super::browser_skills::verification::quote_present(&source,&s.candidates[0].text)));
+    }
     #[test]
     fn target_fact_contract_requires_every_requested_behavior(){
         let goal="Find the SQL MERGE command reference. Explain the difference between WHEN MATCHED and WHEN NOT MATCHED.";

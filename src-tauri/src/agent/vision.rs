@@ -3,14 +3,18 @@
 use crate::router::model_router::RouterConfig;
 
 use super::multimodal_perception::{self as mm,Candidate,VisualObservation};
+#[derive(Debug,Default,serde::Serialize)]
+pub struct InferenceTrace{pub attempts:u8,pub first_failure:Option<&'static str>,pub recovery:bool}
+
 /// Read only one screenshot from the dedicated tab. The caller must
 /// independently re-observe and validate the page before consuming output.
-pub async fn observe(config:&RouterConfig,app:&tauri::AppHandle,label:&str,goal:&str,candidates:&[Candidate])->Result<(VisualObservation,mm::Viewport),String>{
+pub async fn observe(config:&RouterConfig,app:&tauri::AppHandle,label:&str,goal:&str,candidates:&[Candidate])->Result<(VisualObservation,mm::Viewport,InferenceTrace),String>{
     let before=viewport(app,label).await?;
     let image=capture(app,label).await?;
     let after=viewport(app,label).await?;
     if before!=after{return Err("Viewport changed during capture".into());}
-    Ok((infer(config,&image,goal,candidates).await?,before))
+    let (observation,trace)=infer(config,&image,goal,candidates).await?;
+    Ok((observation,before,trace))
 }
 async fn viewport(app:&tauri::AppHandle,label:&str)->Result<mm::Viewport,String>{
     let raw=crate::agent::native_eval::eval_json(app,label,
@@ -19,7 +23,7 @@ async fn viewport(app:&tauri::AppHandle,label:&str)->Result<mm::Viewport,String>
     if !v.valid(){return Err("Invalid screenshot viewport".into());}
     Ok(v)
 }
-pub async fn infer(config:&RouterConfig,image:&str,goal:&str,candidates:&[Candidate])->Result<VisualObservation,String>{
+pub async fn infer(config:&RouterConfig,image:&str,goal:&str,candidates:&[Candidate])->Result<(VisualObservation,InferenceTrace),String>{
     let endpoint=url::Url::parse(&config.ollama_url).map_err(|_|"Invalid Ollama URL")?;
     if endpoint.scheme()!="http"||!matches!(endpoint.host_str(),Some("localhost"|"127.0.0.1"|"[::1]"))||
         !endpoint.username().is_empty()||endpoint.password().is_some()||endpoint.query().is_some()||endpoint.fragment().is_some(){
@@ -31,16 +35,51 @@ pub async fn infer(config:&RouterConfig,image:&str,goal:&str,candidates:&[Candid
     if image.is_empty()||image.len()>12_000_000{return Err("Screenshot outside size limit".into());}
     let client=reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(35)).build().map_err(|_|"Visual inference client unavailable")?;
-    let response:serde_json::Value=client.post(format!("{}/api/chat",config.ollama_url.trim_end_matches('/')))
-        .json(&serde_json::json!({
-            "model":config.vision_model,"stream":false,"think":false,"keep_alive":"90s",
-            "format":mm::schema(candidates.len()),
-            "messages":[{"role":"user","content":mm::prompt(goal,candidates),"images":[image]}],
-            "options":{"num_ctx":4096,"num_predict":380,"temperature":0}
-        })).send().await.map_err(|_|"Local visual inference request failed")?
-        .error_for_status().map_err(|_|"Local visual inference rejected")?.json().await.map_err(|_|"Invalid visual provider response")?;
-    let answer=response["message"]["content"].as_str().ok_or("No structured visual observation")?;
-    mm::parse(answer,candidates.len())
+    let deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(35);
+    let prompt=mm::prompt(goal,candidates);
+    let mut trace=InferenceTrace::default();
+    for attempt in 0..2{
+        let remaining=deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero(){return Err("Local visual inference timed out".into());}
+        trace.attempts+=1;
+        let content=if attempt==0{prompt.clone()}else{mm::recovery_prompt(goal,candidates)};
+        let schema=if attempt==0{mm::schema(candidates.len())}else{mm::recovery_schema(candidates.len())};
+        let response:serde_json::Value=client.post(format!("{}/api/chat",config.ollama_url.trim_end_matches('/')))
+            .timeout(remaining)
+            .json(&serde_json::json!({
+                "model":config.vision_model,"stream":false,"think":false,"keep_alive":"90s",
+                "format":schema,
+                "messages":[{"role":"user","content":content,"images":[image]}],
+                "options":{"num_ctx":4096,"num_predict":512,"temperature":0}
+            })).send().await.map_err(|e|if e.is_timeout(){"Local visual inference timed out"}else if e.is_connect(){"Local vision runtime unreachable"}else{"Local visual inference request failed"})?
+            .error_for_status().map_err(|_|"Local visual inference rejected")?.json().await.map_err(|_|"Invalid visual provider response")?;
+        let parsed=provider_observation(&response,candidates.len()).and_then(|value|{
+            if attempt>0&&(value.controls.len()>1||!value.visible_text.is_empty()||value.controls.iter().any(|c|c.point.is_none())){return Err("Recovery observation violates compact schema".into());}
+            Ok(value)
+        });
+        match parsed{
+            Ok(value)=>{trace.recovery=attempt>0;return Ok((value,trace));},
+            Err(error) if attempt==0&&retryable_observation(&error)&&deadline.saturating_duration_since(tokio::time::Instant::now())>=std::time::Duration::from_secs(3)=>{
+                trace.first_failure=Some(failure_detail(&error));continue;
+            },
+            Err(error)=>return Err(error),
+        }
+    }
+    Err("Invalid structured visual observation".into())
+
+}
+
+fn provider_observation(response:&serde_json::Value,count:usize)->Result<VisualObservation,String>{
+    if response["done_reason"].as_str()==Some("length"){return Err("Visual output truncated".into());}
+    let answer=response["message"]["content"].as_str().filter(|s|!s.trim().is_empty()).ok_or("No structured visual observation")?;
+    // A single exact Markdown fence is transport formatting, not a schema
+    // change. Never extract a JSON substring from arbitrary model prose.
+    let raw=answer.trim();
+    let raw=raw.strip_prefix("```json\n").and_then(|s|s.strip_suffix("\n```")).unwrap_or(raw);
+    mm::parse(raw,count)
+}
+fn retryable_observation(error:&str)->bool{
+    matches!(failure_category(error),"invalid_observation"|"output_truncated")
 }
 
 #[cfg(windows)]
@@ -81,4 +120,85 @@ async fn capture(app: &tauri::AppHandle, label: &str) -> Result<String, String> 
 #[cfg(not(windows))]
 async fn capture(_: &tauri::AppHandle, _: &str) -> Result<String, String> {
     Err("Screenshot perception requires Windows WebView2".into())
+}
+
+
+// Emit only known error categories; never provider response bodies,
+// screenshot content, arbitrary exception strings or private URLs.
+pub fn failure_category(error:&str)->&'static str{
+    match error{
+        "Local visual inference timed out"|"Catalog visual recovery time limit"=>"inference_timeout",
+        "Local vision runtime unreachable"=>"runtime_unreachable",
+        "Local visual inference rejected"=>"provider_rejected",
+        "Local visual inference request failed"=>"inference_transport",
+        "Invalid visual provider response"=>"provider_response",
+        "Visual output truncated"=>"output_truncated",
+        "Invalid structured visual observation"|"Visual observation violates bounded schema"|"Duplicate visual control index"|"Visual output exceeds size limit"|"No structured visual observation"|"Visual JSON syntax invalid"|"Visual JSON field type or enum invalid"|"Too many visual controls"|"Visual text outside bounds"|"Visual control index outside bounds"|"Visual control label outside bounds"|"Visual coordinates outside bounds"|"Independent visual control missing point"|"Recovery observation violates compact schema"=>"invalid_observation",
+        "Viewport changed during capture"|"Invalid screenshot viewport"=>"viewport_changed",
+        "Screenshot timed out"|"Screenshot callback closed"|"Screenshot returned no image"|"Screenshot outside size limit"=>"capture_failed",
+        "Local vision disabled"|"Vision requires a loopback Ollama endpoint"|"Invalid Ollama URL"=>"configuration",
+        _=>"native_observation_failed"
+    }
+}
+pub fn failure_detail(error:&str)->&'static str{
+    match error{
+        "Visual JSON syntax invalid"=>"json_syntax",
+        "Visual JSON field type or enum invalid"=>"field_type_or_enum",
+        "Too many visual controls"=>"control_count",
+        "Visual text outside bounds"=>"text_bounds",
+        "Visual control index outside bounds"=>"index_bounds",
+        "Visual control label outside bounds"=>"label_bounds",
+        "Visual coordinates outside bounds"=>"coordinate_bounds",
+        "Independent visual control missing point"=>"missing_point",
+        "Duplicate visual control index"=>"duplicate_index",
+        "Recovery observation violates compact schema"=>"compact_schema",
+        _=>failure_category(error)
+    }
+}
+#[cfg(test)]
+mod tests{
+ use super::*;
+ #[test]fn only_strict_observation_failures_are_retried(){
+  let bad=serde_json::json!({"message":{"content":"not JSON"}});
+  assert!(retryable_observation(&provider_observation(&bad,0).unwrap_err()));
+  assert!(!retryable_observation("Local vision runtime unreachable"));
+  assert!(!retryable_observation("Local visual inference rejected"));
+  let valid=serde_json::json!({"page_kind":"documentation","layout":"document","blocker":"none","controls":[],"visible_text":[]}).to_string();
+  let good=serde_json::json!({"message":{"content":format!("```json\n{valid}\n```")}});
+  assert!(provider_observation(&good,0).is_ok());
+  let action=serde_json::json!({"message":{"content":valid.replace("\"controls\"","\"action\":\"click\",\"controls\"")}});
+  assert!(provider_observation(&action,0).is_err());
+ }
+ #[tokio::test]
+ async fn malformed_vision_response_recovers_with_compact_schema_and_exactly_one_retry(){
+    use tokio::io::{AsyncReadExt,AsyncWriteExt};
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr=listener.local_addr().unwrap();
+    let server=tokio::spawn(async move{
+        for i in 0..2{
+            let(mut socket,_)=listener.accept().await.unwrap();
+            let mut bytes=Vec::new();let mut buf=[0u8;4096];
+            let end=loop{let n=socket.read(&mut buf).await.unwrap();assert!(n>0);bytes.extend_from_slice(&buf[..n]);if let Some(i)=bytes.windows(4).position(|x|x==b"\r\n\r\n"){break i+4;}};
+            let headers=String::from_utf8_lossy(&bytes[..end]);
+            let len=headers.lines().find_map(|l|l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v|v.trim().parse::<usize>().ok())).unwrap();
+            while bytes.len()<end+len{let n=socket.read(&mut buf).await.unwrap();assert!(n>0);bytes.extend_from_slice(&buf[..n]);}
+            let r:serde_json::Value=serde_json::from_slice(&bytes[end..end+len]).unwrap();
+            assert_eq!(r["format"]["properties"]["controls"]["maxItems"],if i==0{3}else{1});
+            let content=if i==0{serde_json::json!({"page_kind":"documentation","layout":"document","blocker":"none","controls":[],"visible_text":["x"]})}
+                else{serde_json::json!({"page_kind":"documentation","layout":"document","blocker":"none","controls":[{"index":0,"label":"Field Guide","point":{"x":240,"y":130}}],"visible_text":[]})};
+            let response=serde_json::json!({"message":{"content":content.to_string()}}).to_string();
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",response.len(),response).as_bytes()).await.unwrap();
+        }
+    });
+    let mut cfg=RouterConfig::default();cfg.ollama_url=format!("http://{addr}");cfg.vision_model="fixture-vision".into();cfg.lucia_cloud_only=false;
+    let (o,trace)=infer(&cfg,"fixture-image","Find the Field Guide",&[]).await.unwrap();
+    assert_eq!(trace.attempts,2);assert!(trace.recovery);assert_eq!(trace.first_failure,Some("text_bounds"));assert_eq!(o.controls[0].label,"Field Guide");
+    server.await.unwrap();
+ }
+ #[test]fn vision_failure_diagnostics_do_not_expose_untrusted_errors(){
+  assert_eq!(failure_category("Local vision runtime unreachable"),"runtime_unreachable");
+  assert_eq!(failure_category("Visual output truncated"),"output_truncated");
+  assert_eq!(failure_category("Invalid structured visual observation"),"invalid_observation");
+  assert_eq!(failure_category("unexpected provider details"),"native_observation_failed");
+ }
 }

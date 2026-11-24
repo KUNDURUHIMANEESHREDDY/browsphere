@@ -1599,7 +1599,35 @@ pub async fn run_react_loop(
         // Compose already observed subgoals before spending any inference
         // budget on another action. All handoffs still pass the final gates.
         objectives.observe(&orchestrator.evidence);
+        // Navigation polling can replace the pre-action snapshot. Acquire
+        // reference facts only after all fresh navigation observations, just
+        // before the requirement ledger consumes the retained evidence.
         requirements.refresh(&goal,&orchestrator.evidence);
+        if !private_mode&&skill.as_ref().is_some_and(|s|s.spec.kind==crate::agent::skills::TargetKind::Reference&&s.spec.observed_target(&snapshot))&&
+            crate::agent::browser_skills::readable(&snapshot)&&
+            !crate::agent::search_discovery::human_verification(&snapshot.origin,&snapshot.title,&snapshot.text_excerpt){
+            if let Some((a,b))=crate::agent::evidence_verifier::contrast_terms(&goal){
+                let terms=[a,b];
+                // A navigation acknowledgment can precede hydration. Observe
+                // at most three times, never navigate again or guess a quote.
+                for attempt in 0..3{
+                    if cancel.is_cancelled(){return Ok("cancelled".into());}
+                    let previous=snapshot.origin.clone();
+                    if let Some(fresh)=crate::agent::dom_extractor::request_reference_snapshot(&app,&webview_label,&terms).await{
+                        if fresh.origin!=previous||fresh.title!=snapshot.title||!crate::agent::browser_skills::readable(&fresh)||
+                            crate::agent::search_discovery::human_verification(&fresh.origin,&fresh.title,&fresh.text_excerpt){break;}
+                        let candidate_counts=crate::agent::browser_skills::extraction::capture(&fresh).map(|source|
+                            crate::agent::evidence_verifier::facet_candidates(&goal,&source).into_iter().map(|f|(f.facet,f.candidates.len())).collect::<Vec<_>>()).unwrap_or_default();
+                        snapshot=fresh;
+                        orchestrator.observe(&snapshot);
+                        requirements.refresh(&goal,&orchestrator.evidence);
+                        let _=app.emit("agent:evidence_acquisition",serde_json::json!({"run_id":run_id,"step_index":step,"status":"reference_observed","attempt":attempt+1,"missing":requirements.missing(),"candidate_counts":candidate_counts,"scope_current":requirements.current_target_scope(&snapshot.origin),"excerpt_chars":snapshot.text_excerpt.chars().count()}));
+                        if requirements.ready(){break;}
+                    }
+                    if attempt<2{tokio::select!{_=cancel.cancelled()=>return Ok("cancelled".into()),_=tokio::time::sleep(std::time::Duration::from_millis(450))=>{}}}
+                }
+            }
+        }
         let _=app.emit("agent:requirement_state",serde_json::json!({"run_id":run_id,"step_index":step,"ledger":&requirements}));
         let current_reference=crate::agent::execution_intelligence::current_reference_subject(&goal).is_some();
         let current_reference_ready=current_reference&&snapshot.origin==initial_origin&&
@@ -1708,7 +1736,7 @@ pub async fn run_react_loop(
                 continue;
             }
             match observed{
-                Ok((o,viewport))=>{
+                Ok((o,viewport,inference_trace))=>{
                     let fused=crate::agent::multimodal_perception::fuse(&goal,&snapshot,&candidates,&o);
                     visual_points=crate::agent::multimodal_perception::coordinate_targets(&goal,&snapshot,&candidates,&o,&viewport);
                     let mut now=current.unwrap();
@@ -1745,10 +1773,10 @@ pub async fn run_react_loop(
                     orchestrator.observe(&snapshot);
                     for id in visual_points.keys(){if !visual_ids.contains(id){visual_ids.push(id.clone());}}
                     visual_snapshot=Some(snapshot.clone());
-                    let _=app.emit("agent:vision",serde_json::json!({"run_id":run_id,"step_index":step,"status":"observed","reason":reason,"model":vision_config.vision_model,"fusion":if whole_page_fresh{Some(&fused)}else{None},"grounded_points":visual_points.len(),"target_rebound":!whole_page_fresh,"independent_grounded":independent_visual_ids.len(),"independent_proposed":o.controls.iter().any(|c|c.index==0)}));
+                    let _=app.emit("agent:vision",serde_json::json!({"run_id":run_id,"step_index":step,"status":"observed","reason":reason,"model":vision_config.vision_model,"fusion":if whole_page_fresh{Some(&fused)}else{None},"inference_trace":inference_trace,"grounded_points":visual_points.len(),"target_rebound":!whole_page_fresh,"independent_grounded":independent_visual_ids.len(),"independent_proposed":o.controls.iter().any(|c|c.index==0)}));
                 },
-                Err(_)=>{
-                    let _=app.emit("agent:vision",serde_json::json!({"run_id":run_id,"step_index":step,"status":"unavailable","reason":reason}));
+                Err(error)=>{
+                    let _=app.emit("agent:vision",serde_json::json!({"run_id":run_id,"step_index":step,"status":"unavailable","reason":reason,"failure":crate::agent::vision::failure_category(&error),"failure_detail":crate::agent::vision::failure_detail(&error)}));
                 }
             }
         }

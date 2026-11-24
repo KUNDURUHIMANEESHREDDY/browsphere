@@ -2985,6 +2985,8 @@ fn main() {
             mcp::mcp_marketplace_search,
             mcp::mcp_connect,
             mcp_oauth::mcp_oauth_begin,
+            mcp_oauth::mcp_oauth_browsers,
+            mcp_oauth::mcp_oauth_open_browser,
             mcp_oauth::mcp_oauth_finish,
             mcp_oauth::mcp_oauth_forget,
             mcp_oauth::mcp_provider_key,

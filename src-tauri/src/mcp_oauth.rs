@@ -12,11 +12,11 @@ use uuid::Uuid;
 use crate::storage::credentials::CredentialStore;
 
 const LIMIT:usize=65536;
-const FLOW_TTL:Duration=Duration::from_secs(180);
+const FLOW_TTL:Duration=Duration::from_secs(600);
 #[derive(Default)]
 pub struct OAuthRegistry(Mutex<HashMap<String,Pending>>);
 struct Pending {
-    resource:Url, token_endpoint:Url, client_id:String, verifier:String,
+    resource:Url, authorization_url:Url, token_endpoint:Url, client_id:String, verifier:String,
     state:String, redirect:Url, issuer:Url, listener:TcpListener, created:Instant,
 }
 fn client()->Result<Client>{
@@ -90,7 +90,7 @@ fn endpoints(v:&Value,issuer:&Url)->Result<(Url,Url)>{
     ensure!(authorize.origin()==issuer.origin() && token.origin()==issuer.origin(),"Cross-origin OAuth endpoints not supported");
     Ok((authorize,token))
 }
-fn callback_code(target:&str,redirect:&Url,state:&str,issuer:&Url)->Result<String>{
+fn callback_result(target:&str,redirect:&Url,state:&str,issuer:&Url)->Result<Option<String>>{
     ensure!(target.starts_with("/oauth/callback?") && target.len()<=8192,"Invalid callback target");
     let u=redirect.join(target)?;
     ensure!(u.origin()==redirect.origin() && u.path()==redirect.path(),"Callback address mismatch");
@@ -100,10 +100,14 @@ fn callback_code(target:&str,redirect:&Url,state:&str,issuer:&Url)->Result<Strin
     }
     ensure!(fields.get("state").map(String::as_str)==Some(state),"OAuth state mismatch");
     if let Some(iss)=fields.get("iss"){ensure!(https(iss)?==*issuer,"Callback issuer mismatch");}
-    ensure!(!fields.contains_key("error"),"Authorization declined or failed");
+    if fields.contains_key("error"){return Ok(None);}
     let code=fields.remove("code").context("Authorization code missing")?;
     ensure!(!code.is_empty() && code.len()<=4096 && !code.chars().any(char::is_control),"Invalid authorization code");
-    Ok(code)
+    Ok(Some(code))
+}
+#[cfg(test)]
+fn callback_code(target:&str,redirect:&Url,state:&str,issuer:&Url)->Result<String>{
+    callback_result(target,redirect,state,issuer)?.context("Authorization declined or failed")
 }
 async fn callback(p:&Pending)->Result<String>{
     let remaining=FLOW_TTL.checked_sub(p.created.elapsed()).context("Authorization expired")?;
@@ -127,14 +131,14 @@ async fn callback(p:&Pending)->Result<String>{
                 let host=format!("127.0.0.1:{}",p.redirect.port().context("Missing callback port")?);
                 ensure!(head.lines().any(|l|l.split_once(':').is_some_and(|(k,v)|k.eq_ignore_ascii_case("host")&&v.trim()==host)),
                     "Callback host mismatch");
-                callback_code(target,&p.redirect,&p.state,&p.issuer)
+                callback_result(target,&p.redirect,&p.state,&p.issuer)
             }).await;
             let result=match request {Ok(r)=>r,Err(_)=>Err(anyhow::anyhow!("Callback timed out"))};
-            let body=if result.is_ok(){"Authorization response received. Return to Browsphere."}else{"Invalid or expired authorization response."};
+            let body=match &result{Ok(Some(_))=>"Authorization response received. Return to Browsphere.",Ok(None)=>"Authorization declined. Return to Browsphere.",Err(_)=>"Invalid or expired authorization response."};
             let status=if result.is_ok(){"200 OK"}else{"400 Bad Request"};
             let _=tokio::time::timeout(Duration::from_secs(1),socket.write_all(format!(
                 "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",body.len()).as_bytes())).await;
-            if result.is_ok(){return result;}
+            if let Ok(code)=result{return code.context("Authorization declined or failed");}
         }
         anyhow::bail!("No valid OAuth callback received")
     }).await.context("Authorization expired")?
@@ -199,12 +203,78 @@ pub async fn mcp_oauth_begin(view:tauri::Webview,registry:tauri::State<'_,OAuthR
             .append_pair("state",&state).append_pair("resource",resource.as_str());
         if !scope.trim().is_empty(){authorize.query_pairs_mut().append_pair("scope",scope.trim());}
         let id=Uuid::new_v4().to_string();
-        let result=json!({"id":id,"authorizationUrl":authorize.as_str(),"redirectUri":redirect.as_str(),"expiresIn":180});
+        let result=json!({"id":id,"authorizationUrl":authorize.as_str(),"redirectUri":redirect.as_str(),"expiresIn":FLOW_TTL.as_secs()});
         let mut entries=registry.0.lock().await;
-        entries.retain(|_,p|p.created.elapsed()<FLOW_TTL);
+        entries.retain(|_,p|p.created.elapsed()<FLOW_TTL&&p.resource!=resource);
         ensure!(entries.len()<4,"Too many pending authorizations");
-        entries.insert(id,Pending{resource,token_endpoint,client_id,verifier,state,redirect,issuer,listener,created:Instant::now()});
+        entries.insert(id,Pending{resource,authorization_url:authorize,token_endpoint,client_id,verifier,state,redirect,issuer,listener,created:Instant::now()});
         Ok(result)
+    }.await.map_err(|e:anyhow::Error|e.to_string())
+}
+// Browser selection is restricted to known executable paths. Never accept a
+// caller-supplied command, arbitrary executable, or external URL.
+fn browser_relative_path(browser:&str)->Option<&'static str>{
+    match browser{
+        "edge"=>Some("Microsoft/Edge/Application/msedge.exe"),
+        "chrome"=>Some("Google/Chrome/Application/chrome.exe"),
+        "firefox"=>Some("Mozilla Firefox/firefox.exe"),
+        "brave"=>Some("BraveSoftware/Brave-Browser/Application/brave.exe"),
+        _=>None
+    }
+}
+#[cfg(windows)]
+fn browser_executable(browser:&str)->Option<std::path::PathBuf>{
+    let relative=browser_relative_path(browser)?;
+    ["ProgramFiles","ProgramFiles(x86)","LOCALAPPDATA"].iter()
+        .filter_map(std::env::var_os).map(|root|std::path::PathBuf::from(root).join(relative))
+        .find(|path|path.is_absolute()&&path.is_file())
+}
+#[cfg(windows)]
+fn launch_default_browser(url:&Url)->Result<()>{
+    use std::os::windows::ffi::OsStrExt;
+    use std::ffi::OsStr;
+    #[link(name="shell32")]
+    extern "system"{
+        fn ShellExecuteW(hwnd:*mut std::ffi::c_void,operation:*const u16,file:*const u16,parameters:*const u16,directory:*const u16,show:i32)->isize;
+    }
+    let wide=|v:&str|OsStr::new(v).encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let verb=wide("open");let file=wide(url.as_str());
+    let result=unsafe{ShellExecuteW(std::ptr::null_mut(),verb.as_ptr(),file.as_ptr(),std::ptr::null(),std::ptr::null(),1)};
+    ensure!(result>32,"Windows could not open the default browser");
+    Ok(())
+}
+#[tauri::command]
+pub async fn mcp_oauth_browsers(view:tauri::Webview)->Result<Value,String>{
+    trusted(&view).map_err(|e|e.to_string())?;
+    let mut browsers=vec![json!({"id":"default","label":"System default browser"})];
+    #[cfg(windows)]
+    for (id,label) in [("edge","Microsoft Edge"),("chrome","Google Chrome"),("firefox","Mozilla Firefox"),("brave","Brave")]{
+        if browser_executable(id).is_some(){browsers.push(json!({"id":id,"label":label}));}
+    }
+    Ok(json!(browsers))
+}
+#[tauri::command]
+pub async fn mcp_oauth_open_browser(view:tauri::Webview,registry:tauri::State<'_,OAuthRegistry>,id:String,browser:String)->Result<(),String>{
+    async{
+        trusted(&view)?;
+        let url={
+            let entries=registry.0.lock().await;
+            let p=entries.get(&id).context("Start authorization first")?;
+            ensure!(p.created.elapsed()<FLOW_TTL,"Authorization expired; start again");
+            ensure!(p.authorization_url.scheme()=="https"&&p.authorization_url.origin()==p.issuer.origin(),"Invalid authorization target");
+            p.authorization_url.clone()
+        };
+        #[cfg(windows)]
+        {
+            if browser=="default"{launch_default_browser(&url)?;}
+            else{
+                let exe=browser_executable(&browser).context("Selected browser is not installed")?;
+                std::process::Command::new(exe).arg(url.as_str()).spawn().context("Could not open selected browser")?;
+            }
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {let _=(url,browser);anyhow::bail!("Automatic browser launch is currently Windows-only")}
     }.await.map_err(|e:anyhow::Error|e.to_string())
 }
 #[tauri::command]
@@ -212,20 +282,29 @@ pub async fn mcp_oauth_finish(view:tauri::Webview,registry:tauri::State<'_,OAuth
     async{
         trusted(&view)?;
         let p=registry.0.lock().await.remove(&id).context("Authorization expired or already consumed")?;
-        let code=callback(&p).await?;
+        let code=callback(&p).await.context("OAuth callback not completed")?;
         let token=json_response(client()?.post(p.token_endpoint.clone()).form(&[
             ("grant_type","authorization_code"),("client_id",p.client_id.as_str()),
             ("code",code.as_str()),("code_verifier",p.verifier.as_str()),
             ("redirect_uri",p.redirect.as_str()),("resource",p.resource.as_str())
-        ]).send().await?).await?;
+        ]).send().await.context("OAuth token request failed")?).await.context("OAuth token exchange failed")?;
         ensure!(token["token_type"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("bearer")),"Expected a bearer access token");
         let access=token["access_token"].as_str().context("Access token missing")?;
         ensure!(!access.is_empty() && access.len()<=8192 && !access.chars().any(char::is_whitespace),"Invalid access token");
         let expiry=token["expires_in"].as_i64().map(|n|chrono::Utc::now().timestamp().saturating_add(n.max(0)));
         // No refresh token is retained. Reauthorization is explicit.
-        creds().set_secret(&account(&p.resource),&json!({"resource":p.resource.as_str(),"access_token":access,"expires_at":expiry}).to_string())?;
+        creds().set_secret(&account(&p.resource),&json!({"resource":p.resource.as_str(),"access_token":access,"expires_at":expiry}).to_string()).context("Credential storage failed")?;
         Ok(())
-    }.await.map_err(|_:anyhow::Error|"MCP authorization failed or expired. No token was returned to the UI.".into())
+    }.await.map_err(|e:anyhow::Error|{
+        let message=e.to_string();
+        match message.as_str(){
+            "OAuth callback not completed" if e.chain().any(|c|c.to_string()=="Authorization declined or failed")=>"Sign-in was declined. Start again if you want to authorize.",
+            "OAuth callback not completed"=>"No valid browser callback was received before the authorization expired. Start sign-in again.",
+            "OAuth token request failed"|"OAuth token exchange failed"=>"The provider callback arrived, but token exchange failed. Start sign-in again.",
+            "Credential storage failed"=>"Authorization arrived, but Windows Credential Manager could not save it.",
+            _=>"MCP authorization failed or expired. Start sign-in again."
+        }.into()
+    })
 }
 #[tauri::command]
 pub async fn mcp_oauth_forget(view:tauri::Webview,resource:String)->Result<(),String>{
@@ -247,6 +326,30 @@ pub async fn mcp_provider_key(view:tauri::Webview,resource:String,key:String)->R
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[tokio::test]
+    async fn callback_listener_accepts_success_and_reports_denial(){
+        for denied in [false,true]{
+            let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr=listener.local_addr().unwrap();
+            let redirect=Url::parse(&format!("http://{addr}/oauth/callback")).unwrap();
+            let issuer=https("https://auth.exa.ai").unwrap();
+            let p=Pending{resource:https("https://mcp.exa.ai/mcp/oauth").unwrap(),authorization_url:issuer.clone(),token_endpoint:issuer.clone(),client_id:"fixture".into(),verifier:"fixture".into(),state:"fixture-state".into(),redirect,issuer,listener,created:Instant::now()};
+            let send=tokio::spawn(async move{
+                let mut sock=tokio::net::TcpStream::connect(addr).await.unwrap();
+                let query=if denied{"error=access_denied"}else{"code=fixture-code"};
+                sock.write_all(format!("GET /oauth/callback?state=fixture-state&{query} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                let mut response=Vec::new();sock.read_to_end(&mut response).await.unwrap();
+                assert!(String::from_utf8_lossy(&response).contains("200 OK"));
+            });
+            let result=tokio::time::timeout(Duration::from_secs(3),callback(&p)).await.unwrap();
+            send.await.unwrap();
+            if denied{assert!(result.is_err());}else{assert_eq!(result.unwrap(),"fixture-code");}
+        }
+    }
+    #[test]fn oauth_browser_choices_are_allowlisted(){
+        for name in ["edge","chrome","firefox","brave"]{assert!(browser_relative_path(name).is_some());}
+        for name in ["default","cmd.exe","powershell","../chrome","https://example.org"]{assert!(browser_relative_path(name).is_none());}
+    }
     #[test]fn official_presets_and_registration_are_bound(){
         assert_eq!(provider_preset(&https("https://mcp.exa.ai/mcp/oauth").unwrap()),Some(("https://auth.exa.ai","mcp:tools")));
         assert_eq!(provider_preset(&https("https://mcp.tavily.com/mcp").unwrap()),Some(("https://mcp.tavily.com/","openid")));

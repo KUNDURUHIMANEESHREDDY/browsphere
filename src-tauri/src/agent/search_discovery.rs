@@ -231,6 +231,11 @@ mod tests{
   let server=std::env::var("BROWSPHERE_TEST_SEARCH_PROVIDER").expect("set provider");
   let (url,tool)=match server.as_str(){
    "exa"=>("https://mcp.exa.ai/mcp","web_search_exa"),
+   "exa-oauth"=>{
+    let url="https://mcp.exa.ai/mcp/oauth";
+    assert!(crate::mcp_oauth::access_token_for(&url::Url::parse(url).unwrap()).expect("Saved authorization could not be loaded").is_some(),"Saved authorization is missing");
+    (url,"web_search_exa")
+   },
    "tavily"=>("https://mcp.tavily.com/mcp/","tavily_search"),
    _=>panic!("unsupported provider")
   };

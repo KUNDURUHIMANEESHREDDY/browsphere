@@ -23,6 +23,19 @@ if ($UseSavedCloud) {
 }
 $profile = Join-Path $env:TEMP ("browsphere-cross-site-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force (Join-Path $profile "Roaming"),(Join-Path $profile "Local"),(Join-Path $profile "WebView2") | Out-Null
+# Explicit authenticated search benchmark: copy only the exact approved tool
+# metadata, never a credential, cookie, or personal browser profile.
+if ($env:LUCIA_TEST_APPROVED_EXA -eq "1") {
+    if ($env:LUCIA_LEVEL_TEST -ne "4") { throw "Authenticated search flag restricted to Level 4" }
+    $saved = Join-Path $env:LOCALAPPDATA "BrowsphereAI\mcp-servers.json"
+    $config = Get-Content -Raw -LiteralPath $saved | ConvertFrom-Json
+    $entry = $config.'exa-oauth'
+    if ($entry.url -ne "https://mcp.exa.ai/mcp/oauth" -or $entry.read_only_tools -notcontains "web_search_exa") { throw "Authenticated Exa search has not been approved" }
+    $dir = Join-Path $profile "Local\BrowsphereAI"
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    [IO.File]::WriteAllText((Join-Path $dir "mcp-servers.json"),'{"exa-oauth":{"url":"https://mcp.exa.ai/mcp/oauth","read_only_tools":["web_search_exa"]}}',(New-Object Text.UTF8Encoding($false)))
+    Write-Host "LEVEL4 approved authenticated Exa only; credential remains in Windows Credential Manager"
+}
 $env:APPDATA = Join-Path $profile "Roaming"
 $env:LOCALAPPDATA = Join-Path $profile "Local"
 $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $profile "WebView2"

@@ -942,6 +942,7 @@
             case 'mcp-provider-key-save':
             case 'mcp-provider-key-clear':
             case 'mcp-oauth-begin':
+            case 'mcp-oauth-open':
             case 'mcp-oauth-copy':
             case 'mcp-oauth-finish':
             case 'mcp-oauth-forget':
@@ -3930,6 +3931,37 @@
       var mcpConnection = null;
       var mcpAuthorization = null;
       var mcpBusy = false;
+      async function chooseMcpOAuthBrowser() {
+        var browsers = await window.aetherBridge.listMcpOAuthBrowsers();
+        return new Promise(function(resolve) {
+          var dialog = document.createElement('dialog');
+          dialog.style.cssText = 'color:#f4f4f5;background:#202024;border:1px solid #555;border-radius:14px;padding:24px;max-width:420px;width:90%;';
+          var heading = document.createElement('h3');
+          heading.textContent = 'Choose a browser for sign-in';
+          heading.style.cssText = 'font-size:18px;font-weight:600;margin:0 0 12px;';
+          var help = document.createElement('p');
+          help.textContent = 'Sign in and approve access in your own browser. Lucia will not interact with the sign-in page.';
+          help.style.cssText = 'font-size:13px;margin:0 0 16px;line-height:1.5;';
+          var select = document.createElement('select');
+          select.className = 'mac-ai-select';
+          select.setAttribute('aria-label','Browser for authorization');
+          select.style.cssText = 'width:100%;margin-bottom:16px;';
+          browsers.forEach(function(b){select.append(new Option(b.label,b.id));});
+          var actions = document.createElement('div');
+          actions.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;';
+          var cancel = document.createElement('button');
+          var open = document.createElement('button');
+          cancel.textContent = 'Cancel'; open.textContent = 'Continue';
+          cancel.style.cssText = 'padding:8px 12px;border:1px solid #666;border-radius:8px;';
+          open.style.cssText = 'padding:8px 12px;background:#3578e5;color:white;border-radius:8px;';
+          var choice = null;
+          cancel.onclick = function(){dialog.close();};
+          open.onclick = function(){choice=select.value;dialog.close();};
+          dialog.addEventListener('close',function(){dialog.remove();resolve(choice);},{once:true});
+          actions.append(cancel,open); dialog.append(heading,help,select,actions);
+          document.body.append(dialog); dialog.showModal(); select.focus();
+        });
+      }
       async function handleMcpSettingsAction(action) {
         if (mcpBusy) return;
         if (!window.aetherBridge?.isNative) { showHudToast('MCP requires the desktop app.'); return; }
@@ -3964,11 +3996,29 @@
             var clientId = document.getElementById('cfgMcpClientId')?.value.trim();
             var scope = document.getElementById('cfgMcpScope')?.value.trim() || '';
             if (!window.confirm('Authorize this trusted MCP resource using the specified issuer?\n'+endpoint+'\n'+issuer)) return;
+            var browser = await chooseMcpOAuthBrowser();
+            if (!browser) return;
             mcpAuthorization = null;
             render('Checking authorization metadata...');
             var flow = await window.aetherBridge.beginMcpOAuth(endpoint,issuer,clientId,scope);
             mcpAuthorization = {id:flow.id,url:flow.authorizationUrl,endpoint:endpoint};
-            render('Copy the authorization URL, open it in your regular browser, and approve only the intended access. Then select Finish authorization.\n\n'+flow.authorizationUrl+'\n\nLoopback redirect: '+flow.redirectUri);
+            render('Opening your chosen browser. Complete sign-in and approve access. If it does not open, use Open sign-in browser or Copy authorization URL.');
+            await window.aetherBridge.openMcpOAuthBrowser(flow.id,browser);
+            render('Waiting for browser sign-in and consent (up to 10 minutes). Browsphere will receive the callback automatically; no Finish button is needed.');
+            await window.aetherBridge.finishMcpOAuth(flow.id);
+            mcpAuthorization = null;
+            render('Authorization saved securely. Select Discover tools, select the search tool, then Approve selected tool for Lucia.');
+
+          } else if (action === 'mcp-oauth-open') {
+            if (!mcpAuthorization || mcpAuthorization.endpoint !== endpoint) throw new Error('Start authorization for this endpoint first.');
+            var browser = await chooseMcpOAuthBrowser();
+            if (!browser) return;
+            await window.aetherBridge.openMcpOAuthBrowser(mcpAuthorization.id,browser);
+            var pendingId = mcpAuthorization.id;
+            render('Waiting for browser sign-in and consent. Browsphere will receive the callback automatically.');
+            await window.aetherBridge.finishMcpOAuth(pendingId);
+            mcpAuthorization = null;
+            render('Authorization saved securely. Select Discover tools, then approve the search tool for Lucia.');
           } else if (action === 'mcp-oauth-copy') {
             if (!mcpAuthorization) throw new Error('Start authorization first.');
             await navigator.clipboard.writeText(mcpAuthorization.url);

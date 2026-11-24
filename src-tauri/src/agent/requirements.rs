@@ -93,6 +93,9 @@ impl Ledger{
             }
         }
     }
+    pub fn current_target_scope(&self,url:&str)->bool{
+        self.target_scope.as_ref().is_some_and(|scope|web(scope).is_some()&&web(scope)==web(url))
+    }
     pub fn ready(&self)->bool{!self.supported||self.requirements.iter().all(|r|r.state!=State::Missing)}
     pub fn missing(&self)->Vec<&'static str>{self.requirements.iter().filter(|r|r.state==State::Missing).map(|r|r.kind).collect()}
     pub fn hint(&self)->String{

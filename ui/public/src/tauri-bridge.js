@@ -252,6 +252,8 @@
     connectMcp: (url) => invoke('mcp_connect', {url}),
     beginMcpOAuth: (resource,issuer,clientId,scope) => invoke('mcp_oauth_begin', {resource,issuer,clientId,scope}),
     finishMcpOAuth: (id) => invoke('mcp_oauth_finish', {id}),
+    listMcpOAuthBrowsers: () => invoke('mcp_oauth_browsers'),
+    openMcpOAuthBrowser: (id,browser) => invoke('mcp_oauth_open_browser', {id,browser}),
     forgetMcpOAuth: (resource) => invoke('mcp_oauth_forget', {resource}),
     setMcpProviderKey: (resource,key) => invoke('mcp_provider_key', {resource,key}),
     disconnectMcp: (id) => invoke('mcp_disconnect', {id}),

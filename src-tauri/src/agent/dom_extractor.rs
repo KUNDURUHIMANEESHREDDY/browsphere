@@ -77,6 +77,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   const MAX_NODES = {max_nodes};
   const MAX_TEXT = {max_text_chars};
   const POINT_PROBE = null;
+  const FOCUS_TERMS = [];
 
   const SENSITIVE_RE = /(password|passwd|passcode|otp|one[-_]?time|cvv|cvc|card[-_]?num|cc[-_]|ssn|secret|api[-_]?key|token)/i;
   const INTERACTIVE_TAGS = new Set(["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "SUMMARY", "OPTION", "DIALOG"]);
@@ -681,7 +682,35 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     }}
     return null;
   }})();
-  const visibleText = (activeDialog ? ["Active dialog: " + (activeDialog.innerText || "")] : [product?.context, productHeading, prose, contentText, bodyText])
+  // A read-only reference task can request exact lexical anchors. Read
+  // rendered prose only, not hidden markup, inputs, or model-generated text.
+  // Preserve literal sentences and place them before long navigation text.
+  const focused = (()=>{{
+    if(activeDialog||!FOCUS_TERMS.length)return "";
+    const root=isVisible(primaryTextRoot)?primaryTextRoot:document.body;
+    if(!root)return "";
+    const found=[];
+    for(const term of FOCUS_TERMS.slice(0,2)){{
+      const matching=[];
+      for(const el of Array.from(root.querySelectorAll('p,dd,li,blockquote')).slice(0,2500)){{
+        if(!isVisible(el)||el.closest('nav,aside,header,footer,form,[hidden],[inert],[aria-hidden="true"],[role="navigation"],[role="dialog"],[contenteditable]')||el.querySelector('p,dd,li,blockquote'))continue;
+        const text=(el.innerText||"").replace(/\s+/g," ").trim();
+        if(text.length>12000||!text.toLowerCase().includes(term))continue;
+        for(const sentence of text.match(/[^.!?]+[.!?]?/g)||[]){{
+          const value=sentence.trim(),lower=value.toLowerCase();
+          if(value.length<30||value.length>240||!lower.includes(term)||matching.includes(value))continue;
+          const tail=lower.slice(lower.indexOf(term)+term.length);
+          const direct=/^\s*(?:simply\s+|typically\s+|normally\s+)?(?:avoids?|skips?|updates?|performs?|inserts?|returns?|prevents?|causes?|means|does not|ignores?|allows?)\b/.test(tail);
+          matching.push(value);
+          if(direct){{found.push(value);break;}}
+        }}
+        if(matching.length>=10||found.length&&found[found.length-1].toLowerCase().includes(term))break;
+      }}
+      for(const value of matching.slice(0,4))if(!found.includes(value))found.push(value);
+    }}
+    return found.join(" ");
+  }})();
+  const visibleText = (activeDialog ? ["Active dialog: " + (activeDialog.innerText || "")] : [product?.context, productHeading, focused, prose, contentText, bodyText])
     .filter(Boolean).join(" ")
     .replace(/\s+/g, " ")
     .trim()
@@ -782,4 +811,15 @@ pub async fn request_point_snapshot(app:&tauri::AppHandle,label:&str,point:super
     let value=crate::agent::native_eval::eval_json(app,label,script,1800).await.ok()?;
     let result:Hit=serde_json::from_value(value).ok()?;
     Some((result.snapshot,result.hit_id?))
+}
+
+
+/// Goal-scoped native evidence capture. Terms originate from the user's
+/// compiled read-only contrast, not from an untrusted model or web page.
+pub async fn request_reference_snapshot(app:&tauri::AppHandle,label:&str,terms:&[String])->Option<DomSnapshot>{
+    if terms.is_empty()||terms.len()>2||terms.iter().any(|s|s.is_empty()||s.chars().count()>60||!s.chars().all(|c|c.is_alphanumeric()||matches!(c,' '|'-'|'_'))){return None;}
+    let payload=serde_json::to_string(terms).ok()?;
+    let script=build_snapshot_script(Uuid::new_v4(),120,24000).replace("const FOCUS_TERMS = [];",&format!("const FOCUS_TERMS = {payload};"));
+    let value=crate::agent::native_eval::eval_json(app,label,script,2500).await.ok()?;
+    serde_json::from_value(value).ok()
 }

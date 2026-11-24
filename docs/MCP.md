@@ -11,7 +11,7 @@ The manual connector supports the registered-public-client OAuth flow described 
 
 ## Registered-client OAuth (HTTPS)
 
-Use a trusted resource with RFC 9728 protected-resource metadata and an issuer with RFC 8414 authorization-server metadata, S256 PKCE, and a registered public native client that accepts ephemeral loopback redirects. Enter the resource URL, exact issuer URL, client ID and least-privilege scope. Start authorization, copy the reviewed URL into your regular browser, and authorize there. Finish authorization in Browsphere, then discover tools. The loopback callback expires after 180 seconds. OAuth access tokens are bound to the exact resource URL and saved in Windows Credential Manager; no refresh token is retained. Reauthorize on expiry. Forget authorization deletes local credentials but does not revoke the provider grant.
+Use a trusted resource with RFC 9728 protected-resource metadata and an issuer with RFC 8414 authorization-server metadata, S256 PKCE, and a registered public native client that accepts ephemeral loopback redirects. Enter the resource URL, exact issuer URL, client ID and least-privilege scope. Start authorization, copy the reviewed URL into your regular browser, and authorize there. Finish authorization in Browsphere, then discover tools. The loopback callback expires after 10 minutes. OAuth access tokens are bound to the exact resource URL and saved in Windows Credential Manager; no refresh token is retained. Reauthorize on expiry. Forget authorization deletes local credentials but does not revoke the provider grant.
 
 This is a deliberately restricted subset: no dynamic client registration, automatic WWW-Authenticate challenge discovery, cross-origin authorization endpoints, refresh-token handling, or silent account login. The protected resource URL must exactly match the configured endpoint. Models never receive authorization URLs, callback codes or tokens. Remote service sign-in must be performed by the user.
 
@@ -27,3 +27,13 @@ Optional API keys are saved separately in Windows Credential Manager and sent
 only to the exact provider endpoint when no saved OAuth token exists.
 OAuth refresh and provider-side revocation are not automatic; reauthorize when
 expired. Brave requires its own API key and configured MCP server.
+
+On Windows the sign-in buttons now show a browser chooser before registration,
+with the system default and detected Edge, Chrome, Firefox, or Brave. The
+native launch command accepts only the pending authorization ID and an
+allowlisted browser, not a caller-provided URL. Copy URL remains a fallback.
+
+The browser launch now immediately starts accepting the OAuth callback. No
+manual Finish click is needed after a successful external browser launch.
+The listener expires after ten minutes and reports an explicit denial or
+token exchange/storage failure without exposing tokens or callback contents.
