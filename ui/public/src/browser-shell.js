@@ -4622,6 +4622,7 @@
                 '<span class="main-chat-stage-status">' + esc(labels[stage.status] || stage.status) + '</span></div>';
             }).join('') + '</div>' +
             (task.workflowGraph ? '<div class="main-chat-agent-plan" aria-label="Adaptive workflow dependencies"><strong>Workflow graph</strong>' +
+              (task.runId && task.workflowGraph.checkpointSaved ? '<div class="main-chat-stage-name"><small>'+ (task.workflowGraph.checkpointResumable ? 'Read-only recovery available ? ' : 'State saved ? ') +'Checkpoint ID: '+esc(task.runId)+'</small></div>' : '') +
               task.workflowGraph.nodes.map(function(node) {
                 return '<div class="main-chat-agent-stage" data-state="' + esc(node.state) + '">' +
                   '<span class="main-chat-stage-index">' + (node.id+1) + '</span>' +

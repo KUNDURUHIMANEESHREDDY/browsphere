@@ -26,3 +26,5 @@ pub mod adaptive_graph;
 pub mod objective_gate;
 pub mod skills;
 pub mod browser_skills;
+pub mod checkpoint;
+pub mod research;
