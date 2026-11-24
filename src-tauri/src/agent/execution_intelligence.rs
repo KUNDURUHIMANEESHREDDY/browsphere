@@ -47,15 +47,37 @@ impl WorldModel{
     }
     pub fn status(&self)->serde_json::Value{serde_json::json!({"observations":self.observations,"distinctRecentPages":self.recent.len()+usize::from(self.current.is_some()),"controls":self.current.as_ref().map_or(0,|s|s.controls),"readable":self.current.as_ref().is_some_and(|s|s.readable),"failedStrategies":self.failed.len(),"completedObjectives":self.completed.len(),"observedSources":self.source_count})}
 }
+// An explicit single-link request is distinct from a named-link title task.
+pub fn single_link_title(goal:&str)->bool{
+    let g=goal.to_ascii_lowercase();
+    super::deliberation::read_only(goal)&&g.contains("using the link on this page")&&
+        g.trim().trim_end_matches(['.','!','?']).ends_with("report the title of the page you reach")&&
+        !["compare","summarize","extract","download","submit","login","sign in","account","purchase","buy ","book "].iter().any(|w|g.contains(w))
+}
+fn single_link_candidate(p:&DomSnapshot)->Option<(BrowserAction,String)>{
+    let source=browser_skills::public_url(&p.origin)?;
+    let mut links=p.interactive_nodes.iter().filter(|n|(n.tag=="a"||n.role=="link")&&!n.is_sensitive&&!n.is_submit&&
+        !n.label.trim().is_empty()&&n.bbox.as_ref().is_some_and(|b|b.in_viewport));
+    let n=links.next()?;
+    if links.next().is_some(){return None;}
+    let target=browser_skills::public_url(n.href.as_deref()?)?;
+    if target==source||target.fragment().is_some()||target.scheme()!="https"{return None;}
+    Some((BrowserAction::Click{node_id:n.node_id.clone(),element_label:n.label.clone(),is_submit:false},target.to_string()))
+}
 /// A native receipt proves exact observed link target and title, not a
 /// guessed relation between a human label and a URL slug (e.g. /guide).
 fn verify_link(goal:&str,source:&str,target:&str,p:&DomSnapshot,evidence:&[SourceEvidence])->Result<VerificationReport,String>{
-    let label=evidence_verifier::requested_named_link_title(goal).ok_or("Not a named link title objective")?;
+    let single=single_link_title(goal);
     let origin=browser_skills::public_url(source).ok_or("Missing starting public origin")?;
     let actual=browser_skills::public_url(&p.origin).ok_or("Missing observed destination")?;
-    if origin.origin()!=actual.origin()||source==p.origin||
+    browser_skills::public_url(target).ok_or("Missing dispatched public link")?;
+    let title_matches=if single{!p.title.trim().is_empty()}else{
+        let label=evidence_verifier::requested_named_link_title(goal).ok_or("Not a named link title objective")?;
+        origin.origin()==actual.origin()&&browser_skills::phrase(&p.title,&label)
+    };
+    if source==p.origin||
         browser_skills::navigation::receipt(target,p)!=browser_skills::Outcome::Confirmed||
-        !browser_skills::phrase(&p.title,&label){return Err("Observed destination or title does not match the dispatched link".into());}
+        !title_matches||!browser_skills::readable(p){return Err("Observed destination or title does not match the dispatched link".into());}
     if !evidence.iter().any(|e|e.url==p.origin&&e.title==p.title&&e.excerpt.trim().chars().count()>=40){
         return Err("Missing recorded readable destination evidence".into());
     }
@@ -86,7 +108,7 @@ pub struct ExecutionIntelligence{
 }
 impl ExecutionIntelligence{
     pub fn compile(goal:&str,initial:&str)->Self{
-        let managed=evidence_verifier::requested_named_link_title(goal).is_some()&&super::deliberation::read_only(goal)&&browser_skills::public_url(initial).is_some();
+        let managed=(evidence_verifier::requested_named_link_title(goal).is_some()||single_link_title(goal))&&super::deliberation::read_only(goal)&&browser_skills::public_url(initial).is_some();
         Self{world:WorldModel::default(),phase:Phase::AcquireControl,strategy:Strategy::Observe,managed,initial:initial.into(),receipt:None,pending:None,waiting:0,attempts:0}
     }
     pub fn managed(&self)->bool{self.managed}
@@ -99,7 +121,7 @@ impl ExecutionIntelligence{
     /// label or URL is never accepted without this fresh DOM correspondence.
     fn candidate(&self,goal:&str,p:&DomSnapshot)->Option<(BrowserAction,String)>{
         if !self.managed||p.origin!=self.initial||!browser_skills::readable(p){return None;}
-        super::prerequisites::named_link(goal,p)
+        if single_link_title(goal){single_link_candidate(p)}else{super::prerequisites::named_link(goal,p)}
     }
     pub fn dispatch_target(&self,goal:&str,p:&DomSnapshot,a:&BrowserAction)->Option<String>{
         let (expected,target)=self.candidate(goal,p)?;
@@ -239,6 +261,36 @@ mod tests{
   let wrong=page("https://example.org/array/map","Array.map() - Reference",false);
   assert!(!current_reference_observed(goal,&wrong,&evidence(&wrong)));
   assert!(current_reference_subject("Read the current Array.isArray documentation and buy a subscription. Report results and cite evidence.").is_none());
+ }
+ #[test]fn explicit_single_link_requires_unique_visible_target_and_exact_receipt(){
+  let goal="Find more information about public domains using the link on this page. Report the title of the page you reach.";
+  let mut start=page("https://example.org/start","Library",true);
+  start.interactive_nodes[0].href=Some("https://docs.example.net/reference".into());
+  start.interactive_nodes[0].bbox=Some(super::super::dom_extractor::BoundingBox{x:10.,y:10.,width:100.,height:30.,in_viewport:true});
+  let mut r=ExecutionIntelligence::compile(goal,&start.origin);assert!(r.managed());
+  let target=page("https://www.docs.example.net/reference","Reference information",false);
+  let Next::Action(a,_)=r.next(goal,&start,&[])else{panic!("expected unique visible link")};
+  let url=r.dispatch_target(goal,&start,&a).unwrap();
+  r.dispatched(&start.origin,Some(url),&a,true);
+  let wrong=page("https://docs.example.net/other","Other information",false);
+  assert!(r.observe(goal,&wrong,&evidence(&wrong)).is_none());
+  assert!(r.observe(goal,&target,&evidence(&target)).is_some());
+  assert!(r.report(goal,&target,&evidence(&target)).is_ok());
+  let mut other=start.interactive_nodes[0].clone();other.node_id="other".into();
+  start.interactive_nodes.push(other);
+  assert!(single_link_candidate(&start).is_none());
+  assert!(!ExecutionIntelligence::compile("Buy a subscription using the link on this page. Report the title of the page you reach.",&start.origin).managed());
+ }
+ #[test]fn named_link_on_multi_link_page_rejects_ambiguous_destinations(){
+  let mut p=page("https://example.org/start","Library",true);
+  let mut other=p.interactive_nodes[0].clone();
+  other.node_id="other".into();other.label="Other reference".into();other.href=Some("https://example.org/other".into());
+  p.interactive_nodes.push(other.clone());
+  let mut r=ExecutionIntelligence::compile(GOAL,&p.origin);
+  assert!(matches!(r.next(GOAL,&p,&[]),Next::Action(BrowserAction::Click{node_id,..},_) if node_id=="live"));
+  other.label="Field Guide".into();p.interactive_nodes.push(other);
+  let mut r=ExecutionIntelligence::compile(GOAL,&p.origin);
+  assert!(matches!(r.next(GOAL,&p,&[]),Next::Wait));
  }
  #[test]fn policy_restriction_never_selects_an_alternate_action(){
   let p=page("https://example.org/start","Library",true);let mut r=ExecutionIntelligence::compile(GOAL,&p.origin);

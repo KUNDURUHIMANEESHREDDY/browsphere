@@ -1190,7 +1190,8 @@ pub async fn run_react_loop(
     {
         plan_task(&goal)
     } else {
-        let selected_model = router.lock().await.clone();
+        let selected_model = {router.lock().await.clone()};
+        let selected_model = selected_model.adaptive_reasoning_profile(&goal,&snapshot.origin,false).await;
         let _=app.emit("agent:model_role",serde_json::json!({"run_id":run_id,"role":"planner","model":selected_model.role_model("planner",&snapshot.origin),"status":"selected"}));
         let result=tokio::select!{
             _=cancel.cancelled()=>return Ok("cancelled".into()),
@@ -1372,8 +1373,10 @@ pub async fn run_react_loop(
         }));
 
         // Never spend another cloud call on stale or unavailable page data.
-        let Some(live) =
-            request_live_dom_snapshot(&app, &webview_label, &pending_snapshots, 1800).await
+        let explicit_link_scope=crate::agent::execution_intelligence::single_link_title(&goal)&&!private_mode;
+        let Some(live) = (if explicit_link_scope{
+            crate::agent::dom_extractor::request_explicit_link_snapshot(&app,&webview_label,&initial_origin,1800).await
+        }else{request_live_dom_snapshot(&app, &webview_label, &pending_snapshots, 1800).await})
         else {
             observation_failures = observation_failures.saturating_add(1);
             let _ = app.emit("agent:observation", serde_json::json!({
@@ -1729,7 +1732,7 @@ pub async fn run_react_loop(
             };
             // The screenshot and inference take time. Never use a stale
             // label or node ID if the active observation changed meanwhile.
-            let current=request_live_dom_snapshot(&app,&webview_label,&pending_snapshots,1800).await;
+            let current=if explicit_link_scope{crate::agent::dom_extractor::request_explicit_link_snapshot(&app,&webview_label,&initial_origin,1800).await}else{request_live_dom_snapshot(&app,&webview_label,&pending_snapshots,1800).await};
             let whole_page_fresh=current.as_ref().is_some_and(|p|crate::agent::multimodal_perception::same_observation(&snapshot,p));
             if current.is_none(){
                 let _=app.emit("agent:vision",serde_json::json!({"run_id":run_id,"step_index":step,"status":"stale","reason":reason}));
@@ -2646,7 +2649,8 @@ pub async fn run_react_loop(
                             &orchestrator.evidence,
                         ).map_err(anyhow::Error::msg)
                     } else {
-                        let selected = router.lock().await.clone().structured_route_for_origin(&snapshot.origin);
+                        let selected = {router.lock().await.clone()};
+                        let selected = selected.adaptive_reasoning_profile(&goal,&snapshot.origin,is_comparison||orchestrator.evidence.len()>1).await;
                         let research_lookup=crate::agent::deliberation::lookup_subject(&goal).is_some();
                         let router=if !selected.get_config().planner_model.trim().is_empty()||research_lookup {
                             selected.local_reasoner(&snapshot.origin).or_else(||selected.local_supervisor(&snapshot.origin)).unwrap_or(selected)
@@ -2749,7 +2753,8 @@ pub async fn run_react_loop(
         }else if let Some((id,point))=visual_target {
             let current=if independent_visual_ids.contains(id){
                 crate::agent::dom_extractor::request_point_snapshot(&app,&webview_label,point.point,&point.viewport).await.and_then(|(p,hit)|(hit==*id).then_some(p))
-            }else{request_live_dom_snapshot(&app,&webview_label,&pending_snapshots,1800).await};
+            }else if explicit_link_scope{crate::agent::dom_extractor::request_explicit_link_snapshot(&app,&webview_label,&initial_origin,1800).await}
+            else{request_live_dom_snapshot(&app,&webview_label,&pending_snapshots,1800).await};
             if cancel.is_cancelled() || !current.as_ref().zip(visual_snapshot.as_ref()).is_some_and(|(now,before)|crate::agent::multimodal_perception::target_still_current(before,now,id)){
                 (false,"FAILED: visual target stale or cancelled".into())
             }else{

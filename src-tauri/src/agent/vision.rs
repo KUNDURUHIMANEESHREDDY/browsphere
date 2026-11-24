@@ -4,16 +4,19 @@ use crate::router::model_router::RouterConfig;
 
 use super::multimodal_perception::{self as mm,Candidate,VisualObservation};
 #[derive(Debug,Default,serde::Serialize)]
-pub struct InferenceTrace{pub attempts:u8,pub first_failure:Option<&'static str>,pub recovery:bool}
+pub struct InferenceTrace{pub attempts:u8,pub first_failure:Option<&'static str>,pub recovery:bool,pub capture_ms:u64,pub inference_ms:u64,pub provider_load_ms:u64,pub provider_prompt_ms:u64,pub provider_decode_ms:u64}
 
 /// Read only one screenshot from the dedicated tab. The caller must
 /// independently re-observe and validate the page before consuming output.
 pub async fn observe(config:&RouterConfig,app:&tauri::AppHandle,label:&str,goal:&str,candidates:&[Candidate])->Result<(VisualObservation,mm::Viewport,InferenceTrace),String>{
+    let started=tokio::time::Instant::now();
     let before=viewport(app,label).await?;
     let image=capture(app,label).await?;
     let after=viewport(app,label).await?;
     if before!=after{return Err("Viewport changed during capture".into());}
-    let (observation,trace)=infer(config,&image,goal,candidates).await?;
+    let capture_ms=started.elapsed().as_millis() as u64;
+    let (observation,mut trace)=infer(config,&image,goal,candidates).await?;
+    trace.capture_ms=capture_ms;
     Ok((observation,before,trace))
 }
 async fn viewport(app:&tauri::AppHandle,label:&str)->Result<mm::Viewport,String>{
@@ -33,9 +36,11 @@ pub async fn infer(config:&RouterConfig,image:&str,goal:&str,candidates:&[Candid
         return Err("Local vision disabled".into());
     }
     if image.is_empty()||image.len()>12_000_000{return Err("Screenshot outside size limit".into());}
+    let lease=crate::router::inference_scheduler::acquire().await.map_err(|_|"Local inference resource queue unavailable")?;
     let client=reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(35)).build().map_err(|_|"Visual inference client unavailable")?;
-    let deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(35);
+    let started=tokio::time::Instant::now();
+    let deadline=started+std::time::Duration::from_secs(35);
     let prompt=mm::prompt(goal,candidates);
     let mut trace=InferenceTrace::default();
     for attempt in 0..2{
@@ -47,18 +52,21 @@ pub async fn infer(config:&RouterConfig,image:&str,goal:&str,candidates:&[Candid
         let response:serde_json::Value=client.post(format!("{}/api/chat",config.ollama_url.trim_end_matches('/')))
             .timeout(remaining)
             .json(&serde_json::json!({
-                "model":config.vision_model,"stream":false,"think":false,"keep_alive":"90s",
+                "model":config.vision_model,"stream":false,"think":false,"keep_alive":lease.keep_alive(),
                 "format":schema,
                 "messages":[{"role":"user","content":content,"images":[image]}],
                 "options":{"num_ctx":4096,"num_predict":512,"temperature":0}
             })).send().await.map_err(|e|if e.is_timeout(){"Local visual inference timed out"}else if e.is_connect(){"Local vision runtime unreachable"}else{"Local visual inference request failed"})?
             .error_for_status().map_err(|_|"Local visual inference rejected")?.json().await.map_err(|_|"Invalid visual provider response")?;
+        trace.provider_load_ms=trace.provider_load_ms.saturating_add(response["load_duration"].as_u64().unwrap_or(0)/1_000_000);
+        trace.provider_prompt_ms=trace.provider_prompt_ms.saturating_add(response["prompt_eval_duration"].as_u64().unwrap_or(0)/1_000_000);
+        trace.provider_decode_ms=trace.provider_decode_ms.saturating_add(response["eval_duration"].as_u64().unwrap_or(0)/1_000_000);
         let parsed=provider_observation(&response,candidates.len()).and_then(|value|{
             if attempt>0&&(value.controls.len()>1||!value.visible_text.is_empty()||value.controls.iter().any(|c|c.point.is_none())){return Err("Recovery observation violates compact schema".into());}
             Ok(value)
         });
         match parsed{
-            Ok(value)=>{trace.recovery=attempt>0;return Ok((value,trace));},
+            Ok(value)=>{trace.recovery=attempt>0;trace.inference_ms=started.elapsed().as_millis() as u64;return Ok((value,trace));},
             Err(error) if attempt==0&&retryable_observation(&error)&&deadline.saturating_duration_since(tokio::time::Instant::now())>=std::time::Duration::from_secs(3)=>{
                 trace.first_failure=Some(failure_detail(&error));continue;
             },

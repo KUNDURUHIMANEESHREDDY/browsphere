@@ -79,6 +79,18 @@ pub struct RouterConfig {
     pub cloud_model_catalogs: HashMap<String, Vec<String>>,
 }
 
+/// Deliberately bounded policy: a complex multi-source task retains its
+/// configured stronger planner unless memory is constrained; unknown memory
+/// keeps the configured route. Never change the action/vision/writer models.
+fn adaptive_reasoning_candidate(config:&RouterConfig,goal:&str,multi_source:bool,free:Option<u64>)->Option<&'static str>{
+    if config.ollama_model!="qwen3.5:0.8b" || config.planner_model!="qwen2.5:3b-instruct" ||
+        config.supervisor_model!="lfm3:1.7b"{return None;}
+    let free=free?;
+    let lower=goal.to_ascii_lowercase();
+    let complex=multi_source||goal.len()>280||["compare ","multiple ","across ","then "," and ","verify ","evaluate ","research "].iter().any(|w|lower.contains(w));
+    if free>=2048 && (!complex||free<3072){Some("lfm3:1.7b")}else{None}
+}
+
 fn default_supervisor_model() -> String { "lfm3:1.7b".into() }
 
 fn default_writer_model() -> String { "qwen2.5:3b-instruct".into() }
@@ -405,6 +417,28 @@ impl ModelRouter {
         cfg
     }
 
+    /// Adaptive routing only within the known, explicitly configured local
+    /// profiles. Unknown/custom models and cloud preferences are untouched.
+    /// Installed tags are checked before selecting an alternative.
+    pub async fn adaptive_reasoning_profile(&self,goal:&str,origin:&str,multi_source:bool)->Self{
+        let mut route=self.structured_route_for_origin(origin);
+        if route.select_backend(origin)!="ollama" || !route.lucia_uses_local() ||
+            !crate::agent::deliberation::read_only(goal){return route;}
+        let Ok(endpoint)=Url::parse(&route.config.ollama_url)else{return route;};
+        if endpoint.scheme()!="http"||!matches!(endpoint.host_str(),Some("localhost"|"127.0.0.1"|"[::1]"))||
+            !endpoint.username().is_empty()||endpoint.password().is_some()||endpoint.query().is_some()||endpoint.fragment().is_some(){return route;}
+        let Some(candidate)=adaptive_reasoning_candidate(&route.config,goal,multi_source,super::inference_scheduler::available_mib())else{return route;};
+        let client=match reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(3)).build(){Ok(c)=>c,Err(_)=>return route};
+        let response=match client.get(format!("{}/api/tags",route.config.ollama_url.trim_end_matches('/'))).send().await.and_then(|r|r.error_for_status()){Ok(r)=>r,Err(_)=>return route};
+        let Ok(tags)=response.json::<serde_json::Value>().await else{return route;};
+        if tags["models"].as_array().is_some_and(|a|a.iter().any(|m|m["name"].as_str()==Some(candidate))){
+            // Runtime-only copy; never modify stored role preferences.
+            route.config.planner_model=candidate.into();
+            tracing::info!(model=candidate,"Lucia selected compact configured reasoning profile");
+        }
+        route
+    }
+
     /// Use a second local model without modifying the selected primary route.
     /// A supervisor only proposes actions; the native binder and policy still execute them.
     pub fn local_supervisor(&self, origin: &str) -> Option<Self> {
@@ -436,6 +470,40 @@ impl ModelRouter {
         let id=self.config.writer_model.trim();
         if id==self.config.supervisor_model.trim(){return None}
         self.local_secondary(origin,id)
+    }
+    /// Escalation is opt-in through an existing configured local role and
+    /// requires a larger memory margin than ordinary compact inference.
+    fn reference_escalation_route(&self,origin:&str,free:Option<u64>)->Option<Self>{
+        const MODEL:&str="qwen2.5:3b-instruct";
+        if self.structured_local_model()!="lfm3:1.7b" || !self.lucia_uses_local()
+            || !free.is_some_and(|m|m>=3072)
+            || !(self.config.writer_model==MODEL||self.config.planner_model==MODEL){return None;}
+        let endpoint=Url::parse(&self.config.ollama_url).ok()?;
+        if endpoint.query().is_some()||endpoint.fragment().is_some(){return None;}
+        self.local_secondary(origin,MODEL)
+    }
+    async fn installed_reference_escalation(&self,origin:&str)->anyhow::Result<Self>{
+        // Check configuration separately, then allow bounded reclamation
+        // following a completed compact inference. Never lower the RAM floor.
+        let route=self.reference_escalation_route(origin,Some(3072))
+            .ok_or_else(||anyhow::anyhow!("Qwen escalation is not configured for this local route"))?;
+        let deadline=tokio::time::Instant::now()+Duration::from_secs(6);
+        loop{
+            let free=super::inference_scheduler::available_mib();
+            if free.is_some_and(|m|m>=3072){break;}
+            if tokio::time::Instant::now()>=deadline{
+                anyhow::bail!("Qwen escalation requires 3072 MiB available RAM; measured {}",
+                    free.map(|m|format!("{m} MiB")).unwrap_or_else(||"unknown".into()));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let client=reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(3)).build()?;
+        let tags=client.get(format!("{}/api/tags",route.config.ollama_url.trim_end_matches('/')))
+            .send().await?.error_for_status()?.json::<serde_json::Value>().await?;
+        anyhow::ensure!(tags["models"].as_array().is_some_and(|a|a.iter().any(|m|m["name"].as_str()==Some("qwen2.5:3b-instruct"))),"Qwen escalation model is not installed");
+        anyhow::ensure!(super::inference_scheduler::available_mib().is_some_and(|m|m>=3072),"Available memory fell below the Qwen escalation threshold during discovery");
+        Ok(route)
     }
     fn local_secondary(&self,origin:&str,model:&str)->Option<Self>{
         let id = model.trim();
@@ -522,10 +590,12 @@ impl ModelRouter {
                     self.config.ollama_model, installed.join(", ")
                 );
             }
+            let lease=super::inference_scheduler::acquire().await?;
             let endpoint = format!("{}/api/generate", self.config.ollama_url.trim_end_matches('/'));
             let response = client.post(&endpoint).json(&json!({
                 "model": self.config.ollama_model,
                 "prompt": "Respond with the word ready.",
+                "keep_alive": lease.keep_alive(),
                 "stream": false
             })).send().await?.error_for_status()?;
             let body: serde_json::Value = response.json().await?;
@@ -578,10 +648,12 @@ impl ModelRouter {
 User text: <text>{}</text>"#,
             goal
         );
+        let lease=super::inference_scheduler::acquire().await.ok()?;
         let response = client.post(&endpoint).json(&json!({
             "model": self.config.ollama_model,
             "prompt": prompt,
             "stream": false,
+            "keep_alive": lease.keep_alive(),
             "format": "json",
             "options": { "temperature": 0, "num_predict": 48 }
         })).send().await.ok()?.error_for_status().ok()?;
@@ -654,18 +726,20 @@ User text: <text>{}</text>"#,
         // CPU-only local models can take longer to read structured evidence.
         // Keep cloud requests bounded separately from on-device inference.
         let timeout_secs = if self.config.prefer_local_for_simple { 120 } else { 60 };
-        let client = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+            .redirect(reqwest::redirect::Policy::none());
+        let client = if self.lucia_uses_local(){builder.no_proxy().build()?}else{builder.build()?};
         let messages = json!([
             {"role":"system","content":system_prompt},
             {"role":"user","content":user_text}
         ]);
         if self.lucia_uses_local() {
+            let lease=super::inference_scheduler::acquire().await?;
             let endpoint = format!("{}/api/chat", self.config.ollama_url.trim_end_matches('/'));
             let response = client.post(endpoint).json(&json!({
                 "model": self.structured_local_model(),
+                "keep_alive": lease.keep_alive(),
                 "messages": messages,
                 "stream": false,
                 "think": false,
@@ -872,6 +946,42 @@ User text: <text>{}</text>"#,
             return ev::assemble_extractive_comparison(goal,sources,findings).map_err(anyhow::Error::msg);
         }
         let focused=ev::focus_sources(goal,sources,comparison);
+        // Compact-model extractive review of an explicitly requested current
+        // reference. Other verifier contracts remain unchanged.
+        if !comparison && self.lucia_uses_local() && self.structured_local_model()=="lfm3:1.7b" {
+            if let Some(subject)=crate::agent::execution_intelligence::current_reference_subject(goal){
+                let original=sources.iter().filter(|s|crate::agent::browser_skills::phrase(&s.title,&subject))
+                    .max_by_key(|s|s.excerpt.chars().count()).cloned()
+                    .ok_or_else(||anyhow::anyhow!("Requested reference source not observed"))?;
+                let originals=vec![original];
+                let candidates=ev::bound_passages(goal,&originals);
+                anyhow::ensure!(!candidates.is_empty(),"No observed reference passage candidates");
+                let payload=ev::bound_passage_payload(goal,&originals,&candidates).to_string();
+                tracing::info!(candidate_count=candidates.len(),model="lfm3:1.7b","Selecting native evidence IDs");
+                let prompt=crate::lucia_prompts::PASSAGE_SELECTOR_SYSTEM;
+                let first=tokio::time::timeout(Duration::from_secs(40),
+                    self.model_structured_response(prompt,&payload,creds)).await;
+                let first=match first{
+                    Ok(Ok(raw))=>ev::bound_selection_report(goal,&originals,&candidates,&raw),
+                    // An abandoned or failed transport does not prove the local
+                    // server has stopped. Do not start another model in that case.
+                    _=>return Err(anyhow::anyhow!("Compact passage review did not complete; evidence remains unverified")),
+                };
+                let rejection=match first{Ok(report)=>return Ok(report),Err(reason)=>reason};
+                tracing::warn!(reason=%rejection,"Compact passage selection rejected");
+                let alternate=self.installed_reference_escalation(&originals[0].url).await
+                    .map_err(|err|anyhow::anyhow!("Native passage selection rejected ({rejection}); escalation blocked: {err}"))?;
+                tracing::info!(model="qwen2.5:3b-instruct",candidate_count=candidates.len(),"Escalating rejected native evidence IDs once");
+                let retry=tokio::time::timeout(Duration::from_secs(40),
+                    alternate.model_structured_response(prompt,&payload,creds)).await;
+                if let Ok(Ok(raw))=retry{
+                    if let Ok(report)=ev::bound_selection_report(goal,&originals,&candidates,&raw){return Ok(report);}
+                }
+                // Stable terminal error prevents the outer quote-format retry
+                // from repeating this two-model selection cycle.
+                anyhow::bail!("Native passage selection remained unverified after one local escalation");
+            }
+        }
         let payload = json!({
             "original_goal": goal.chars().take(1800).collect::<String>(),
             "proposed_summary_untrusted": proposed_summary.chars().take(800).collect::<String>(),
@@ -916,10 +1026,12 @@ User text: <text>{}</text>"#,
             .build()?;
 
         let (response, model, backend) = if local {
+            let lease=super::inference_scheduler::acquire().await?;
             let endpoint = format!("{}/api/chat", self.config.ollama_url.trim_end_matches('/'));
             let response = client.post(endpoint).json(&json!({
                 "model": self.config.ollama_model,
                 "messages": messages,
+                "keep_alive": lease.keep_alive(),
                 "stream": false,
                 "think": false,
                 "options": { "temperature": 0.4, "num_predict": 1024 }
@@ -1016,6 +1128,7 @@ User text: <text>{}</text>"#,
         };
 
         if backend == "ollama" {
+            let lease=super::inference_scheduler::acquire().await?;
             let route_label = format!("ollama:{}", self.config.ollama_model);
             let url = format!("{}/api/generate", self.config.ollama_url.trim_end_matches('/'));
             let system_prompt = crate::voice_system_prompt::agent_system_prompt(
@@ -1044,6 +1157,7 @@ User text: <text>{}</text>"#,
                 let mut body = json!({
                     "model": self.config.ollama_model,
                     "system": system_prompt,
+                "keep_alive": lease.keep_alive(),
                     "prompt": prompt,
                     "stream": false,
                     "format": format,
@@ -1605,6 +1719,52 @@ User text: <text>{}</text>"#,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reference_escalation_is_configured_local_and_memory_bounded(){
+        let mut c=RouterConfig::default();
+        c.ollama_model="lfm3:1.7b".into();c.writer_model="qwen2.5:3b-instruct".into();
+        c.ollama_url="http://127.0.0.1:11434".into();
+        c.prefer_local_for_simple=true;c.lucia_cloud_only=false;
+        let origin="https://example.org/reference";
+        let r=ModelRouter::new(c.clone());
+        assert!(r.reference_escalation_route(origin,None).is_none());
+        assert!(r.reference_escalation_route(origin,Some(3071)).is_none());
+        let alternate=r.reference_escalation_route(origin,Some(3072)).unwrap();
+        assert_eq!(alternate.structured_local_model(),"qwen2.5:3b-instruct");
+        assert_eq!(r.structured_local_model(),"lfm3:1.7b");
+        assert!(alternate.reference_escalation_route(origin,Some(8192)).is_none());
+        c.writer_model="custom-writer".into();c.planner_model="custom-planner".into();
+        assert!(ModelRouter::new(c.clone()).reference_escalation_route(origin,Some(8192)).is_none());
+        c.writer_model="qwen2.5:3b-instruct".into();c.lucia_cloud_only=true;
+        assert!(ModelRouter::new(c.clone()).reference_escalation_route(origin,Some(8192)).is_none());
+        c.lucia_cloud_only=false;c.ollama_url="http://remote.example.org".into();
+        assert!(ModelRouter::new(c.clone()).reference_escalation_route(origin,Some(8192)).is_none());
+        c.ollama_url="http://127.0.0.1:11434?x=1".into();
+        assert!(ModelRouter::new(c).reference_escalation_route(origin,Some(8192)).is_none());
+    }
+
+    #[test]
+    fn adaptive_reasoning_is_bounded_and_keeps_explicit_custom_roles(){
+        let mut c=RouterConfig::default();c.ollama_model="qwen3.5:0.8b".into();
+        c.planner_model="qwen2.5:3b-instruct".into();c.supervisor_model="lfm3:1.7b".into();
+        assert_eq!(adaptive_reasoning_candidate(&c,"Find public documentation.",false,Some(4096)),Some("lfm3:1.7b"));
+        assert_eq!(adaptive_reasoning_candidate(&c,"Compare public documentation.",true,Some(4096)),None);
+        assert_eq!(adaptive_reasoning_candidate(&c,"Compare public documentation.",true,Some(2800)),Some("lfm3:1.7b"));
+        assert_eq!(adaptive_reasoning_candidate(&c,"Find public documentation.",false,Some(1800)),None);
+        assert_eq!(adaptive_reasoning_candidate(&c,"Find public documentation.",false,None),None);
+        c.planner_model="custom-planner".into();
+        assert_eq!(adaptive_reasoning_candidate(&c,"Find public documentation.",false,Some(2800)),None);
+    }
+    #[tokio::test]
+    async fn adaptive_profile_never_contacts_cloud_or_changes_manual_model(){
+        let mut c=RouterConfig::default();c.ollama_model="qwen3.5:0.8b".into();
+        c.planner_model="qwen2.5:3b-instruct".into();c.supervisor_model="lfm3:1.7b".into();
+        c.lucia_cloud_only=true;c.ollama_url="http://127.0.0.1:1".into();
+        let r=ModelRouter::new(c);
+        let p=r.adaptive_reasoning_profile("Find public documentation.","https://example.org/",false).await;
+        assert!(!p.lucia_uses_local());assert_eq!(p.config.planner_model,"qwen2.5:3b-instruct");
+    }
 
     #[tokio::test]
     async fn explicit_role_profile_keeps_primary_and_cloud_boundaries(){

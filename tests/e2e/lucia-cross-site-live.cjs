@@ -56,7 +56,11 @@ async function main(){
     const revision=await evalJs("window.__TAURI__.core.invoke('lucia_runtime_revision')");
     console.log('LUCIA_RUNTIME_REVISION',revision);
     if(revision!=='lucia-approved-mcp-discovery-v13.11')throw Error('Native runtime is not the expected objective-gate build');
-    const modelStatus=await fetch('http://127.0.0.1:11434/api/tags',{signal:AbortSignal.timeout(3000)})
+    // An isolated test gateway may inject a controlled model failure.
+    // It must be loopback HTTP and cannot redirect to a remote provider.
+    const testOllama=process.env.LUCIA_TEST_OLLAMA_URL||'http://127.0.0.1:11434';
+    if(!/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(testOllama))throw Error('Invalid test-only Ollama endpoint');
+    const modelStatus=await fetch(testOllama+'/api/tags',{signal:AbortSignal.timeout(3000),redirect:'error'})
       .then(r=>r.json()).catch(()=>({models:[]}));
     const localModel=process.env.LUCIA_TEST_LOCAL_MODEL?.trim() || 'qwen2.5:3b-instruct';
     const hasQwen=(modelStatus.models||[]).some(m=>(m.name||m.model)===localModel);
@@ -72,7 +76,7 @@ async function main(){
       litellm_url:cloudEndpoint,litellm_model:cloudModel,domain_overrides:{}
     } : {
       prefer_local_for_simple:true,lucia_cloud_only:false,
-      ollama_url:'http://127.0.0.1:11434',ollama_model:localModel,vision_model:visionModel,planner_model:process.env.LUCIA_TEST_PLANNER_MODEL||'qwen2.5:3b-instruct',supervisor_model:process.env.LUCIA_TEST_SUPERVISOR_MODEL||'lfm3:1.7b',domain_overrides:{}
+      ollama_url:testOllama,ollama_model:localModel,vision_model:visionModel,planner_model:process.env.LUCIA_TEST_PLANNER_MODEL||'qwen2.5:3b-instruct',supervisor_model:process.env.LUCIA_TEST_SUPERVISOR_MODEL||'lfm3:1.7b',domain_overrides:{}
     };
     await evalJs("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');Object.assign(c,"+
       JSON.stringify(overrides)+");await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__crossSiteEvents=[];for(const name of ['agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required','agent:stage','agent:vision','agent:prerequisite','agent:supervisor','agent:workflow_graph','agent:objective_state','agent:skill_state','agent:model_role','agent:execution_state','agent:requirement_state','agent:evidence_acquisition','agent:catalog_state'])await window.__TAURI__.event.listen(name,e=>window.__crossSiteEvents.push({kind:name,payload:e.payload}));return true})()");
@@ -381,7 +385,10 @@ async function main(){
           await sleep(900);
         }
       })();
-      const task=await runTask(c.goal,before.observed,100);
+      // Two bounded retailer windows (52 seconds each) plus authorized
+      // MCP discovery and final verification need a larger outer deadline.
+      // Keep the same success checks; a partial report is not a pass.
+      const task=await runTask(c.goal,before.observed,level===4?180:100);
       observing=false;await probe;
       if(level===4)console.log('CATALOG_PROBES',JSON.stringify(probes.slice(0,28)));
       const after=await nativeState().catch(()=>null);
@@ -711,8 +718,10 @@ async function main(){
       // report's exact source evidence. No runtime classifier is the oracle.
       const checks=require('./train-result-oracle.cjs').evaluateTrainResults(evidence.excerpt,task.report,date,'Bengaluru','New Delhi',18*60);
       checks.readOnly=!task.approvalRequired&&task.actions.every(a=>!['download','set_checked'].includes(a.type));
-      const passed=task.status==='completed'&&task.verified&&Object.values(checks).every(Boolean)&&task.actions.some(a=>(a.modelRoute||'').includes('ollama:'+localModel));
-      console.log('TRAIN_RESULT',JSON.stringify({passed,task,before,after,evidence,checks}));
+      const verifiedWorkflow=task.status==='completed'&&task.verified&&Object.values(checks).every(Boolean);
+      checks.modelDrivenAction=task.actions.some(a=>['ok','confirmed'].includes(a.outcome)&&a.type!=='complete'&&(a.modelRoute||'').includes('ollama:'+localModel));
+      const passed=verifiedWorkflow&&checks.modelDrivenAction;
+      console.log('TRAIN_RESULT',JSON.stringify({passed,verifiedWorkflow,task,before,after,evidence,checks}));
       if(!passed)process.exitCode=1;
       return;
     }

@@ -62,6 +62,7 @@ pub async fn generate(config:&RouterConfig,goal:&str)->anyhow::Result<String>{
     anyhow::ensure!(!config.lucia_cloud_only && !model.is_empty() && !model.to_ascii_lowercase().contains("cloud")
         && endpoint.scheme()=="http" && matches!(endpoint.host_str(),Some("localhost"|"127.0.0.1"|"[::1]"))
         && endpoint.username().is_empty()&&endpoint.password().is_none(),"Local writer unavailable");
+    let lease=crate::router::inference_scheduler::acquire().await?;
     let client=reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(35)).build()?;
     let url=format!("{}/api/generate",config.ollama_url.trim_end_matches('/'));
@@ -80,7 +81,7 @@ pub async fn generate(config:&RouterConfig,goal:&str)->anyhow::Result<String>{
     let brief=if requested_title(goal).is_some() { format!("Compose a finished story titled {title}.") }
         else { goal.split(" in the visible ").next().unwrap_or(goal).split(". ").next().unwrap_or(goal).chars().take(400).collect::<String>() };
     for _ in 0..3{
-        let body=serde_json::json!({"model":model,"stream":false,"keep_alive":0,
+        let body=serde_json::json!({"model":model,"stream":false,"keep_alive":lease.keep_alive(),
             "system":"You write original fiction. Return only the story title on the first line, then the actual story. Never output instructions or discuss browser actions.",
             "prompt":format!("{brief} {theme}. Write {sentences} complete sentences in the story, approximately 10 words each. Target {target} words total. Begin immediately with the title. {correction}"),
             "options":{"temperature":0.5,"num_ctx":2048,"num_predict":512}});

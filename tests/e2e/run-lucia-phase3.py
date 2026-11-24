@@ -113,6 +113,7 @@ def main():
     parser.add_argument("--tier",action="append",choices=TIERS)
     parser.add_argument("--case",action="append",choices=[c["id"] for c in CASES])
     parser.add_argument("--train-date",default="2026-11-24")
+    parser.add_argument("--approved-exa",action="store_true",help="Use only the existing explicitly approved Exa search tool for Level 4; no credentials copied")
     parser.add_argument("--output",default="tests/e2e/artifacts/phase3")
     parser.add_argument("--repeat",type=int,choices=range(1,6),default=1)
     parser.add_argument("--list",action="store_true")
@@ -130,7 +131,7 @@ def main():
     sha=hash_file(exe)
     run_dir=(ROOT/args.output)/("run-"+datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
     run_dir.mkdir(parents=True)
-    report={"revision":REVISION,"executableSha256":sha,"models":MODELS,"trainDate":args.train_date,"complete":False,"planned":[c["id"] for c in selected],"results":[]}
+    report={"revision":REVISION,"executableSha256":sha,"models":MODELS,"trainDate":args.train_date,"approvedExaLevel4":args.approved_exa,"complete":False,"planned":[c["id"] for c in selected],"results":[]}
     atomic_json(run_dir/"results.json",report)
     print("PHASE3_REPORT "+str(run_dir/"results.json"),flush=True)
     print("PHASE3_BUILD "+sha,flush=True)
@@ -143,7 +144,9 @@ def main():
             print("PHASE3_ABORT executable changed",flush=True);return 2
         env={k:v for k,v in os.environ.items() if not k.startswith(("LUCIA_","WEBVIEW2_","BROWSER_CDP_PORT"))}
         env.update(MODELS);env.update(c["mode"]);env["LUCIA_TRAIN_DATE"]=args.train_date
-        if c["id"]=="level-4" and os.environ.get("LUCIA_CATALOG_RAW_PROBE")=="1":env["LUCIA_CATALOG_RAW_PROBE"]="1"
+        if c["id"]=="level-4":
+            if args.approved_exa:env["LUCIA_TEST_APPROVED_EXA"]="1"
+            if os.environ.get("LUCIA_CATALOG_RAW_PROBE")=="1":env["LUCIA_CATALOG_RAW_PROBE"]="1"
         kind=c["kind"]
         if kind=="cargo":cmd=["cargo","test","-p","browsphere-core","--offline","--","--test-threads=2"]
         elif kind=="node":cmd=["node","--test","tests/lucia-local-model.test.cjs","tests/lucia-local-profiles.test.cjs","tests/lucia-activity.test.cjs"]

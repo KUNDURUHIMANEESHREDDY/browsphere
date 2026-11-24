@@ -77,6 +77,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   const MAX_NODES = {max_nodes};
   const MAX_TEXT = {max_text_chars};
   const POINT_PROBE = null;
+  const EXPLICIT_LINK_SOURCE = null;
   const FOCUS_TERMS = [];
 
   const SENSITIVE_RE = /(password|passwd|passcode|otp|one[-_]?time|cvv|cvc|card[-_]?num|cc[-_]|ssn|secret|api[-_]?key|token)/i;
@@ -446,7 +447,17 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
                   if(/^https?:$/.test(address.protocol)&&address.origin===location.origin&&/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(address.pathname))return sameOriginProduct(current);
                   if(address.origin==="https://www.google.com"&&["/url","/goto"].includes(address.pathname))return null;
                   if (!/^https?:$/.test(address.protocol)) return null;
-                  if(address.origin!==location.origin)return null;
+                  if(address.origin!==location.origin){{
+                    // Only an explicit, read-only single-link objective may
+                    // capture a public outbound destination. Never capture
+                    // query strings, fragments, credentials or account links.
+                    if(EXPLICIT_LINK_SOURCE!==location.href||address.protocol!=="https:"||
+                        address.username||address.password||address.search||address.hash||
+                        address.pathname.length>200||current.hasAttribute("download")||
+                        /(?:login|sign[-_]?in|auth|oauth|token|password|account|checkout|payment|consent)/i.test(address.pathname)||
+                        document.querySelectorAll('a[href]').length!==1)return null;
+                    return address.origin+address.pathname;
+                  }}
                   if (address.hostname === "www.youtube.com"
                       && address.pathname === "/watch") {{
                     const videoId = address.searchParams.get("v");
@@ -527,14 +538,25 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   // Reserve slots for product links before large filter panels, navigation
   // menus or facets consume the node budget. Only rendered same-origin links;
   // the product-path shape is a candidate hint, not proof of identity.
+  const distinctProducts=new Map();
   for(const link of Array.from(document.querySelectorAll('a[href]')).slice(0,2500)){{
+    if(!isVisible(link)||!isInteractive(link)||link.closest('nav,header,footer,form,[aria-hidden="true"]'))continue;
+    const url=sameOriginProduct(link);if(!url)continue;
+    // Prefer the card's grounded title, then a named anchor. A row with
+    // image/title/rating duplicates consumes only one reserved slot.
+    const title=productLinkLabel(link);
+    const name=computeAccessibleName(link).trim();
+    const quality=title?3:name.length>=12?2:name?1:0;
+    const previous=distinctProducts.get(url);
+    if(!previous||quality>previous.quality)distinctProducts.set(url,{{link,quality}});
+  }}
+  for(const item of distinctProducts.values()){{
     if(nodes.length>=Math.min(MAX_NODES,85))break;
-    if(!isVisible(link)||link.closest('nav,header,footer,form,[aria-hidden="true"]'))continue;
-    if(sameOriginProduct(link))walk(link,true);
+    walk(item.link,true);
   }}
   // Reserve bounded slots for semantic pagination buttons. Do not infer
   // meaning from icon shapes, class names or arbitrary page text.
-  if(/(?:\/products|\/search(?:\/|$)|\/search-results)/i.test(location.pathname)){{
+  if(/(?:\/products|\/search(?:\/|$)|\/search-results)/i.test(location.pathname)||new URL(location.href).searchParams.has("q")){{
     for(const el of Array.from(document.querySelectorAll('button,[role="button"]')).slice(0,1200)){{
       if(nodes.length>=Math.min(MAX_NODES,95))break;
       if(isVisible(el)&&!el.closest('[aria-hidden="true"],[hidden]')&&/^(next page|go to next page|next results page|next)$/i.test(computeAccessibleName(el).trim())&&el.closest('nav[aria-label*="pag" i],[class*="pagination" i],[data-testid*="pagination" i]'))walk(el,true);
@@ -799,6 +821,17 @@ pub async fn request_live_dom_snapshot(
     serde_json::from_value(value).ok()
 }
 
+
+// Only the compiled explicit-link task requests this observation. Ordinary
+// snapshots continue to suppress cross-origin hrefs.
+pub async fn request_explicit_link_snapshot(app:&tauri::AppHandle,label:&str,source:&str,timeout_ms:u64)->Option<DomSnapshot>{
+    let u=super::browser_skills::public_url(source)?;
+    if u.scheme()!="https"||u.query().is_some()||u.fragment().is_some(){return None;}
+    let payload=serde_json::to_string(source).ok()?;
+    let script=build_snapshot_script(Uuid::new_v4(),120,24000).replace("const EXPLICIT_LINK_SOURCE = null;",&format!("const EXPLICIT_LINK_SOURCE = {payload};"));
+    let value=crate::agent::native_eval::eval_json(app,label,script,timeout_ms).await.ok()?;
+    serde_json::from_value(value).ok()
+}
 
 // The ordinary serializer remains the authority for all fields; only its
 // observation order is changed by an independently localized viewport point.

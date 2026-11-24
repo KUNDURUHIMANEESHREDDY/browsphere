@@ -146,19 +146,20 @@ impl Intent{
   if u.query().is_some()||forbidden(&format!("{} {}",n.label,u.path())){return 0;}
   let path=u.path().to_ascii_lowercase();
   if !(path.starts_with("/product/")||path.contains("/p/")){return 0;}
-  let text=format!("{} {}",n.label,u.path().replace(['-','_','/']," "));
+  let path_text=u.path().replace(['-','_','/']," ");
+  let text=format!("{} {}",n.label,path_text);
   let score=self.spec_score(&text);
   if score<130||!self.size_compatible(&n.label,false)||!self.size_compatible(u.path(),false){return 0;}
   // A visible title with two capacities must match both requested values.
   // Generic model links with absent capacities may be inspected, but an
   // explicit contradictory variant must never be selected.
-  let label=bs::words(&n.label);
+  let label=bs::words(&text);
   let caps=label.iter().enumerate().filter_map(|(i,w)|{
    let v=if label.get(i+1).map(String::as_str)==Some("gb"){Some(w.as_str())}else{w.strip_suffix("gb")};
    v.filter(|v|!v.is_empty()&&v.chars().all(|c|c.is_ascii_digit()))
   }).collect::<Vec<_>>();
   if caps.iter().any(|v|*v!=self.ram&&*v!=self.storage){return 0;}
-  if word(&n.label,"tb")||label.iter().any(|w|w.strip_suffix("tb").is_some_and(|v|!v.is_empty()&&v.chars().all(|c|c.is_ascii_digit()))){return 0;} // at least matching model family, not a merchant/category name
+  if word(&text,"tb")||label.iter().any(|w|w.strip_suffix("tb").is_some_and(|v|!v.is_empty()&&v.chars().all(|c|c.is_ascii_digit()))){return 0;} // at least matching model family, not a merchant/category name
   score
  }
  fn broad_query(&self)->String{self.identity.join(" ")}
@@ -500,7 +501,7 @@ impl Run{
    }
   }
   if candidates.is_empty()&&state.submitted&&state.pages<2&&result_page(p)&&!product_links(p).is_empty(){
-   if let Some(n)=bs::unique(p.interactive_nodes.iter().filter(|n|next_page(n)&&visible(n))){
+   if let Some(n)=bs::unique(p.interactive_nodes.iter().filter(|n|next_page(n))){
     let key=format!("pagination:{}:{:?}",p.origin,product_links(p));
     if state.strategy.start(key.clone(),StrategyKind::Pagination){
      state.attempts.insert(key);state.pages+=1;state.waiting=0;
