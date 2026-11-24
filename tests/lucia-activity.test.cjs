@@ -73,3 +73,10 @@ test('Lucia keeps only recent bounded activity and rejects invalid actions', () 
     action: { type: 'exec_shell', command: 'something-bad' }, thought: 'do not copy'
   }), null);
 });
+
+test('loop guard stop is not reported as specialist completion', () => {
+  const result = activity.trace({ action: { type: 'complete' }, outcome: 'failed',
+    model_route: 'ollama:test / guard:repeated_action' });
+  assert.equal(result.label, 'Stopped by loop guard');
+  assert.match(result.explanation, /not complete/);
+});

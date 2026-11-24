@@ -38,3 +38,7 @@
 Thumbs.db
 .vscode/
 .idea/
+
+# Locally staged offline AI weights (do not commit large model binaries)
+/src-tauri/bundled-ai/
+/src-tauri/offline-installer-hooks.nsh

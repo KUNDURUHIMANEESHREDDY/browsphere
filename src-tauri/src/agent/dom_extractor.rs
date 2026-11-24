@@ -23,6 +23,9 @@ pub struct DomNodeSummary {
     pub options: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked: Option<bool>,
+    /// Only a search-state classification; never the actual input value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
     pub is_submit: bool,
@@ -55,7 +58,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   const INTERACTIVE_TAGS = new Set(["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "SUMMARY", "OPTION", "DIALOG"]);
   const INTERACTIVE_ROLES = new Set([
     "button", "link", "textbox", "searchbox", "combobox", "listbox",
-    "menuitem", "checkbox", "radio", "switch", "tab", "slider", "dialog"
+    "menuitem", "checkbox", "radio", "switch", "tab", "slider", "dialog", "alertdialog", "option"
   ]);
 
   function isVisible(el) {{
@@ -89,7 +92,12 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
 
   function computeAccessibleName(el) {{
     const ariaLabel = el.getAttribute("aria-label");
-    if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim().slice(0, 120);
+    // Framework serialization bugs can expose HTML or a sanitizer diagnostic
+    // as every button's aria-label. Use the rendered label instead; never use
+    // embedded markup as a control name.
+    const usableLabel = value => value && value.trim() &&
+      !/SafeValue must use|<\/?(?:body|html|div|h[1-6]|span|p)(?:\s|>)/i.test(value);
+    if (usableLabel(ariaLabel)) return ariaLabel.trim().slice(0, 120);
 
     const labelledBy = el.getAttribute("aria-labelledby");
     if (labelledBy) {{
@@ -121,6 +129,18 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
 
     const title = el.getAttribute("title");
     if (title && title.trim()) return title.trim().slice(0, 120);
+    // Custom form frameworks often render a short visual label beside the
+    // input rather than a native label. Only use bounded nearby label text.
+    if (el.matches('input,textarea,select,[role="combobox"],[role="searchbox"]')) {{
+      const candidates=[el.previousElementSibling,el.parentElement?.previousElementSibling];
+      for(const sibling of candidates) {{
+        if(!sibling || sibling.querySelector('input,textarea,select,button,a')) continue;
+        const label=(sibling.innerText||'').trim().replace(/\s+/g,' ');
+        if(label.length>0&&label.length<=48&&/^(from|to|origin|destination|departure|arrival|location|station|city|date|check.in|check.out|start|end|name|search|email|address|phone)(\b|$)/i.test(label)) return label;
+      }}
+      const name=(el.getAttribute('name')||'').trim();
+      if(name&&name.length<=48) return name;
+    }}
 
     // Image-only result cards and controls in Shadow DOM still need meaningful
     // accessible names; unlabelled clickable cards were otherwise skipped.
@@ -128,6 +148,10 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     const imageAlt = el.querySelector("img[alt]")?.getAttribute("alt") || "";
     // Text-only layout whitespace must not eclipse a meaningful image alt.
     const normalized = value => String(value || "").replace(/\s+/g, " ").trim();
+    // Editor content is not an accessible control label.
+    if ((el.tagName === "TEXTAREA" || el.isContentEditable) &&
+        !el.closest("form") && el.getBoundingClientRect().height >= 72)
+      return "Document editor";
     const text = normalized(el.innerText) || normalized(el.value)
       || normalized(ancestorLabel?.innerText) || normalized(imageAlt)
       || normalized(el.getAttribute("alt"));
@@ -146,6 +170,21 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     return false;
   }}
 
+  // A visible blocking dialog owns the interaction surface. Do not present
+  // controls underneath it as actionable (including to the policy binder).
+  const dialogs = Array.from(document.querySelectorAll(
+    'dialog[open], [role="dialog"][aria-modal="true"], [role="alertdialog"], [role="dialog"]'))
+    .filter(el => {{
+      if (!isVisible(el)) return false;
+      const box = el.getBoundingClientRect();
+      const x = Math.min(window.innerWidth - 1, Math.max(0, box.left + box.width / 2));
+      const y = Math.min(window.innerHeight - 1, Math.max(0, box.top + box.height / 2));
+      const top = document.elementFromPoint(x,y);
+      return top && el.contains(top) && (el.matches('dialog[open], [aria-modal="true"], [role="alertdialog"]')
+        || getComputedStyle(el).position === 'fixed'
+        || Array.from(el.parentElement?.classList || []).some(c => /(?:^|[-_])(mask|overlay|backdrop)(?:$|[-_])/i.test(c)));
+    }});
+  const activeDialog = dialogs.at(-1) || null;
   const nodes = [];
   // Dynamic SPAs replace elements between observations. Every new node must
   // receive a unique ID; restarting an n_1 counter could silently target a
@@ -173,7 +212,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
     let current = includeRoot && root.nodeType === 1 ? root : walker.nextNode();
     while (current && nodes.length < MAX_NODES) {{
-      if (isVisible(current) && isInteractive(current) &&
+      if ((!activeDialog || activeDialog.contains(current)) && isVisible(current) && isInteractive(current) &&
           !visitedElements.has(current)) {{
         visitedElements.add(current);
         let nodeId = current.getAttribute("data-aether-id");
@@ -232,6 +271,22 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
               ? (current.getAttribute("aria-checked") === "true" ? true
                 : current.getAttribute("aria-checked") === "false" ? false : null)
               : null,
+          // Read only the presence of a non-sensitive search query, not its value.
+          search_state: (() => {{
+            if (isSensitiveField(current) || sensitiveForm) return null;
+            if (current.tagName === "INPUT" && (current.readOnly || current.hasAttribute("readonly"))) return "read_only";
+            const selector = 'input[type="search"], input[role="searchbox"], input[name="search"], input[name="search_query"], input[aria-label*="Search"], input[placeholder*="Search"], textarea[role="searchbox"], textarea[name="search"], textarea[name="search_query"], textarea[aria-label*="Search"], textarea[placeholder*="Search"], textarea[name="q"]';
+            if (current.matches(selector) && !current.disabled && typeAttr !== "hidden") {{
+              return String(current.value || "").trim() ? "filled" : "empty";
+            }}
+            if (formSubmit && form) {{
+              const fields = Array.from(form.querySelectorAll(selector))
+                .filter(field => !field.disabled && field.type !== "hidden" && !isSensitiveField(field));
+              if (fields.length && fields.every(field => !String(field.value || "").trim()))
+                return "blocked_submit";
+            }}
+            return null;
+          }})(),
           // Retain same-origin destinations but strip arbitrary URL query
           // parameters, which might include OAuth codes or other secrets.
           // YouTube watch links retain only the video ID for DOM-based clicks.
@@ -269,6 +324,11 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     }}
   }}
 
+  // Scope the current observation to the top modal. Once dismissed, the
+  // next snapshot exposes the rest of the page without guessing controls.
+  if (activeDialog) {{
+    walk(activeDialog);
+  }} else {{
   // On YouTube search results, inspect result cards before the numerous
   // navigation/toolbar controls exhaust the bounded interactive node budget.
   // This is still a fresh DOM observation, never a guessed result URL.
@@ -278,7 +338,12 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
       'ytd-two-column-search-results-renderer #contents');
     if (resultsRoot) walk(resultsRoot);
   }}
-  for (const editor of Array.from(document.querySelectorAll('textarea, [contenteditable="true"]')).slice(0,24)) {{
+  // Prioritize real form fields independent of site layout or navigation size.
+  for (const field of Array.from(document.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"], [role="searchbox"], [role="option"]')).slice(0, 60)) {{
+    if (isVisible(field) && !isSensitiveField(field)) walk(field, true);
+  }}
+  // Capture visible multiline editors before toolbar controls exhaust the budget.
+  for (const editor of Array.from(document.querySelectorAll('textarea, [contenteditable="true"]')).slice(0, 24)) {{
     if (isVisible(editor) && !isSensitiveField(editor) && !editor.closest('form') &&
         editor.getBoundingClientRect().height >= 72) walk(editor, true);
   }}
@@ -287,7 +352,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   // relevant article, results, search form, or dialog. Scan those regions
   // first within the bounded observation budget, then the rest of the page.
   for (const selector of [
-    '[role="dialog"][aria-modal="true"]', '[role="search"]', 'form[role="search"]',
+    '[role="listbox"]', '[role="search"]', 'form[role="search"]',
     'main', '[role="main"]', '#main', '#content', '.search-results',
     '[role="dialog"]'
   ]) {{
@@ -295,6 +360,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     if (region && isVisible(region)) walk(region);
   }}
   walk(document.body || document.documentElement);
+  }}
 
   // Give the actual content/dialog priority over enormous navigation menus,
   // while retaining a bounded slice of the remaining page for context.
@@ -303,7 +369,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   const contentText = isVisible(primaryTextRoot)
     ? (primaryTextRoot.innerText || "") : "";
   const bodyText = document.body?.innerText || "";
-  const visibleText = [contentText, bodyText]
+  const visibleText = (activeDialog ? ["Active dialog: " + (activeDialog.innerText || "")] : [contentText, bodyText])
     .filter(Boolean).join(" ")
     .replace(/\s+/g, " ")
     .trim()

@@ -935,6 +935,18 @@
             case 'lucia-diag-filter':
               if (window.LuciaDiagnosticsDashboard) window.LuciaDiagnosticsDashboard.filter(btn.dataset.filter);
               break;
+            case 'mcp-lucia-enable':
+            case 'mcp-lucia-revoke':
+            case 'mcp-oauth-begin':
+            case 'mcp-oauth-copy':
+            case 'mcp-oauth-finish':
+            case 'mcp-oauth-forget':
+            case 'mcp-marketplace':
+            case 'mcp-connect':
+            case 'mcp-disconnect':
+            case 'mcp-call':
+              handleMcpSettingsAction(btn.dataset.action);
+              break;
             case 'test-model-connection':
               testNativeModelConnection(null);
               break;
@@ -943,6 +955,9 @@
               break;
             case 'use-local-lucia-fallback':
               useInstalledLocalModelForLucia();
+              break;
+            case 'use-local-lucia-profile':
+              useInstalledLocalModelForLucia(btn.dataset.model);
               break;
             case 'test-cloud-model':
               testNativeModelConnection('cloud');
@@ -3731,7 +3746,7 @@
 
       function rerenderAiPreservingDraft() {
         // Rebuilding the rule chips should never discard unsaved provider settings or a new key.
-        var ids = ['cfgOllamaUrl', 'cfgOllamaModel', 'cfgWriterModel', 'cfgVisionModel', 'cfgLiteLlmUrl',
+        var ids = ['cfgOllamaUrl', 'cfgOllamaModel', 'cfgWriterModel', 'cfgVisionModel', 'cfgSupervisorModel', 'cfgLiteLlmUrl',
           'cfgLiteLlmModel', 'cfgProviderPreset', 'cfgLiteLlmKey',
           'cfgAwsProfile', 'cfgAwsRegion', 'cfgAwsModel', 'cfgAwsBucket',
           'cfgAwsKey', 'cfgAwsTable', 'cfgAwsNamespace', 'cfgAwsCognitoClient',
@@ -3800,14 +3815,16 @@
         }
       }
 
-      async function useInstalledLocalModelForLucia() {
+      var localLuciaProfileBusy = false;
+      async function useInstalledLocalModelForLucia(requestedModel) {
         if (!window.aetherBridge || !window.aetherBridge.isNative) {
           showModelTestStatus('Local Lucia requires the Windows app.');
           return;
         }
         var button = document.querySelector('[data-action="use-local-lucia-fallback"]');
-        if (button && button.disabled) return;
-        if (button) button.disabled = true;
+        if (localLuciaProfileBusy) return;
+        localLuciaProfileBusy = true;
+        document.querySelectorAll('[data-action="use-local-lucia-profile"], [data-action="use-local-lucia-fallback"]').forEach(function (el) { el.disabled = true; });
         var original = null;
         var switched = false;
         try {
@@ -3820,11 +3837,20 @@
           var model = installed.includes('qwen2.5:3b-instruct') ? 'qwen2.5:3b-instruct' :
             (installed.includes(nativeRouterConfig.ollama_model) ? nativeRouterConfig.ollama_model :
               installed.find(function (name) { return /qwen|llama|mistral|deepseek|gemma/i.test(name); }));
-          if (!model) throw new Error('No supported text model detected. Install a Qwen, Llama, Mistral, DeepSeek, or Gemma model.');
+          if (requestedModel) {
+            if (!['lfm3:1.7b', 'qwen3.5:0.8b'].includes(requestedModel)) throw new Error('Unknown local profile');
+            if (!installed.includes(requestedModel)) {
+              if (requestedModel === 'lfm3:1.7b' && installed.includes('lfm3:latest')) model = 'lfm3:latest';
+              else throw new Error('Install the requested model with Ollama first: ' + requestedModel);
+            } else model = requestedModel;
+          }
+          if (!model) model = installed.find(function (name) { return /^lfm3:(1\.7b|latest)$/.test(name); });
+          if (!model) throw new Error('No supported text model detected. Install LFM3, Qwen, Llama, Mistral, DeepSeek, or Gemma.');
           original = Object.assign({}, nativeRouterConfig, { litellm_api_key: null });
           var localConfig = Object.assign({}, original, {
             ollama_url: 'http://127.0.0.1:11434',
             ollama_model: model,
+            vision_model: requestedModel === 'lfm3:1.7b' && installed.includes('lfm3-vl:2b') ? 'lfm3-vl:2b' : original.vision_model || '',
             prefer_local_for_simple: true,
             lucia_cloud_only: false,
             litellm_api_key: null
@@ -3846,8 +3872,8 @@
           }
           showModelTestStatus('Connection failed: ' + String(err));
         } finally {
-          var current = document.querySelector('[data-action="use-local-lucia-fallback"]');
-          if (current) current.disabled = false;
+          localLuciaProfileBusy = false;
+          document.querySelectorAll('[data-action="use-local-lucia-profile"], [data-action="use-local-lucia-fallback"]').forEach(function (el) { el.disabled = false; });
         }
       }
 
@@ -3857,6 +3883,7 @@
           ollama_model: (document.getElementById('cfgOllamaModel')?.value || '').trim() || 'qwen3.5:4b',
           writer_model: (document.getElementById('cfgWriterModel')?.value ?? 'qwen2.5:3b-instruct').trim(),
           vision_model: (document.getElementById('cfgVisionModel')?.value || '').trim(),
+          supervisor_model: (document.getElementById('cfgSupervisorModel')?.value ?? nativeRouterConfig.supervisor_model ?? 'lfm3:1.7b').trim(),
           litellm_url: (document.getElementById('cfgLiteLlmUrl')?.value || '').trim() || 'http://127.0.0.1:4000/v1/chat/completions',
           litellm_model: (document.getElementById('cfgLiteLlmModel')?.value || '').trim() ||
             (Object.values(window.browsphereCloudPresets || {}).some(function (preset) {
@@ -3886,6 +3913,99 @@
           showHudToast('Save error: ' + err);
           return false;
         }
+      }
+
+      var mcpConnection = null;
+      var mcpAuthorization = null;
+      var mcpBusy = false;
+      async function handleMcpSettingsAction(action) {
+        if (mcpBusy) return;
+        if (!window.aetherBridge?.isNative) { showHudToast('MCP requires the desktop app.'); return; }
+        var resultEl = document.getElementById('cfgMcpResult');
+        var select = document.getElementById('cfgMcpTool');
+        var endpoint = document.getElementById('cfgMcpUrl')?.value.trim();
+        var render = function(value) {
+          if (resultEl) resultEl.textContent = typeof value === 'string' ? value : JSON.stringify(value,null,2);
+        };
+        mcpBusy = true;
+        try {
+          if (action === 'mcp-oauth-begin') {
+            var issuer = document.getElementById('cfgMcpIssuer')?.value.trim();
+            var clientId = document.getElementById('cfgMcpClientId')?.value.trim();
+            var scope = document.getElementById('cfgMcpScope')?.value.trim() || '';
+            if (!window.confirm('Authorize this trusted MCP resource using the specified issuer?\n'+endpoint+'\n'+issuer)) return;
+            mcpAuthorization = null;
+            render('Checking authorization metadata...');
+            var flow = await window.aetherBridge.beginMcpOAuth(endpoint,issuer,clientId,scope);
+            mcpAuthorization = {id:flow.id,url:flow.authorizationUrl,endpoint:endpoint};
+            render('Copy the authorization URL, open it in your regular browser, and approve only the intended access. Then select Finish authorization.\n\n'+flow.authorizationUrl+'\n\nLoopback redirect: '+flow.redirectUri);
+          } else if (action === 'mcp-oauth-copy') {
+            if (!mcpAuthorization) throw new Error('Start authorization first.');
+            await navigator.clipboard.writeText(mcpAuthorization.url);
+            showHudToast('Authorization URL copied.');
+          } else if (action === 'mcp-oauth-finish') {
+            if (!mcpAuthorization || mcpAuthorization.endpoint !== endpoint) throw new Error('Start authorization for this endpoint first.');
+            var id = mcpAuthorization.id;
+            mcpAuthorization = null;
+            render('Waiting for the reviewed OAuth callback...');
+            await window.aetherBridge.finishMcpOAuth(id);
+            render('Authorization saved securely. Select Discover tools.');
+          } else if (action === 'mcp-oauth-forget') {
+            if (!window.confirm('Forget the saved authorization for this exact MCP endpoint?')) return;
+            if (mcpConnection && mcpConnection.endpoint === endpoint) {
+              await window.aetherBridge.disconnectMcp(mcpConnection.id);
+              mcpConnection = null;
+              if (select) select.replaceChildren(new Option('Connect first',''));
+            }
+            await window.aetherBridge.forgetMcpOAuth(endpoint);
+            mcpAuthorization = null;
+            render('Local authorization removed. Revoke the grant at the provider if necessary.');
+          } else if (action === 'mcp-marketplace') {
+            var query = document.getElementById('cfgMcpSearch')?.value.trim() || '';
+            render('Searching official MCP registry...');
+            render(await window.aetherBridge.searchMcpMarketplace(query));
+          } else if (action === 'mcp-connect') {
+            if (mcpConnection) await window.aetherBridge.disconnectMcp(mcpConnection.id);
+            mcpConnection = null;
+            if (select) select.replaceChildren(new Option('Discovering...',''));
+            render('Discovering tools...');
+            var found = await window.aetherBridge.connectMcp(endpoint);
+            mcpConnection = {id:found.id, endpoint:endpoint, tools:found.tools};
+            if (select) {
+              select.replaceChildren(new Option('Select a tool',''));
+              found.tools.forEach(function(tool) { select.append(new Option(tool.name,tool.name)); });
+            }
+            render({protocol:found.version, tools:found.tools});
+          } else if (action === 'mcp-lucia-enable' || action === 'mcp-lucia-revoke') {
+            if (!mcpConnection || endpoint !== mcpConnection.endpoint) throw new Error('Discover tools for this exact endpoint first.');
+            var alias = document.getElementById('cfgMcpAlias')?.value.trim();
+            var name = select?.value;
+            var enable = action === 'mcp-lucia-enable';
+            var tool = mcpConnection.tools.find(function(t){return t.name===name;});
+            if (!tool || !alias) throw new Error('Enter a server name and select a discovered tool.');
+            if (enable && (!tool.annotations?.readOnlyHint || tool.annotations?.destructiveHint === true)) throw new Error('Only reviewed read-only tools are eligible.');
+            if (!window.confirm((enable?'Approve this read-only tool for explicit Lucia MCP tasks?':'Revoke this tool from future Lucia tasks?')+'\n'+endpoint+'\n'+alias+'/'+name)) return;
+            await window.aetherBridge.setLuciaMcpTool(mcpConnection.id,alias,name,enable);
+            render(enable?'Approved. Ask Lucia: mcp auto '+alias+' [your read-only task]':'Revoked for future Lucia tasks.');
+          } else if (action === 'mcp-disconnect') {
+            if (mcpConnection) await window.aetherBridge.disconnectMcp(mcpConnection.id);
+            mcpConnection = null;
+            if (select) select.replaceChildren(new Option('Connect first',''));
+            render('Disconnected.');
+          } else {
+            if (!mcpConnection || endpoint !== mcpConnection.endpoint) throw new Error('Discover tools for this endpoint first.');
+            var name = select?.value;
+            if (!mcpConnection.tools.some(function(t){return t.name===name;})) throw new Error('Select a discovered tool.');
+            var args = JSON.parse(document.getElementById('cfgMcpArgs')?.value || '{}');
+            if (!args || Array.isArray(args) || typeof args !== 'object') throw new Error('Arguments must be a JSON object.');
+            if (!window.confirm('Send this exact MCP call to the trusted server?\n'+endpoint+'\n'+name+'\n'+JSON.stringify(args,null,2))) {
+              render('Cancelled. No tool call sent.'); return;
+            }
+            render('Calling '+name+'...');
+            render(await window.aetherBridge.callMcp(mcpConnection.id,name,args));
+          }
+        } catch (err) { render('MCP error: '+String(err)); }
+        finally {mcpBusy=false;}
       }
 
       function showModelTestStatus(message) {

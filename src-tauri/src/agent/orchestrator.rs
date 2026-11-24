@@ -239,7 +239,7 @@ pub(crate) fn is_simple_named_title_task(goal: &str) -> bool {
 /// The selected LLM decides actual actions for each specialist at runtime.
 pub fn plan_task(goal: &str) -> TaskPlan {
     let lower = goal.to_lowercase();
-    let mut roles: Vec<Specialist> = if is_simple_named_title_task(goal) {
+    let mut roles: Vec<Specialist> = if crate::agent::prerequisites::route_values(goal).is_some() || is_simple_named_title_task(goal) {
         vec![Specialist::Browser]
     } else if contains_any(
         &lower, &["compare", "comparison", "versus", " vs ", "difference between", "best among"],
@@ -384,6 +384,7 @@ impl Orchestrator {
     /// Reject model-declared completion when there is no real page evidence.
     /// This is an evidence gate, not a factual truth oracle.
     pub fn can_complete(&self, snapshot: &DomSnapshot) -> Result<(), String> {
+        if let Some(reason) = crate::agent::prerequisites::completion_blocker(&self.plan.goal,snapshot) { return Err(reason.into()); }
         if self.last_action_failed {
             return Err("Previous browser action failed; re-observe and recover first".into());
         }
@@ -592,7 +593,7 @@ mod tests {
         page.interactive_nodes.push(crate::agent::dom_extractor::DomNodeSummary {
             href: None,
             node_id: "query".into(), tag: "input".into(), role: "searchbox".into(),
-            label: "Search this site".into(), is_submit: false, is_sensitive: false, options: vec![], checked: None, bbox: None
+            label: "Search this site".into(), is_submit: false, is_sensitive: false, options: vec![], checked: None, search_state: None, bbox: None
         });
         let query = BrowserAction::TypeText {
             node_id: "query".into(), text: "web research".into(), is_sensitive: false

@@ -2,12 +2,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent;
+mod mcp;
+mod mcp_oauth;
 mod aws;
 mod aws_discovery;
 mod automation;
 mod diagnostics;
 mod privacy;
 mod router;
+mod bundled_ai;
 mod site_permissions;
 mod storage;
 mod voice;
@@ -1902,7 +1905,7 @@ async fn aws_test_connection(state: tauri::State<'_, Arc<AppState>>) -> Result<S
 }
 
 async fn cloud_snapshot(state: &Arc<AppState>) -> Result<CloudSnapshot, String> {
-    let router = state.router.lock().await.get_config();
+    let router = state.router.lock().await.persistable_config();
     let memories = state.db.lock().await.list_memories(None, None, 200)
         .map_err(|e| e.to_string())?
         .into_iter().map(|m| MemoryMeta {
@@ -2020,8 +2023,9 @@ async fn update_router_config(
         }
     }
     {
+        let stored = state.router.lock().await.normalize_for_storage(config.clone());
         let mut db = state.db.lock().await;
-        db.save_router_config(&config).map_err(|e| e.to_string())?;
+        db.save_router_config(&stored).map_err(|e| e.to_string())?;
     }
     let mut router = state.router.lock().await;
     let mut sanitized = config;
@@ -2038,6 +2042,12 @@ async fn route_lucia_intent(
     // A clear, explicit user navigation command is not ambiguous intent.
     // Do not turn "open youtube" into chat when the configured intent model
     // is unavailable, returns malformed JSON, or classifies it incorrectly.
+    if agent::mcp::requested(&message) {
+        return Ok(agent::intent_router::LuciaIntent {
+            mode: agent::intent_router::LuciaMode::BrowserTask,
+            reason: "Explicit MCP request".into(),
+        });
+    }
     if agent::policy::requested_navigation_url(&message).is_some() {
         return Ok(agent::intent_router::LuciaIntent {
             mode: agent::intent_router::LuciaMode::BrowserTask,
@@ -2133,7 +2143,8 @@ async fn fetch_cloud_models(
     // Never silently select those because a combo might use a paid provider.
     // The user chooses an explicit model in the fetched-model dropdown.
     // Persist only model IDs and public endpoint data. Secrets stay in Credential Manager.
-    state.db.lock().await.save_router_config(&config).map_err(|e| e.to_string())?;
+    let stored = state.router.lock().await.normalize_for_storage(config.clone());
+    state.db.lock().await.save_router_config(&stored).map_err(|e| e.to_string())?;
     state.router.lock().await.update_config(config.clone());
     Ok(CloudModelsResult {
         endpoint,
@@ -2712,6 +2723,7 @@ async fn start_agent_run(
             trace_tx,
             memory_enabled,
             voice_mode.unwrap_or(false),
+            private_mode,
         )
         .await;
 
@@ -2920,6 +2932,15 @@ fn main() {
 
             match tauri::Builder::default()
         .setup(move |app| {
+            let resource_root = app.path().resource_dir()?;
+            let private_ai = tauri::async_runtime::block_on(bundled_ai::BundledAi::launch(&resource_root))?;
+            if let Some(ref service) = private_ai {
+                tauri::async_runtime::block_on(async {
+                    state_for_sched.router.lock().await.enable_bundled(service.endpoint.clone());
+                });
+                tracing::info!("Bundled local AI is ready");
+            }
+            app.manage(std::sync::Mutex::new(private_ai));
             tauri::async_runtime::spawn(agent::reactive_perception::run_refresh_worker(
                 app.handle().clone(), state_for_sched.perception.clone(), perception_rx
             ));
@@ -2948,7 +2969,17 @@ fn main() {
         })
         .manage(app_state)
         .manage(site_permissions)
+        .manage(mcp::McpRegistry::default())
+        .manage(mcp_oauth::OAuthRegistry::default())
         .invoke_handler(tauri::generate_handler![
+            mcp::mcp_marketplace_search,
+            mcp::mcp_connect,
+            mcp_oauth::mcp_oauth_begin,
+            mcp_oauth::mcp_oauth_finish,
+            mcp_oauth::mcp_oauth_forget,
+            mcp::mcp_disconnect,
+            mcp::mcp_call,
+            mcp::mcp_set_lucia_tool,
             open_diagnostics_folder,
             export_diagnostics,
             read_lucia_diagnostics,
@@ -3047,7 +3078,15 @@ fn main() {
             stop_automation_job,
             start_agent_run
         ])
-        .run(tauri::generate_context!()) {
+        .build(tauri::generate_context!()).map(|app| {
+            app.run(|handle, event| {
+                if let tauri::RunEvent::Exit = event {
+                    if let Some(service) = handle.try_state::<std::sync::Mutex<Option<bundled_ai::BundledAi>>>() {
+                        if let Ok(mut service) = service.lock() { service.take(); }
+                    }
+                }
+            });
+        }) {
             Ok(()) => {}
             Err(e) => {
                 write_startup_log(&data_dir, &format!("Tauri runtime exit error: {e}"));

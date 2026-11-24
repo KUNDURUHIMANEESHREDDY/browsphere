@@ -248,6 +248,14 @@
   }
 
   window.aetherBridge = {
+    searchMcpMarketplace: (query) => invoke('mcp_marketplace_search', {query}),
+    connectMcp: (url) => invoke('mcp_connect', {url}),
+    beginMcpOAuth: (resource,issuer,clientId,scope) => invoke('mcp_oauth_begin', {resource,issuer,clientId,scope}),
+    finishMcpOAuth: (id) => invoke('mcp_oauth_finish', {id}),
+    forgetMcpOAuth: (resource) => invoke('mcp_oauth_forget', {resource}),
+    disconnectMcp: (id) => invoke('mcp_disconnect', {id}),
+    setLuciaMcpTool: (id,server,name,enable) => invoke('mcp_set_lucia_tool', {id,server,name,enable,confirmed:true}),
+    callMcp: (id,name,argumentsValue) => invoke('mcp_call', {id,name,arguments:argumentsValue,confirmed:true}),
     isNative: hasTauri,
 
     async onNavigate(tabId, url, title) {

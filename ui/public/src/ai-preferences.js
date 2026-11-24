@@ -121,14 +121,34 @@
       : '<span class="mac-ai-quiet">' + esc(state.localModelsError || 'No models detected.') + '</span>';
     var local = section('Local Models', '',
       row('Ollama server', 'Local API address.', input('cfgOllamaUrl', cfg.ollama_url, 'http://127.0.0.1:11434', 'url')) +
+      row('Lucia supervisor model', 'Independent local model reviews stalled actions and proposes a recovery. Leave empty to disable. Existing approvals still apply.', input('cfgSupervisorModel', cfg.supervisor_model ?? 'lfm3:1.7b', 'lfm3:1.7b')) +
       row('Lucia writer model', 'Local content generation before browser typing; leave blank to disable.', input('cfgWriterModel', cfg.writer_model ?? 'qwen2.5:3b-instruct', 'qwen2.5:3b-instruct')) +
       row('Lucia vision model (Eyes)', 'Optional local visual perception on recovery. Leave empty to disable. Screenshots stay with local Ollama; visual hints are advisory.', input('cfgVisionModel', cfg.vision_model || '', 'lfm3-vl:2b')) +
+      row('Lucia local profiles', 'Test and activate an installed reasoning model. LFM3 pairs with local LFM3-VL when installed; Qwen remains selectable. Per-domain routing overrides still apply.',
+        '<div class="mac-ai-installed-controls">' +
+        '<button type="button" class="mac-ai-btn" data-action="use-local-lucia-profile" data-model="lfm3:1.7b">LFM3 + Eyes</button>' +
+        '<button type="button" class="mac-ai-btn" data-action="use-local-lucia-profile" data-model="qwen3.5:0.8b">Qwen 0.8B</button></div>') +
       row('Installed models', 'Select an installed model to use it.',
         '<div class="mac-ai-installed-controls">' + chips + btn('refresh-ai-models', 'Refresh') + '</div>') +
       row('Connection', 'Send a small prompt to Ollama.', btn('test-local-model', 'Test local connection')) +
       row('Lucia fallback', 'Use an installed local model when cloud free-model access is unavailable. This changes Lucia to Local, without removing your cloud provider settings.',
         models.length ? btn('use-local-lucia-fallback', 'Use local model for Lucia') :
           '<span class="mac-ai-quiet">Install or refresh an Ollama model first.</span>'));
+    var mcp = section('MCP Tools', 'Connect a trusted local or HTTPS MCP server. This manual connection requires confirmation for each tool call.',
+      row('MCP marketplace', 'Browse the official registry. Discovery only; review servers independently before configuring them.', input('cfgMcpSearch', '', 'Search server names') + btn('mcp-marketplace','Search registry')) +
+      row('Server endpoint', 'Use HTTPS remotely or literal loopback HTTP locally. Connect only to servers you trust.', input('cfgMcpUrl', '', 'http://127.0.0.1:8765/mcp', 'url')) +
+      row('OAuth issuer', 'Registered native public client; the issuer must be advertised by the remote server.', input('cfgMcpIssuer', '', 'https://auth.example.com', 'url')) +
+      row('OAuth client ID', 'Client must support loopback redirects and S256 PKCE.', input('cfgMcpClientId', '', 'Registered public client ID')) +
+      row('OAuth scope', 'Optional, request only the minimum necessary scope.', input('cfgMcpScope', '', 'Read-only scope')) +
+      row('Authorization', 'Start, open the reviewed URL in your browser, then finish. Tokens stay in Windows Credential Manager.',
+        btn('mcp-oauth-begin','Start authorization') + btn('mcp-oauth-copy','Copy authorization URL') + btn('mcp-oauth-finish','Finish authorization') + btn('mcp-oauth-forget','Forget authorization')) +
+      row('Connection', 'Discover the server tools, or disconnect.', btn('mcp-connect','Discover tools') + btn('mcp-disconnect','Disconnect')) +
+      row('Discovered tools', 'Select an exact tool. Server-provided annotations are not permission grants.', '<select id="cfgMcpTool" class="mac-ai-select" aria-label="MCP tool"><option value="">Connect first</option></select>') +
+      row('Lucia server name', 'Approve only a reviewed read-only tool for explicit mcp auto / mcp hybrid tasks.', input('cfgMcpAlias','','my-server')) +
+      row('Lucia permissions', 'Approval persists for this exact server and tool. Revoke removes it from future tasks.', btn('mcp-lucia-enable','Approve selected tool') + btn('mcp-lucia-revoke','Revoke selected tool')) +
+      row('Arguments', 'Review the JSON arguments before every call.', '<textarea id="cfgMcpArgs" class="mac-ai-input mac-ai-mono" rows="4">{}</textarea>') +
+      row('Run tool', 'Explicit confirmation required. Only connect to servers you trust.', btn('mcp-call','Review and call')) +
+      row('Result', '', '<pre id="cfgMcpResult" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto" aria-live="polite"></pre>'));
     var keyStatus = state.hasKey
       ? '<span class="mac-ai-security ready">● Key saved in Windows Credential Manager</span>'
       : '<span class="mac-ai-security empty">○ No API key saved for this endpoint</span>';
@@ -273,7 +293,7 @@
     return '<div class="mac-ai" id="macAiSettings">' +
       '<header class="mac-ai-intro"><h2>AI &amp; ML</h2>' +
       '<p>Configure the models Browsphere uses for local and cloud intelligence.</p></header>' +
-      awsConnection + primary + local + cloud + routing + diagnostic + localLogs +
+      awsConnection + primary + local + mcp + cloud + routing + diagnostic + localLogs +
       (window.LuciaDiagnosticsDashboard ? window.LuciaDiagnosticsDashboard.render() : '') + footer +
       '<details class="mac-aws-advanced"><summary>Advanced AWS service settings</summary>' +
       bedrock + s3 + ddb + cognito + lambda + awsSave + '</details></div>';

@@ -1,0 +1,11 @@
+{
+  "productName": "Browsphere Offline",
+  "identifier": "com.browsphere.offline",
+  "bundle": {
+    "windows": {
+      "nsis": {
+        "installerHooks": "./offline-installer-hooks.nsh"
+      }
+    }
+  }
+}

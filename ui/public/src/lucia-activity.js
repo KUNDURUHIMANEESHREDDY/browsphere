@@ -54,6 +54,7 @@
     const wasVerification = route.includes('verification:read_only');
     const wasDirectNavigation = route.includes('direct_navigation:trusted_user_goal');
     const wasMacro = route.includes('macro:');
+    const wasLoopGuard = route.includes('guard:repeated_action');
     let explanation = wasVerification ?
       'An independent read-only evidence check was requested.' :
       wasDirectNavigation ? 'The website came directly from the user request, then passed policy checks.' :
@@ -63,12 +64,13 @@
     if (action === 'click' && payload.action.is_submit) explanation += ' The action may submit a page form.';
     if (action === 'complete' && !wasVerification) explanation =
       'The specialist requested completion; independent verification is still required.';
+    if (wasLoopGuard) explanation = 'The loop guard stopped repeated actions without verified progress; the task is not complete.';
     const source = typeof payload.active_origin === 'string' && /^https?:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(payload.active_origin)
       ? payload.active_origin.slice(0, 130) : '';
     const model = route.match(/(?:litellm|groq|ollama|bedrock):([a-z0-9_./:-]{1,64})/i);
     const ms = Number.isInteger(payload.latency_ms) && payload.latency_ms >= 0 && payload.latency_ms < 1e8
       ? payload.latency_ms : null;
-    return { kind: 'action', label: actionNames[action], explanation,
+    return { kind: 'action', label: wasLoopGuard ? 'Stopped by loop guard' : actionNames[action], explanation,
       status: safeOutcome, outcomeLabel: outcomes[safeOutcome],
       step: safeIndex(payload.step_index), source,
       model: model ? model[1] : (wasVerification ? 'Independent verifier' : (wasDirectNavigation ? 'Direct navigation' : 'Browser agent')),
