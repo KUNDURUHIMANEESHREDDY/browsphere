@@ -17,11 +17,17 @@ pub struct ActionResult {
 }
 
 fn build_click_script(request_id: Uuid, node_id: &str) -> String {
+    build_click_script_at(request_id,node_id,None)
+}
+
+fn build_click_script_at(request_id:Uuid,node_id:&str,point:Option<&super::multimodal_perception::GroundedPoint>)->String{
     let id_json = serde_json::to_string(node_id).unwrap_or_else(|_| "\"\"".to_string());
+    let point_json=serde_json::to_string(&point).unwrap_or_else(|_|"null".into());
     format!(
         r#"(function() {{
   const REQUEST_ID = "{request_id}";
   const TARGET_ID = {id_json};
+  const VISUAL = {point_json};
 
   function postResult(success, detail) {{
     // The trusted host receives this value from WebView2 ExecuteScript.
@@ -78,16 +84,53 @@ fn build_click_script(request_id: Uuid, node_id: &str) -> String {
         || bounds.width < 2 || bounds.height < 2) {{
       return postResult(false, `Control ${{TARGET_ID}} is not currently visible`);
     }}
-    el.scrollIntoView({{ block: "center", inline: "nearest", behavior: "instant" }});
-    const rect = el.getBoundingClientRect();
-    const cx = Math.round(rect.left + rect.width / 2);
-    const cy = Math.round(rect.top + rect.height / 2);
+    let cx, cy;
+    if (VISUAL) {{
+      const v=VISUAL.viewport, b=VISUAL.bounds, p=VISUAL.point;
+      if (location.href!==v.origin || innerWidth!==v.width || innerHeight!==v.height ||
+          scrollX!==v.scroll_x || scrollY!==v.scroll_y || devicePixelRatio!==v.scale ||
+          Math.abs(bounds.left-b.x)>0.5 || Math.abs(bounds.top-b.y)>0.5 ||
+          Math.abs(bounds.width-b.width)>0.5 || Math.abs(bounds.height-b.height)>0.5 ||
+          submit || el.closest('form') || el.closest('[contenteditable=true]') ||
+          el.matches('input,textarea,select,iframe,canvas,[download]')) {{
+        return postResult(false,'Visual point stale or unsupported');
+      }}
+      cx=p.x*innerWidth/1000; cy=p.y*innerHeight/1000;
+      if (!(cx>=bounds.left && cx<bounds.right && cy>=bounds.top && cy<bounds.bottom)) {{
+        return postResult(false,'Visual point outside bound control');
+      }}
+      let hit=document.elementFromPoint(cx,cy);
+      while(hit && hit.shadowRoot && hit.shadowRoot.elementFromPoint) {{
+        const deeper=hit.shadowRoot.elementFromPoint(cx,cy);
+        if(!deeper || deeper===hit)break;
+        hit=deeper;
+      }}
+      // Reject occlusion and nested interactive controls. Only the already
+      // policy-bound control can receive this event, never an arbitrary hit.
+      let cursor=hit;
+      while(cursor && cursor!==el) {{
+        if(cursor.matches('a,button,input,select,textarea,iframe,canvas,[role],[contenteditable],[tabindex],[data-aether-id]')) {{
+          return postResult(false,'Visual point hits a different control');
+        }}
+        cursor=cursor.parentElement || cursor.getRootNode().host || null;
+      }}
+      if(cursor!==el)return postResult(false,'Visual point is occluded');
+    }} else {{
+      el.scrollIntoView({{ block: "center", inline: "nearest", behavior: "instant" }});
+      const rect = el.getBoundingClientRect();
+      cx = Math.round(rect.left + rect.width / 2);
+      cy = Math.round(rect.top + rect.height / 2);
+    }}
 
     const common = {{ bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 0 }};
     el.dispatchEvent(new PointerEvent("pointerdown", common));
     el.dispatchEvent(new MouseEvent("mousedown", common));
     el.dispatchEvent(new PointerEvent("pointerup", common));
     el.dispatchEvent(new MouseEvent("mouseup", common));
+    if (VISUAL) {{
+      el.dispatchEvent(new MouseEvent("click",common));
+      return postResult(true,"Visual coordinate click dispatched");
+    }}
     el.click();
 
     return postResult(true, `Clicked ${{el.tagName.toLowerCase()}} (${{TARGET_ID}})`);
@@ -96,7 +139,7 @@ fn build_click_script(request_id: Uuid, node_id: &str) -> String {
   }}
 }})();"#,
         request_id = request_id,
-        id_json = id_json
+        id_json = id_json, point_json = point_json
     )
 }
 
@@ -408,6 +451,15 @@ async fn eval_in_active_tab(
     }
 }
 
+/// Only for ordinary, already policy-approved, freshly bound clicks.
+pub async fn execute_visual_click(app:&tauri::AppHandle,label:&str,node_id:&str,point:&super::multimodal_perception::GroundedPoint)->ActionResult{
+    let script=build_click_script_at(Uuid::new_v4(),node_id,Some(point));
+    match crate::agent::native_eval::eval_json(app,label,script,1800).await {
+        Ok(value)=>serde_json::from_value(value).unwrap_or(ActionResult{success:false,detail:"No visual click acknowledgement".into()}),
+        Err(_)=>ActionResult{success:false,detail:"Visual click acknowledgement unavailable".into()}
+    }
+}
+
 /// Executes an approved `BrowserAction` directly against the `active-tab` child WebView2
 /// without stealing OS window focus.
 pub async fn execute_browser_action(
@@ -586,9 +638,13 @@ mod failure_recovery_execution_tests {
         let script = build_click_script(Uuid::new_v4(), "n_2");
         let guard = script.find("el.matches(\":disabled\")").expect("Disabled-control guard missing");
         let click = script.find("el.click();").expect("Click implementation missing");
-        let success = script.find("return postResult(true,").expect("Successful click result missing");
-        assert!(guard < click && click < success,
-            "Disabled controls must be rejected before executing and claiming a click succeeded");
+        let success = script.rfind("return postResult(true,").expect("Successful DOM click result missing");
+        let visual_click=script.find("el.dispatchEvent(new MouseEvent(\"click\",common))").expect("Visual click implementation missing");
+        let visual_success=script.find("return postResult(true,\"Visual coordinate click dispatched\")").expect("Successful visual click result missing");
+        let pointer_down=script.find("el.dispatchEvent(new PointerEvent(\"pointerdown\", common))").expect("Pointer dispatch missing");
+        assert!(guard < pointer_down && guard < click && click < success &&
+            guard < visual_click && visual_click < visual_success,
+            "Disabled controls must be rejected before either click branch dispatches events or reports success");
         assert!(script.contains("aria-disabled"));
     }
 }

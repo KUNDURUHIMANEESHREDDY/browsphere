@@ -13,7 +13,8 @@ pub fn read_only(goal:&str)->bool{
     let g=goal.split_whitespace().filter(|w|!w.starts_with("https://")&&!w.starts_with("http://"))
         .collect::<Vec<_>>().join(" ").to_lowercase();
     ["report","find ","search ","research","look up","read ","explain","compare","summarize"].iter().any(|s|g.contains(s))
-        && !["book ","buy ","pay ","purchase","register","sign up","submit","send ","publish","write ","draft ","upload","download","delete","change ","update ","play ","log in","sign in","account","password","credential","consent","reserve","transfer","checkout","my ","private"].iter().any(|s|g.contains(s))
+        && !super::browser_skills::phrase(&g,"book")
+        && !["buy ","pay ","purchase","register","sign up","submit","send ","publish","write ","draft ","upload","download","delete","change ","update ","play ","log in","sign in","account","password","credential","consent","reserve","transfer","checkout","my ","private"].iter().any(|s|g.contains(s))
 }
 /// Track explicit public source addresses in a bounded read-only comparison.
 /// This does not grant navigation permissions or authorize external actions.

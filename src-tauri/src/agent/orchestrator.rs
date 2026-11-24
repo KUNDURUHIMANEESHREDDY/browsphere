@@ -243,6 +243,8 @@ pub fn plan_task(goal: &str) -> TaskPlan {
         vec![Specialist::Browser]
     } else if super::execution_intelligence::current_reference_subject(goal).is_some(){
         vec![Specialist::Research]
+    } else if super::catalog_research::Intent::compile(goal).is_some(){
+        vec![Specialist::Research]
     } else if super::skills::TaskSpec::compile(goal).is_some(){
         vec![Specialist::Research]
     } else if !super::deliberation::explicit_research_sources(goal).is_empty(){

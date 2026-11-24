@@ -325,6 +325,9 @@
         listen('agent:verification_report', function (ev) {
           var payload = ev.payload || {};
           if (activeVoiceRunId && payload.run_id !== activeVoiceRunId) return;
+          if (payload.report?.status === 'partial_evidence') {
+            appendAgentBubble('Lucia ? Partial evidence (not completed)', esc(String(payload.report.summary || '').slice(0, 7000)));
+          }
           if (payload.report?.status === 'evidence_checked') {
             lastVerifiedSummary = String(payload.report.summary || '').slice(0, 7000);
             appendAgentBubble('Lucia · Sources checked',

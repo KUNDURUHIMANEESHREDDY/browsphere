@@ -47,7 +47,7 @@
   }
   const specialistLabels = Object.freeze({
     review: Object.freeze({reviewing:'Independent model assessing progress', observed:'Progress review received', unavailable:'Progress reviewer unavailable'}),
-    vision: Object.freeze({analyzing:'Analyzing visible page locally', observed:'Structured visual observation fused with browser state', stale:'Visual observation discarded after page change', grounded_action:'Action matched a grounded visual control', unavailable:'Local visual observation unavailable'}),
+    vision: Object.freeze({analyzing:'Analyzing visible page locally', observed:'Structured visual observation fused with browser state', stale:'Visual observation discarded after page change', grounded_action:'Action matched a grounded visual control', coordinate_click:'Dispatched grounded visual coordinate click', unavailable:'Local visual observation unavailable'}),
     supervisor: Object.freeze({reviewing:'Supervisor diagnosing a stalled action', proposed:'Supervisor proposed a recovery action', unavailable:'Supervisor unavailable'})
   });
   function specialist(kind,payload) {

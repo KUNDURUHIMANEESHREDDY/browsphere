@@ -35,9 +35,12 @@ pub struct DomNodeSummary {
 
 /// Bounded structural counts from the native visible DOM. No input values,
 /// HTML, hidden metadata, or page-supplied classification instructions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductObservation {pub heading:String,pub price:String,pub context:String}
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PageStructure {
+    pub product: Option<ProductObservation>,
     pub headings: u16,
     pub paragraphs: u16,
     pub code_blocks: u16,
@@ -196,6 +199,30 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     return text.slice(0, 120);
   }}
 
+  // A card can have separate image and text links to the same product.
+  // Use only a single rendered product heading from a bounded card that
+  // contains no competing product destinations. Do not read hidden metadata.
+  function productLinkLabel(el) {{
+    if(el.tagName!=="A"||el.closest('[aria-hidden="true"],[hidden],nav,header,footer,form'))return null;
+    const productPath=a=>{{
+      try {{
+        const u=new URL(a.href);
+        return u.origin===location.origin&&!u.username&&!u.password&&!u.search&&!u.hash&&
+          /(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(u.pathname)?u.pathname:null;
+      }}catch(_e){{return null;}}
+    }};
+    const target=productPath(el);if(!target)return null;
+    const cardSelector='article,li,[itemtype*="schema.org/Product"],[data-testid*="product-card"],[class*="product-card"],[class*="productCard"],[class*="product-tile"],[class*="product-item"]';
+    const titleSelector='h2,h3,h4,[role="heading"],[class*="product-title"],[class*="productTitle"],[class*="product-name"],[data-testid*="product-title"],[itemprop="name"]';
+    const card=el.closest(cardSelector);
+    if(!card||!isVisible(card)||card.closest('[aria-hidden="true"],[hidden]'))return null;
+    const links=Array.from(card.querySelectorAll('a[href]')).filter(a=>isVisible(a)&&!a.closest('[aria-hidden="true"],[hidden]'));
+    if(links.length>24||new Set(links.map(productPath).filter(Boolean)).size!==1)return null;
+    const headings=Array.from(card.querySelectorAll(titleSelector)).filter(h=>isVisible(h)&&!h.closest('[aria-hidden="true"],[hidden]'));
+    const labels=[...new Set(headings.map(h=>(h.innerText||"").replace(/\s+/g," ").trim()).filter(t=>t.length>=12&&t.length<=240))];
+    if(labels.length!==1)return null;
+    return labels[0].slice(0,200);
+  }}
   function isInteractive(el) {{
     // Disabled controls cannot be selected as actionable targets.
     if (el.matches(":disabled") || el.getAttribute("aria-disabled") === "true") return false;
@@ -293,10 +320,11 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
           node_id: nodeId,
           tag: current.tagName.toLowerCase(),
           role: (current.getAttribute("role") ||
-            (current.isContentEditable ? "textbox" :
+            (current.tagName==="INPUT" && current.matches('input[type="search"],input[name="search"],input[name="search_query"]') && !isSensitiveField(current) ? "searchbox" :
+            current.isContentEditable ? "textbox" :
             ((current.tagName === "INPUT" && ["checkbox", "radio"].includes(typeAttr))
               ? typeAttr : current.tagName))).toLowerCase(),
-          label: computeAccessibleName(current),
+          label: productLinkLabel(current) || computeAccessibleName(current),
           options: current.tagName === "SELECT"
             ? Array.from(current.options)
                 .filter(option => !option.disabled && !option.parentElement?.disabled)
@@ -332,7 +360,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
               }}
             }}
             if (current.tagName === "INPUT" && (current.readOnly || current.hasAttribute("readonly"))) return "read_only";
-            const selector = 'input[type="search"], input[role="searchbox"], input[name="search"], input[name="search_query"], input[aria-label*="Search"], input[placeholder*="Search"], textarea[role="searchbox"], textarea[name="search"], textarea[name="search_query"], textarea[aria-label*="Search"], textarea[placeholder*="Search"], textarea[name="q"]';
+            const selector = 'input[type="search"], input[role="searchbox"], input[name="search"], input[name="search_query"], input[aria-label*="search" i], input[placeholder*="search" i], textarea[role="searchbox"], textarea[name="search"], textarea[name="search_query"], textarea[aria-label*="Search"], textarea[placeholder*="Search"], textarea[name="q"]';
             // Public comboboxes and route fields may use textbox semantics.
             // Capture occupancy only, never arbitrary user-entered values.
             const publicRoute = current.tagName === "INPUT" &&
@@ -355,8 +383,14 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
             ? (() => {{
                 try {{
                   const address = new URL(current.href);
-                  if (!/^https?:$/.test(address.protocol)
-                      || address.origin !== location.origin) return null;
+                  if (!/^https?:$/.test(address.protocol)) return null;
+                  if(address.origin!==location.origin){{
+                    const search=location.origin==="https://www.google.com"&&location.pathname==="/search";
+                    const retailer=["www.croma.com","www.reliancedigital.in"].includes(address.hostname);
+                    const product=/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i;
+                    if(!search||!retailer||address.protocol!=="https:"||address.port||address.username||address.password||address.search||address.hash||!product.test(address.pathname)||!isVisible(current))return null;
+                    return address.origin+address.pathname.slice(0,480);
+                  }}
                   if (address.hostname === "www.youtube.com"
                       && address.pathname === "/watch") {{
                     const videoId = address.searchParams.get("v");
@@ -403,6 +437,41 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   for (const field of Array.from(document.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"], [role="searchbox"], [role="option"]')).slice(0, 60)) {{
     if (isVisible(field) && !isSensitiveField(field)) walk(field, true);
   }}
+  // Direct public retailer result anchors from the public search page. No
+  // tracking parameters, redirect unwrapping, or arbitrary cross-origin URLs.
+  if(location.origin==="https://www.google.com"&&location.pathname==="/search"){{
+    for(const a of Array.from(document.querySelectorAll('a[href]')).slice(0,1500)){{
+      if(nodes.length>=Math.min(MAX_NODES,70))break;
+      try{{const u=new URL(a.href);if(["www.croma.com","www.reliancedigital.in"].includes(u.hostname)&&u.protocol==="https:"&&!u.search&&!u.hash&&!u.username&&!u.password&&!u.port&&isVisible(a)&&/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(u.pathname))walk(a,true);}}catch(_e){{}}
+    }}
+  }}
+  // Reserve slots for product links before large filter panels, navigation
+  // menus or facets consume the node budget. Only rendered same-origin links;
+  // the product-path shape is a candidate hint, not proof of identity.
+  for(const link of Array.from(document.querySelectorAll('a[href]')).slice(0,2500)){{
+    if(nodes.length>=Math.min(MAX_NODES,85))break;
+    if(!isVisible(link)||link.closest('nav,header,footer,form,[aria-hidden="true"]'))continue;
+    try{{
+      const u=new URL(link.href);
+      if(u.origin!==location.origin||u.username||u.password||u.search||u.hash)continue;
+      if(!/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(u.pathname))continue;
+      walk(link,true);
+    }}catch(_e){{}}
+  }}
+  // Catalog filter lists can be hundreds of entries long. Keep a bounded
+  // sample of rendered processor/model facets before the generic traversal.
+  // This is observation only; native catalog intent must authorize a specific
+  // exact matching chip before changing a filter.
+  if(/(?:\/products|\/search(?:\/|$)|\/search-results)/i.test(location.pathname)||new URL(location.href).searchParams.has("q")){{
+    let chipFacets=0;
+    for(const field of Array.from(document.querySelectorAll('[role="checkbox"],input[type="checkbox"]')).slice(0,2200)){{
+      if(chipFacets>=20||nodes.length>=Math.min(MAX_NODES,105))break;
+      if(!isVisible(field)||isSensitiveField(field)||field.closest('nav,header,footer,[aria-hidden="true"]'))continue;
+      const label=computeAccessibleName(field).trim();
+      if(!/^(?:[A-Za-z]+\s+)?[A-Za-z]{{1,3}}\d{{1,3}}(?:\s+chip)?$/i.test(label))continue;
+      walk(field,true);chipFacets++;
+    }}
+  }}
   // Capture visible multiline editors before toolbar controls exhaust the budget.
   for (const editor of Array.from(document.querySelectorAll('textarea, [contenteditable="true"]')).slice(0, 24)) {{
     if (isVisible(editor) && !isSensitiveField(editor) && !editor.closest('form') &&
@@ -420,7 +489,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
       const label=computeAccessibleName(link).trim();
       const file=u.pathname.split('/').pop()||"";
       if(/^(?:readme(?:\.(?:md|rst|txt))?|pyproject\.toml|setup\.(?:py|cfg)|(?:install|installation)(?:\.(?:md|rst|html))?|docs|documentation)$/i.test(file)||
-        /^(?:current(?:\s*\(\d+(?:\.\d+)?\))?|(?:part\s+[ivxlcdm]+\.\s*)?sql language|(?:[ivxlcdm]+\.\s*)?sql commands|installation|getting started)$/i.test(label)){{
+        /^(?:current(?:\s*\(\d+(?:\.\d+)?\))?|(?:(?:part\s+)?[ivxlcdm]+\.\s*)?(?:the\s+)?sql language|(?:[ivxlcdm]+\.\s*)?sql commands|installation|getting started)$/i.test(label)){{
         walk(link,true);
       }}
     }}catch(_e){{}}
@@ -476,7 +545,41 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     prose = blocks.join(" ");
     if (prose.length < 180) prose = "";
   }}
-  const visibleText = (activeDialog ? ["Active dialog: " + (activeDialog.innerText || "")] : [prose, contentText, bodyText])
+  // Observe a primary product heading and its nearest bounded offer
+  // ancestor. Reject multiple distinct prices unless a single explicit
+  // selling-price node identifies the active offer.
+  const product = (() => {{
+    if(activeDialog)return null;
+    const eligible=el=>isVisible(el)&&!el.closest('nav,header,footer,aside,[aria-hidden="true"]');
+    let hs=Array.from(document.querySelectorAll('h1,[role="heading"][aria-level="1"]')).filter(eligible);
+    if(!hs.length&&/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(location.pathname)){{
+      hs=Array.from(document.querySelectorAll('[class*="product-title"],[class*="productTitle"],[class*="product-name"],[data-testid*="product-title"],[itemprop="name"]')).filter(eligible)
+        .filter(el=>!el.closest('a[href],[class*="product-card"],[class*="productCard"],[class*="product-tile"]'));
+    }}
+    // Nested same-text heading wrappers are a single observed title.
+    hs=hs.filter((h,i)=>!hs.some((x,j)=>j!==i&&h.contains(x)));
+    if(hs.length!==1)return null;
+    const h=hs[0],heading=(h.innerText||"").replace(/\s+/g," ").trim();
+    if(heading.length<20||heading.length>360)return null;
+    const re=/(?:\u20b9|Rs\.|INR)\s*\d[\d,]*(?:\.\d{{2}})?(?![\d.])/g;
+    for(let el=h.parentElement,depth=0;el&&el!==document.body&&depth<7;el=el.parentElement,depth++){{
+      const context=(el.innerText||"").replace(/\s+/g," ").trim();
+      if(context.length>1600||!context.includes(heading))break;
+      if(el.querySelectorAll('h1,h2,h3,[role="heading"]').length>5)break;
+      if(!/\b(?:buy now|add to cart|add to basket|mrp|inclusive of all taxes|selling price|offer price)\b/i.test(context)&&
+        !el.querySelector('[class*="product-price"],[class*="selling-price"],[data-testid*="price"],[itemprop="price"]'))continue;
+      const matches=Array.from(context.matchAll(re)).map(m=>m[0]);
+      if(!matches.length)continue;
+      const offers=Array.from(el.querySelectorAll('[class*="selling-price"],[class*="sale-price"],[class*="offer-price"],[class*="product-price"],[data-testid*="selling-price"],[itemprop="price"]')).filter(n=>isVisible(n)&&!n.closest('del,s,strike,[aria-hidden="true"]'));
+      const marked=offers.flatMap(n=>Array.from((n.innerText||"").replace(/\s+/g," ").trim().matchAll(re)).map(m=>m[0]));
+      const unique=[...new Set(marked)];
+      const all=[...new Set(matches)];
+      const price=unique.length===1?unique[0]:all.length===1&&!/\b(?:mrp|list price|was price)\b/i.test(context)?all[0]:null;
+      if(price&&context.includes(price))return {{heading,price,context}};
+    }}
+    return null;
+  }})();
+  const visibleText = (activeDialog ? ["Active dialog: " + (activeDialog.innerText || "")] : [product?.context, prose, contentText, bodyText])
     .filter(Boolean).join(" ")
     .replace(/\s+/g, " ")
     .trim()
@@ -511,6 +614,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     const offers=scoped('[itemprop="price"],[itemtype*="schema.org/Offer"],[class*="product-price"],[data-testid*="price"],[class*="selling-price"]');
     const offerBlocks=offers.filter(el=>pricePattern.test((el.innerText||"").trim().slice(0,180))).length;
     return {{
+      product,
       headings: counts('h1,h2,h3,h4,[role="heading"]'),
       paragraphs: scoped('p,dd').filter(el=>(el.innerText||"").trim().length>=35).length,
       code_blocks: counts('pre,[role="code"]'),

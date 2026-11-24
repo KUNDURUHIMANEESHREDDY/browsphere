@@ -5,9 +5,19 @@ use crate::router::model_router::RouterConfig;
 use super::multimodal_perception::{self as mm,Candidate,VisualObservation};
 /// Read only one screenshot from the dedicated tab. The caller must
 /// independently re-observe and validate the page before consuming output.
-pub async fn observe(config:&RouterConfig,app:&tauri::AppHandle,label:&str,goal:&str,candidates:&[Candidate])->Result<VisualObservation,String>{
+pub async fn observe(config:&RouterConfig,app:&tauri::AppHandle,label:&str,goal:&str,candidates:&[Candidate])->Result<(VisualObservation,mm::Viewport),String>{
+    let before=viewport(app,label).await?;
     let image=capture(app,label).await?;
-    infer(config,&image,goal,candidates).await
+    let after=viewport(app,label).await?;
+    if before!=after{return Err("Viewport changed during capture".into());}
+    Ok((infer(config,&image,goal,candidates).await?,before))
+}
+async fn viewport(app:&tauri::AppHandle,label:&str)->Result<mm::Viewport,String>{
+    let raw=crate::agent::native_eval::eval_json(app,label,
+        "({width:innerWidth,height:innerHeight,scroll_x:scrollX,scroll_y:scrollY,scale:devicePixelRatio,origin:location.href})".into(),1800).await?;
+    let v:mm::Viewport=serde_json::from_value(raw).map_err(|_|"Invalid screenshot viewport")?;
+    if !v.valid(){return Err("Invalid screenshot viewport".into());}
+    Ok(v)
 }
 pub async fn infer(config:&RouterConfig,image:&str,goal:&str,candidates:&[Candidate])->Result<VisualObservation,String>{
     let endpoint=url::Url::parse(&config.ollama_url).map_err(|_|"Invalid Ollama URL")?;
@@ -26,7 +36,7 @@ pub async fn infer(config:&RouterConfig,image:&str,goal:&str,candidates:&[Candid
             "model":config.vision_model,"stream":false,"think":false,"keep_alive":0,
             "format":mm::schema(candidates.len()),
             "messages":[{"role":"user","content":mm::prompt(goal,candidates),"images":[image]}],
-            "options":{"num_ctx":4096,"num_predict":260,"temperature":0}
+            "options":{"num_ctx":4096,"num_predict":380,"temperature":0}
         })).send().await.map_err(|_|"Local visual inference request failed")?
         .error_for_status().map_err(|_|"Local visual inference rejected")?.json().await.map_err(|_|"Invalid visual provider response")?;
     let answer=response["message"]["content"].as_str().ok_or("No structured visual observation")?;

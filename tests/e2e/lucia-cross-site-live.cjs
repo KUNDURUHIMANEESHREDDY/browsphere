@@ -55,7 +55,7 @@ async function main(){
   try{
     const revision=await evalJs("window.__TAURI__.core.invoke('lucia_runtime_revision')");
     console.log('LUCIA_RUNTIME_REVISION',revision);
-    if(revision!=='lucia-evidence-acquisition-v13')throw Error('Native runtime is not the expected objective-gate build');
+    if(revision!=='lucia-adaptive-catalog-orchestration-v13.7')throw Error('Native runtime is not the expected objective-gate build');
     const modelStatus=await fetch('http://127.0.0.1:11434/api/tags',{signal:AbortSignal.timeout(3000)})
       .then(r=>r.json()).catch(()=>({models:[]}));
     const localModel=process.env.LUCIA_TEST_LOCAL_MODEL?.trim() || 'qwen2.5:3b-instruct';
@@ -75,7 +75,7 @@ async function main(){
       ollama_url:'http://127.0.0.1:11434',ollama_model:localModel,vision_model:visionModel,planner_model:process.env.LUCIA_TEST_PLANNER_MODEL||'qwen2.5:3b-instruct',supervisor_model:process.env.LUCIA_TEST_SUPERVISOR_MODEL||'lfm3:1.7b',domain_overrides:{}
     };
     await evalJs("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');Object.assign(c,"+
-      JSON.stringify(overrides)+");await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__crossSiteEvents=[];for(const name of ['agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required','agent:stage','agent:vision','agent:prerequisite','agent:supervisor','agent:workflow_graph','agent:objective_state','agent:skill_state','agent:model_role','agent:execution_state','agent:requirement_state','agent:evidence_acquisition'])await window.__TAURI__.event.listen(name,e=>window.__crossSiteEvents.push({kind:name,payload:e.payload}));return true})()");
+      JSON.stringify(overrides)+");await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__crossSiteEvents=[];for(const name of ['agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required','agent:stage','agent:vision','agent:prerequisite','agent:supervisor','agent:workflow_graph','agent:objective_state','agent:skill_state','agent:model_role','agent:execution_state','agent:requirement_state','agent:evidence_acquisition','agent:catalog_state'])await window.__TAURI__.event.listen(name,e=>window.__crossSiteEvents.push({kind:name,payload:e.payload}));return true})()");
     async function nativeState(){
       // A newly created WebView2 may not have a loaded native snapshot yet.
       // Treat absence as pending, never as a verified page or a JS exception.
@@ -109,12 +109,13 @@ async function main(){
           decision:e.payload?.decision,
           modelRoute:e.payload?.model_route})),
         errors:mine.filter(e=>e.kind==='agent:run_error').map(e=>String(e.payload?.message||'').slice(0,150)),
+        catalogStates:mine.filter(e=>e.kind==='agent:catalog_state').map(e=>e.payload?.retailers),
         acquisitions:mine.filter(e=>e.kind==='agent:evidence_acquisition').map(e=>({status:e.payload?.status,attempt:e.payload?.attempt,missing:e.payload?.missing})),
         requirements:mine.filter(e=>e.kind==='agent:requirement_state').map(e=>e.payload?.ledger),
         executionStates:mine.filter(e=>e.kind==='agent:execution_state').map(e=>({phase:e.payload?.phase,strategy:e.payload?.strategy,world:e.payload?.world,page:e.payload?.page})),
         modelRoles:mine.filter(e=>e.kind==='agent:model_role').map(e=>({role:e.payload?.role,model:e.payload?.model,status:e.payload?.status})),
         vision:mine.filter(e=>e.kind==='agent:vision').map(e=>e.payload?.status),
-        visionDetails:mine.filter(e=>e.kind==='agent:vision').map(e=>({status:e.payload?.status,reason:e.payload?.reason,fusion:e.payload?.fusion,matchedControl:e.payload?.matched_control})),prerequisites:mine.filter(e=>e.kind==='agent:prerequisite').map(e=>({phase:e.payload?.phase,specialist:e.payload?.specialist,dialog:e.payload?.active_dialog})),
+        visionDetails:mine.filter(e=>e.kind==='agent:vision').map(e=>({status:e.payload?.status,reason:e.payload?.reason,fusion:e.payload?.fusion,groundedPoints:e.payload?.grounded_points,matchedControl:e.payload?.matched_control})),prerequisites:mine.filter(e=>e.kind==='agent:prerequisite').map(e=>({phase:e.payload?.phase,specialist:e.payload?.specialist,dialog:e.payload?.active_dialog})),
         skills:mine.filter(e=>e.kind==='agent:skill_state').map(e=>({phase:e.payload?.phase,diagnosis:e.payload?.diagnosis,strategy:e.payload?.recovery_strategy})),
         objectives:mine.filter(e=>e.kind==='agent:objective_state').map(e=>({revision:e.payload?.revision,required:e.payload?.required_sources,observed:e.payload?.observed_sources})),
         graph:mine.filter(e=>e.kind==='agent:workflow_graph').at(-1)?.payload?.graph||null,
@@ -157,6 +158,24 @@ async function main(){
           goal:'On this website, search for the planet Saturn and open the corresponding article. Report its position from the Sun.',
           path:'/wiki/Saturn',fact:/sixth|6th/i,extra:/sun/i,requiresSearch:true},
       };
+      // Coordinate-specific external cases: ordinary public documentation only.
+      if(key==='vision-real-example'){
+        const start='https://example.com/';
+        await evalJs('window.browsphereApp.newTab('+JSON.stringify(start)+')');
+        let before;
+        for(let i=0;i<45;i++){before=await nativeState().catch(()=>null);if(before?.controls>0&&hostname(before.observed)==='example.com')break;await sleep(400);}
+        if(!before?.controls||hostname(before.observed)!=='example.com'){
+          console.log('VISION_REAL_RESULT',JSON.stringify({pass:false,blocked:true,reason:'Starting page unavailable',before}));process.exitCode=1;return;
+        }
+        const task=await runTask('Find more information about example domains using the link on this page. Report the title of the page you reach.',before.observed,100);
+        const after=await nativeState().catch(()=>null);
+        const checks={terminal:task.status==='completed',verified:task.verified,noApproval:!task.approvalRequired,
+          exactDestination:hostname(after?.observed)==='www.iana.org'&&new URL(after.observed).pathname.replace(/\/$/,'')==='/help/example-domains',
+          coordinateDispatch:task.vision.includes('coordinate_click'),
+          actionTrace:task.actions.some(a=>a.type==='click'&&a.modelRoute?.includes('vision:coordinate_click')&&['ok','confirmed'].includes(a.outcome))};
+        const pass=Object.values(checks).every(Boolean);
+        console.log('VISION_REAL_RESULT',JSON.stringify({pass,checks,before,after,task}));if(!pass)process.exitCode=1;return;
+      }
       const c=cases[key];
       if(c){
         try{
@@ -173,6 +192,10 @@ async function main(){
           const findings=task.report?.findings||[];
           const checks={terminal:task.status==='completed',verified:task.verified,noApproval:!task.approvalRequired,exactDestination:exact};
           if(c.title){checks.title=c.title.test(after?.title||'');checks.actionObserved=acts.length>0;}
+          if(key==='nav-python'&&process.env.LUCIA_REQUIRE_COORDINATE==='1'){
+            checks.coordinateDispatch=task.vision.includes('coordinate_click');
+            checks.coordinateTrace=acts.some(a=>a.type==='click'&&a.modelRoute?.includes('vision:coordinate_click'));
+          }
           if(c.fact){
             checks.fact=!!findings.some(f=>{try{return hostname(f.url)===hostname(c.start)&&new URL(f.url).pathname===c.path&&c.fact.test(f.quote||'')&&c.extra.test(f.quote||'')&&c.fact.test(f.claim||'')&&c.extra.test(f.claim||'')}catch{return false}});
           }
@@ -294,7 +317,45 @@ async function main(){
       if(!before?.controls||hostname(before.observed)!==hostname(c.start)||/access denied|not found|privacy error/i.test(before.title||'')){
         console.log('LEVEL_RESULT',JSON.stringify({level,pass:false,blocked:true,before,reason:'Starting website unavailable'}));process.exitCode=1;return;
       }
+      // Public catalog diagnostics from the isolated native browser only.
+      // Do not log arbitrary input values or account/session data.
+      // Opt-in inspection of public rendered controls in the disposable WebView.
+      // Never access input values, cookies, storage, hidden records or APIs.
+      async function rawCatalogProbe(){
+        const pages=await targets();
+        const page=pages.find(t=>t.type==='page'&&['www.croma.com','www.reliancedigital.in'].includes(hostname(t.url)));
+        if(!page)return null;
+        const ws=new WebSocket(page.webSocketDebuggerUrl);
+        try{
+          await new Promise((ok,no)=>{ws.onopen=ok;ws.onerror=no;});
+          const fn=()=>{
+            const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>1&&r.height>1&&s.visibility==='visible'&&s.display!=='none'&&s.opacity!=='0'&&!e.closest('[aria-hidden=true],[hidden]')};
+            const text=e=>(e.innerText||'').replace(/\s+/g,' ').trim().slice(0,170);
+            const fields=Array.from(document.querySelectorAll('input,textarea,[contenteditable=true],[role=searchbox],[role=combobox]')).filter(visible).slice(0,25).map(e=>({tag:e.tagName,role:e.getAttribute('role'),type:e.getAttribute('type'),name:e.getAttribute('name'),id:e.id,placeholder:e.getAttribute('placeholder'),aria:e.getAttribute('aria-label'),parentRole:e.parentElement?.getAttribute('role'),parentLabel:e.closest('[role=combobox],[role=search]')?.getAttribute('aria-label'),readonly:!!e.readOnly,disabled:!!e.disabled}));
+            const products=Array.from(document.querySelectorAll('a[href]')).filter(e=>visible(e)&&/macbook/i.test(e.href+' '+text(e))).slice(0,20).map(e=>({url:e.origin+e.pathname,label:text(e),alt:e.querySelector('img')?.alt}));
+            const names=Array.from(document.querySelectorAll('h1,h2,h3,h4,p,span,div')).filter(e=>e.childElementCount<3&&visible(e)&&/macbook air/i.test(text(e))).slice(0,15).map(e=>({tag:e.tagName,label:text(e),className:String(e.className||'').slice(0,120),ancestor:e.closest('a[href]')?.pathname||null}));
+            const txt=(document.body?.innerText||'').replace(/\s+/g,' ');
+            return {url:location.origin+location.pathname,title:document.title,fields,products,names,resultHints:txt.match(/.{0,40}(?:no results|no products|products found|results for|search results|showing \d+).{0,80}/gi)?.slice(0,5)||[],bodyLength:txt.length};
+          };
+          const r=await Promise.race([new Promise((ok,no)=>{ws.onmessage=e=>{let m=JSON.parse(e.data);if(m.id===1)ok(m.result?.result?.value||null);};ws.send(JSON.stringify({id:1,method:'Runtime.evaluate',params:{expression:'('+fn.toString()+')()',returnByValue:true}}));}),sleep(2500).then(()=>null)]);
+          return r;
+        }finally{ws.close();}
+      }
+      const probes=[];
+      let observing=true;
+      const probe=(async()=>{
+        while(observing&&level===4){
+          const snap=await evalJs("(async()=>{const s=await window.__TAURI__.core.invoke('capture_live_snapshot');return {url:s?.origin,title:s?.title,text:(s?.text_excerpt||'').slice(0,9000),nodes:(s?.interactive_nodes||[]).filter(n=>!n.is_sensitive&&(/search|macbook|apple|laptop/i.test(n.label||'')||/macbook|apple/i.test(n.href||''))).slice(0,45).map(n=>({label:n.label,tag:n.tag,role:n.role,href:n.href,search:n.search_state,submit:n.is_submit,viewport:n.bbox?.in_viewport})),structure:s?.structure}})()").catch(()=>null);
+          if(snap?.url){
+            if(process.env.LUCIA_CATALOG_RAW_PROBE==='1')snap.raw=await rawCatalogProbe().catch(()=>null);
+            if(!probes.length||JSON.stringify(probes.at(-1))!==JSON.stringify(snap))probes.push(snap);
+          }
+          await sleep(900);
+        }
+      })();
       const task=await runTask(c.goal,before.observed,100);
+      observing=false;await probe;
+      if(level===4)console.log('CATALOG_PROBES',JSON.stringify(probes.slice(0,28)));
       const after=await nativeState().catch(()=>null);
       const findings=task.report?.findings||[];
       const checks=c.verify(findings,task,after);
@@ -618,15 +679,12 @@ async function main(){
       const task=await runTask(goal,url,150);
       const after=await nativeState();
       const evidence=await evalJs("(async()=>{const s=await window.__TAURI__.core.invoke('capture_live_snapshot');return {excerpt:(s?.text_excerpt||'').slice(0,3500),controls:(s?.interactive_nodes||[]).filter(n=>/from|to station|journey|search|date|train|availability/i.test(n.label||'')).slice(0,12).map(n=>({label:n.label,role:n.role,tag:n.tag}))}})()");
-      const hasTrainList=/train list|trains found|train number|check availability|no trains found|no train found/i.test(evidence.excerpt);
-      const routeMatches=/bengaluru|bangalore|sbc|smvt|ypr/i.test(evidence.excerpt)&&/delhi|ndls|nzm/i.test(evidence.excerpt);
-      const journey=new Date(date+'T00:00:00Z');
-      if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||Number.isNaN(journey.getTime())||journey.toISOString().slice(0,10)!==date)throw Error('Invalid train benchmark date');
-      const [year,month,day]=date.split('-');
-      const monthName=journey.toLocaleString('en-US',{month:'short',timeZone:'UTC'});
-      const dateMatches=evidence.excerpt.includes(date)||new RegExp('(?:^|\\D)0?'+Number(day)+'[\\s/.-]+(?:'+monthName+'|0?'+Number(month)+')([\\s/.-]+'+year+')?(?:\\D|$)','i').test(evidence.excerpt);
-      const passed=task.status==='completed'&&task.verified&&hasTrainList&&routeMatches&&dateMatches&&task.actions.some(a=>(a.modelRoute||'').includes('ollama:'+localModel));
-      console.log('TRAIN_RESULT',JSON.stringify({passed,task,before,after,evidence,checks:{hasTrainList,routeMatches,dateMatches}}));
+      // Independent schedule/card parser checks complete records and the
+      // report's exact source evidence. No runtime classifier is the oracle.
+      const checks=require('./train-result-oracle.cjs').evaluateTrainResults(evidence.excerpt,task.report,date,'Bengaluru','New Delhi',18*60);
+      checks.readOnly=!task.approvalRequired&&task.actions.every(a=>!['download','set_checked'].includes(a.type));
+      const passed=task.status==='completed'&&task.verified&&Object.values(checks).every(Boolean)&&task.actions.some(a=>(a.modelRoute||'').includes('ollama:'+localModel));
+      console.log('TRAIN_RESULT',JSON.stringify({passed,task,before,after,evidence,checks}));
       if(!passed)process.exitCode=1;
       return;
     }

@@ -178,12 +178,18 @@ fn contrast_terms(goal:&str)->Option<(String,String)>{
     if valid(a)&&valid(b){Some((normalized(a),normalized(b)))}else{None}
 }
 pub fn facet_supported(goal:&str,facet:&str,text:&str)->bool{facet_score(goal,facet,text)>0}
+/// Canonicalize typography only for lexical analysis; citation strings
+/// and exact source checks keep their original punctuation.
+fn semantic_text(text:&str)->String{
+    normalized(text).replace(['\u{2018}','\u{2019}','\u{02bc}'],"'")
+        .replace(['\u{2010}','\u{2011}','\u{2013}','\u{2014}'],"-")
+}
 fn direct_usage_warning(text:&str)->bool{
-    let t=normalized(text);
+    let t=semantic_text(text);
     ["do not","don't","must not","should not","avoid","not recommended","make sure","be careful","warning"].iter().any(|m|t.contains(m))
 }
 fn facet_score(goal:&str,facet:&str,text:&str)->i32{
-    let t=normalized(text);
+    let t=semantic_text(text);
     if matches!(facet,"contrast_left"|"contrast_right"){
         let Some((a,b))=contrast_terms(goal)else{return 0};
         let term=if facet=="contrast_left"{a}else{b};
@@ -220,7 +226,10 @@ fn facet_score(goal:&str,facet:&str,text:&str)->i32{
         let lifecycle=["connection pool","connection pooling","session per request","session per application","reuse","close the","close()","context manager","hot loop","streaming response","raise_for_status","timeout","exception"];
         let terms=if facet=="feature"{&operation[..]}else{&lifecycle[..]};
         let relevance=terms.iter().filter(|m|t.contains(**m)).count() as i32;
-        let operational=if facet=="feature"{["returns","makes","supports","allows","provides","use","create","send","perform","get","request"].iter().any(|m|t.contains(m))}else{count>0||t.contains("raises")||t.contains("exception")};
+        let operational=if facet=="feature"{["returns","makes","supports","allows","provides","use","create","send","perform","get","request"].iter().any(|m|t.contains(m))}else{
+            let restriction=["do not","don't","must not","should not","avoid","cannot","not recommended","not support","not possible","must ","need to","should ","make sure","otherwise","unless","no timeout","not time out","raises","raised","exception","by default"];
+            restriction.iter().any(|m|t.contains(m))
+        };
         if relevance==0||!operational{return 0;}
         // Prefer usage/lifecycle restrictions over incidental default values
         // when the goal explicitly requests usage caveats.
@@ -236,6 +245,28 @@ fn facet_score(goal:&str,facet:&str,text:&str)->i32{
     }
     count
 }
+fn quality_tier(goal:&str,facet:&str,text:&str)->u8{
+    let t=semantic_text(text);
+    if facet_score(goal,facet,text)==0{return 0;}
+    if normalized(goal).contains("http client librar"){
+        if facet=="caveat"{
+            let lifecycle=["connection pool","session per request","session per application","reuse","close the","close()","context manager","hot loop","streaming response"];
+            let concrete=lifecycle.iter().any(|m|t.contains(m));
+            let actionable=direct_usage_warning(text)||["need to","must ","should ","not time out","cannot","raises","raised","not support","unless","otherwise"].iter().any(|m|t.contains(m));
+            if concrete&&actionable{return 3;}
+            if actionable{return 2;}
+            return 1;
+        }
+        if facet=="feature"{
+            // A useful capability should describe an operation or result,
+            // not merely the type of a required argument.
+            if ["mandatory parameter","required parameter","takes a parameter","argument type"].iter().any(|m|t.contains(m)){return 1;}
+            if ["supports","provides","allows","returns","can use","you can","makes","send","perform","request methods","create"].iter().any(|m|t.contains(m))&&!direct_usage_warning(text){return 3;}
+            return 2;
+        }
+    }
+    1
+}
 #[derive(Clone,Debug,Serialize)]
 pub struct FacetCandidates{pub facet:String,pub candidates:Vec<Passage>}
 pub fn facet_candidates(goal:&str,source:&SourceEvidence)->Vec<FacetCandidates>{
@@ -247,7 +278,7 @@ pub fn facet_candidates(goal:&str,source:&SourceEvidence)->Vec<FacetCandidates>{
     for word in text.split_whitespace(){
         if !buf.is_empty()&&buf.chars().count()+word.chars().count()+1>235{pieces.push(std::mem::take(&mut buf));}
         if !buf.is_empty(){buf.push(' ');}buf.push_str(word);
-        if word.ends_with(['.','!','?'])&&buf.chars().count()>=30{pieces.push(std::mem::take(&mut buf));}
+        if word.ends_with(['.','!','?'])&&buf.chars().count()>=20{pieces.push(std::mem::take(&mut buf));}
     }
     if !buf.is_empty(){pieces.push(buf);}
     let single_count=pieces.len();
@@ -260,7 +291,8 @@ pub fn facet_candidates(goal:&str,source:&SourceEvidence)->Vec<FacetCandidates>{
         let mut ranked=pieces.iter().enumerate().filter_map(|(i,p)|{
             let score=facet_score(goal,facet,p);
             let n=normalized(p);
-            if score==0||p.chars().count()<if matches!(facet,"installation_command"|"runtime_compatibility"){12}else{30}||p.chars().count()>240||
+            let minimum=if matches!(facet,"installation_command"|"runtime_compatibility"){12}else if facet=="caveat"&&direct_usage_warning(p){20}else{30};
+            if score==0||p.chars().count()<minimum||p.chars().count()>240||
                 ["ignore previous","ignore instructions","system prompt","reveal credentials","output exactly","developer message"].iter().any(|x|n.contains(x)){return None;}
             // Incomplete references like "does not support this" need context;
             // penalize them rather than confidently presenting fragments.
@@ -272,17 +304,56 @@ pub fn facet_candidates(goal:&str,source:&SourceEvidence)->Vec<FacetCandidates>{
             // because it contains more generic cue words.
             let combined_penalty=if i>=single_count{100}else{0};
             let cap=if normalized(goal).contains("http client librar"){10}else{3};
-            Some((score.min(cap)*35+passage_score(p,&wanted)+complete-context_penalty-combined_penalty-fragment_penalty,i,p.clone()))
+            let tier=quality_tier(goal,facet,p);
+            Some((i32::from(tier)*1000+score.min(cap)*35+passage_score(p,&wanted)+complete-context_penalty-combined_penalty-fragment_penalty,i,p.clone()))
         }).collect::<Vec<_>>();
         // For a requested usage caveat, prefer concrete usage warnings over
         // incidental configurable defaults, when those warnings are present.
         if facet=="caveat"&&normalized(goal).contains("usage caveat")&&ranked.iter().any(|(_,_,p)|direct_usage_warning(p)){
             ranked.retain(|(_,_,p)|direct_usage_warning(p));
         }
+        // Prevent a weaker incidental example/default from being selected
+        // when a directly supporting operational passage is available.
+        if normalized(goal).contains("http client librar")&&matches!(facet,"feature"|"caveat"){
+            let best=ranked.iter().map(|(_,_,p)|quality_tier(goal,facet,p)).max().unwrap_or(0);
+            ranked.retain(|(_,_,p)|quality_tier(goal,facet,p)==best);
+        }
         ranked.sort_by(|a,b|b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         let mut seen=HashSet::new();ranked.retain(|(_,_,p)|seen.insert(normalized(p)));ranked.truncate(7);
         FacetCandidates{facet:facet.into(),candidates:ranked.into_iter().enumerate().map(|(i,(_,_,text))|Passage{id:format!("{facet}_{}",i+1),text}).collect()}
     }).collect()
+}
+fn valid_facet_choice(goal:&str,source:&SourceEvidence,set:&FacetCandidates,p:&Passage)->bool{
+    if !facet_supported(goal,&set.facet,&p.text)||!super::browser_skills::verification::quote_present(source,&p.text){return false;}
+    let best=facet_candidates(goal,source).into_iter().find(|s|s.facet==set.facet)
+        .and_then(|s|s.candidates.iter().map(|p|quality_tier(goal,&set.facet,&p.text)).max()).unwrap_or(0);
+    quality_tier(goal,&set.facet,&p.text)>=best
+}
+/// A retry is targeted at missing, invalid or conflicting dimensions. Keep
+/// accepted independent candidates; use different retained source passages
+/// for unresolved dimensions instead of reissuing the identical request.
+pub fn retry_facets(goal:&str,source:&SourceEvidence,sets:&[FacetCandidates],raw:Option<&str>)->Vec<FacetCandidates>{
+    let choices=raw.and_then(|s|serde_json::from_str::<std::collections::BTreeMap<String,String>>(s).ok()).unwrap_or_default();
+    let mut used=HashSet::<String>::new();
+    let mut out=Vec::new();
+    for set in sets{
+        let chosen=choices.get(&set.facet).and_then(|id|set.candidates.iter().find(|p|&p.id==id));
+        let accepted=chosen.filter(|p|valid_facet_choice(goal,source,set,p)&&used.insert(normalized(&p.text)));
+        if let Some(p)=accepted{
+            out.push(FacetCandidates{facet:set.facet.clone(),candidates:vec![p.clone()]});
+            continue;
+        }
+        let mut alternatives=set.candidates.iter().filter(|p|valid_facet_choice(goal,source,set,p)&&!used.contains(&normalized(&p.text))).cloned().collect::<Vec<_>>();
+        if let Some(p)=chosen{
+            if alternatives.len()>1{alternatives.retain(|a|a.id!=p.id);}
+        }else if alternatives.len()>1{
+            // The reviewer failed to identify support in the first set.
+            // Reorder the alternatives to expose a different first passage.
+            alternatives.rotate_left(1);
+        }
+        out.push(FacetCandidates{facet:set.facet.clone(),candidates:alternatives});
+    }
+    out
 }
 pub fn facet_findings(goal:&str,source:&SourceEvidence,sets:&[FacetCandidates],raw:&str)->Result<Vec<GroundedFinding>,String>{
     let choices:std::collections::BTreeMap<String,String>=serde_json::from_str(raw).map_err(|_|"Invalid fact-dimension evidence selection")?;
@@ -293,8 +364,8 @@ pub fn facet_findings(goal:&str,source:&SourceEvidence,sets:&[FacetCandidates],r
         let set=sets.iter().find(|s|s.facet==facet).ok_or("Missing required fact dimension")?;
         let id=choices.get(facet).ok_or("Missing required fact dimension")?;
         let p=set.candidates.iter().find(|p|&p.id==id).ok_or_else(||format!("Insufficient {facet} evidence on the requested source"))?;
-        if facet_score(goal,facet,&p.text)==0||!normalized(&source.excerpt).contains(&normalized(&p.text)){
-            return Err(format!("Selected {facet} evidence is not grounded in the observed source"));
+        if !valid_facet_choice(goal,source,set,p){
+            return Err(format!("Selected {facet} evidence is weak or not grounded in the observed source"));
         }
         if !seen.insert(normalized(&p.text)){return Err("Distinct requested dimensions require distinct supporting passages".into());}
         out.push(GroundedFinding{claim:p.text.clone(),quote:p.text.clone(),url:source.url.clone()});
@@ -361,7 +432,9 @@ pub fn assemble_extractive_comparison(goal:&str,sources:&[SourceEvidence],findin
     if !facets.is_empty(){
         for source in comparison_sources(goal,sources){
             for facet in &facets{
-                if !report.findings.iter().any(|f|web_url(&f.url)==web_url(&source.url)&&facet_score(goal,facet,&f.quote)>0){
+                let sets=facet_candidates(goal,&source);
+                let set=sets.iter().find(|s|s.facet==*facet).ok_or("Missing source requirement")?;
+                if !report.findings.iter().any(|f|web_url(&f.url)==web_url(&source.url)&&valid_facet_choice(goal,&source,set,&Passage{id:String::new(),text:f.quote.clone()})){
                     return Err(format!("Required {facet} evidence is missing from {}",source.url));
                 }
             }
@@ -1129,6 +1202,45 @@ mod extractive_comparison_tests{
         let sets=facet_candidates(g,&s);
         let warnings=&sets.iter().find(|s|s.facet=="caveat").unwrap().candidates;
         assert!(!warnings.is_empty());assert!(warnings.iter().all(|p|direct_usage_warning(&p.text)));
+    }
+    #[test]
+    fn typographic_warning_beats_incidental_default_and_preserves_exact_quote(){
+        let g="Compare HTTP client libraries. Explain a useful feature and one limitation or usage caveat for each.";
+        let s=SourceEvidence{url:"https://example.org/docs".into(),title:"Client documentation".into(),
+            excerpt:"The client provides a ClientSession for sending HTTP requests. Don\u{2019}t create a session per request. Most likely you need a session per application which performs all requests together. A session contains a connection pool inside. By default the total timeout is 300 seconds.".into()};
+        let sets=facet_candidates(g,&s);
+        let warnings=&sets.iter().find(|s|s.facet=="caveat").unwrap().candidates;
+        assert!(warnings.iter().any(|p|p.text.contains("Don\u{2019}t create a session per request.")));
+        assert!(warnings.iter().all(|p|quality_tier(g,"caveat",&p.text)==3));
+        assert!(warnings.iter().all(|p|s.excerpt.contains(&p.text)));
+        let weak=FacetCandidates{facet:"caveat".into(),candidates:vec![Passage{id:"weak".into(),text:"By default the total timeout is 300 seconds.".into()}]};
+        assert!(!valid_facet_choice(g,&s,&weak,&weak.candidates[0]));
+        let f=&sets.iter().find(|s|s.facet=="feature").unwrap().candidates[0];
+        assert!(facet_findings(g,&s,&sets,&serde_json::json!({"feature":f.id,"caveat":warnings[0].id}).to_string()).is_ok());
+    }
+    #[test]
+    fn alternate_review_retains_valid_dimension_and_reorders_missing_candidates(){
+        let g="Compare HTTP client libraries. Explain a useful feature and one usage caveat for each.";
+        let s=SourceEvidence{url:"https://example.org/docs".into(),title:"Client documentation".into(),
+            excerpt:"The client provides a ClientSession for sending HTTP requests. Do not create a session per request. Avoid closing the connection pool before the HTTP requests finish. Make sure you close the session after all operations have completed.".into()};
+        let sets=facet_candidates(g,&s);
+        let feature=&sets[0].candidates[0];assert!(sets[1].candidates.len()>1);
+        let raw=serde_json::json!({"feature":feature.id,"caveat":"missing"}).to_string();
+        assert!(facet_findings(g,&s,&sets,&raw).is_err());
+        let alternate=retry_facets(g,&s,&sets,Some(&raw));
+        assert_eq!(alternate[0].candidates.len(),1);
+        assert_eq!(alternate[0].candidates[0].id,feature.id);
+        assert_ne!(alternate[1].candidates[0].id,sets[1].candidates[0].id);
+        assert!(facet_findings(g,&s,&alternate,&serde_json::json!({"feature":feature.id,"caveat":alternate[1].candidates[0].id}).to_string()).is_ok());
+    }
+    #[test]
+    fn default_only_remains_valid_when_no_stronger_warning_exists(){
+        let g="Compare HTTP client libraries. Explain one feature and one usage caveat for each.";
+        let s=SourceEvidence{url:"https://example.org/docs".into(),title:"Client documentation".into(),
+            excerpt:"The client provides a ClientSession for sending HTTP requests. By default the total timeout is 300 seconds.".into()};
+        let sets=facet_candidates(g,&s);
+        assert!(!sets[1].candidates.is_empty());
+        assert!(valid_facet_choice(g,&s,&sets[1],&sets[1].candidates[0]));
     }
     #[test]
     fn requested_dimensions_require_separate_observed_evidence(){

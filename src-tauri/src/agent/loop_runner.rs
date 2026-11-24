@@ -282,9 +282,10 @@ fn trusted_named_search_query_input(
         && (node.role.eq_ignore_ascii_case("searchbox")
             || node.label.to_ascii_lowercase().contains("search"))
     ).collect();
-    if candidates.len() != 1 { return None; }
+    let visible:Vec<_>=candidates.iter().copied().filter(|n|n.bbox.as_ref().is_some_and(|b|b.in_viewport)).collect();
+    let selected=if visible.len()==1{visible[0]}else if candidates.len()==1{candidates[0]}else{return None;};
     Some(BrowserAction::TypeText {
-        node_id: candidates[0].node_id.clone(),
+        node_id: selected.node_id.clone(),
         text: subject, is_sensitive: false,
     })
 }
@@ -1107,6 +1108,7 @@ pub async fn run_react_loop(
     let mut skill=crate::agent::skills::SkillRun::compile(&goal);
     let mut requirements=crate::agent::requirements::Ledger::compile(&goal);
     let mut acquisition=crate::agent::evidence_acquisition::Acquisition::default();
+    let mut catalog=crate::agent::catalog_research::Run::new(&goal);
     let mut recorded_steps: Vec<BrowserAction> = Vec::new();
     let mut confirmed_named_search_navigation = false;
     let mut named_link_destination: Option<String> = None;
@@ -1167,6 +1169,7 @@ pub async fn run_react_loop(
         || crate::agent::prerequisites::route_values(&goal).is_some()
         || crate::agent::prerequisites::filter_constraints(&goal).is_some()
         || objectives.active()
+        || catalog.is_some()
         || skill.is_some()
     {
         plan_task(&goal)
@@ -1328,7 +1331,11 @@ pub async fn run_react_loop(
     // Phase 2: Live Policy-Gated ReAct Loop (runs on cache miss or DOM drift fallback)
     let mut final_status = "max_steps".to_string();
 
-    for step in next_step_index..max_steps.max(orchestrator.plan.stages.len() as u32 * 4) {
+    // Catalog observations include bounded settling steps for two public
+    // sites. Preserve the caller's action policy; only increase this read-only
+    // observation budget for the explicitly compiled catalog contract.
+    let step_budget=if catalog.is_some(){max_steps.max(136)}else{max_steps};
+    for step in next_step_index..step_budget.max(orchestrator.plan.stages.len() as u32 * 4) {
         if cancel.is_cancelled() {
             final_status = "cancelled".to_string();
             break;
@@ -1466,7 +1473,7 @@ pub async fn run_react_loop(
             && requested_navigation_url(&goal).is_none()
             && orchestrator.specialist() != Specialist::Verification;
         let mut recovery_directive = if auth_recovery_attempts > 0 { crate::agent::recovery::FOLLOWUP_HINT } else { "" };
-        if authentication_blocked {
+        if authentication_blocked&&catalog.is_none() {
             if !crate::agent::recovery::alternatives_authorized(&goal) || auth_recovery_attempts >= 2 {
                 let _ = app.emit("agent:run_error", serde_json::json!({
                     "run_id": run_id, "source":"authentication_required",
@@ -1571,7 +1578,11 @@ pub async fn run_react_loop(
         let current_reference=crate::agent::execution_intelligence::current_reference_subject(&goal).is_some();
         let current_reference_ready=current_reference&&snapshot.origin==initial_origin&&
             crate::agent::execution_intelligence::current_reference_observed(&goal,&snapshot,&orchestrator.evidence);
-        let intelligence_next=if current_reference {
+        let intelligence_next=if let Some(c)=catalog.as_mut().filter(|_|orchestrator.specialist()!=Specialist::Verification){
+            let next=if freshly_observed{c.next(&snapshot,&orchestrator.evidence)}else{crate::agent::execution_intelligence::Next::Wait};
+            let _=app.emit("agent:catalog_state",serde_json::json!({"run_id":run_id,"step_index":step,"retailers":c.statuses()}));
+            next
+        }else if current_reference {
             if current_reference_ready{
                 intelligence.world.mark("current_reference_observed");
                 crate::agent::execution_intelligence::Next::Action(BrowserAction::Complete{summary:"Review requested facts from the current observed reference.".into()},"objective:current_reference")
@@ -1629,10 +1640,12 @@ pub async fn run_react_loop(
             .collect::<Vec<_>>().join("; ");
         let vision_config = router.lock().await.get_config();
         let mut visual_ids:Vec<String>=Vec::new();
+        let mut visual_points=std::collections::HashMap::new();
+        let mut visual_snapshot=None;
         let mut vision_context=String::new();
         // Deterministic objective steps and explicit source acquisition do not
         // need a screenshot. Reserve inference only when uncertainty remains.
-        let vision_reason=if native_objective_action.is_none()&&!vision_config.vision_model.trim().is_empty()&&
+        let vision_reason=if (native_objective_action.is_none()||native_objective_action.as_ref().is_some_and(|(a,_)|matches!(a,BrowserAction::Click{is_submit:false,..})))&&!vision_config.vision_model.trim().is_empty()&&
             !vision_config.lucia_cloud_only&&vision_config.prefer_local_for_simple&&vision_config.domain_overrides.is_empty()&&
             matches!(orchestrator.specialist(),Specialist::Browser|Specialist::Research|Specialist::Comparison)&&
             !objectives.active()&&crate::agent::prerequisites::route_values(&goal).is_none()&&
@@ -1655,12 +1668,15 @@ pub async fn run_react_loop(
                 continue;
             }
             match observed{
-                Ok(o)=>{
+                Ok((o,viewport))=>{
                     let fused=crate::agent::multimodal_perception::fuse(&goal,&snapshot,&candidates,&o);
                     visual_ids=fused.preferred_ids.clone();
+                    visual_points=crate::agent::multimodal_perception::coordinate_targets(&goal,&snapshot,&candidates,&o,&viewport);
+                    for id in visual_points.keys(){if !visual_ids.contains(id){visual_ids.push(id.clone());}}
+                    visual_snapshot=Some(snapshot.clone());
                     vision_context=format!("\n{}",
                         fused.hint());
-                    let _=app.emit("agent:vision",serde_json::json!({"run_id":run_id,"step_index":step,"status":"observed","reason":reason,"model":vision_config.vision_model,"fusion":&fused}));
+                    let _=app.emit("agent:vision",serde_json::json!({"run_id":run_id,"step_index":step,"status":"observed","reason":reason,"model":vision_config.vision_model,"fusion":&fused,"grounded_points":visual_points.len()}));
                 },
                 Err(_)=>{
                     let _=app.emit("agent:vision",serde_json::json!({"run_id":run_id,"step_index":step,"status":"unavailable","reason":reason}));
@@ -1802,6 +1818,8 @@ pub async fn run_react_loop(
                 ("Execute the next native objective contract".into(),action,route.into())
             } else if let Some((action,phase)) = prerequisite {
                 ("Resolve the next explicitly grounded prerequisite".to_string(),action,format!("prerequisite:{phase}"))
+            } else if let Some(action)=crate::agent::multimodal_perception::unique_coordinate_link(&goal,&snapshot,&visual_points,&route_ledger).filter(|a|orchestrator.specialist().allows_on_page(a,&snapshot)&&crate::agent::objective_gate::check(&goal,&initial_origin,&snapshot,&objectives,a).is_ok()){
+                ("Select the unique relevant visually localized public link".into(),action,"vision:unique_grounded_link".into())
             } else if freshly_observed&&!last_action_failed&&orchestrator.specialist()!=Specialist::Verification&&
                 skill.as_ref().is_some_and(|s|s.spec.observed_target(&snapshot))&&orchestrator.can_complete(&snapshot).is_ok(){
                 ("Requested public target observed; request independent factual review".into(),BrowserAction::Complete{summary:"Verify all requested facts against the observed target.".into()},"skill:target_acquired".into())
@@ -2111,7 +2129,7 @@ pub async fn run_react_loop(
         // If the model repeats exactly the same search text, use the fresh,
         // unambiguous Search control rather than typing the same query again.
         // This recovery never guesses a result or bypasses native policy.
-        if freshly_observed {
+        if freshly_observed&&catalog.is_none() {
             if let Some(followup) = search_followup_on_duplicate_text(
                 &goal, &action, &snapshot, last_search_type.as_ref()
             ) {
@@ -2136,7 +2154,7 @@ pub async fn run_react_loop(
             action_binding_error=Some("User requested an observed link click, not a guessed URL".into());
         }
 
-        if freshly_observed && action_binding_error.is_some()
+        if catalog.is_none()&&freshly_observed && action_binding_error.is_some()
             && should_replan_invalid_control(&model_route, &action)
         {
             // The first model response was not executed. Allow one bounded
@@ -2195,7 +2213,7 @@ pub async fn run_react_loop(
         // the next stage only if live DOM evidence passes the stage gate.
         // This does NOT declare task success: final independent verification
         // remains mandatory before the run may report completed.
-        if action_binding_error.is_some()
+        if catalog.is_none()&&action_binding_error.is_some()
             && freshly_observed
             && !last_action_failed
             && matches!(action, BrowserAction::Click { .. })
@@ -2231,7 +2249,7 @@ pub async fn run_react_loop(
         // Rejected or stalled model proposals are not an excuse to invent
         // another action. Choose from observed alternatives, then rebind and
         // apply the same objective/policy gates.
-        if freshly_observed&&orchestrator.specialist()!=Specialist::Verification&&
+        if catalog.is_none()&&freshly_observed&&orchestrator.specialist()!=Specialist::Verification&&
             (action_binding_error.is_some()||crate::agent::objective_gate::check(&goal,&initial_origin,&snapshot,&objectives,&action).is_err()||
             (run_core.stalled()&&model_route.contains("supervisor_recovery"))) {
             if let Some(mut candidate)=replacement.next(&goal,&snapshot,&objectives,&route_ledger){
@@ -2242,6 +2260,11 @@ pub async fn run_react_loop(
                     thought="Choose a distinct grounded alternative for the unfinished objective".into();
                     model_route="recovery:ranked_live_alternative".into();
                 }
+            }
+        }
+        if let BrowserAction::Navigate{url}=&action{
+            if crate::agent::deliberation::read_only(&goal)&&!route_ledger.allowed(url){
+                action_binding_error=Some("Read-only route revisit budget exhausted".into());
             }
         }
         let semantic_attempt=run_core.prepare(&action,&snapshot,orchestrator.current);
@@ -2336,13 +2359,21 @@ pub async fn run_react_loop(
         };
         let mut verified_report: Option<VerificationReport> = None;
         let mut factual_review_failed=false;
-        if !orchestrator.specialist().allows_on_page(&action, &snapshot) {
+        // Catalog processor filters are an explicit read-only research
+        // capability, not a blanket exemption for research toggles.
+        // Binding, the live policy and the catalog gate all still apply.
+        let exact_catalog_filter=orchestrator.specialist()==Specialist::Research&&freshly_observed&&
+            action_binding_error.is_none()&&model_route.contains("catalog:exact_processor_filter")&&
+            catalog.as_ref().is_some_and(|c|c.authorized_filter(&snapshot,&action));
+        if !orchestrator.specialist().allows_on_page(&action, &snapshot)&&!exact_catalog_filter {
             decision = PolicyDecision::Deny {
                 reason: format!("{} cannot perform this action; delegate it to an authorized specialist",
                     orchestrator.specialist().label()),
             };
         }
-        if let Err(reason)=crate::agent::objective_gate::check(&goal,&initial_origin,&snapshot,&objectives,&action){
+        if let Some(c)=catalog.as_ref(){
+            if let Err(reason)=c.check(&snapshot,&action){decision=PolicyDecision::Deny{reason:format!("Catalog objective gate: {reason}")};}
+        }else if let Err(reason)=crate::agent::objective_gate::check(&goal,&initial_origin,&snapshot,&objectives,&action){
             decision=PolicyDecision::Deny{reason:format!("Objective gate: {reason}")};
         }
         if let Some(s)=skill.as_ref(){
@@ -2418,6 +2449,10 @@ pub async fn run_react_loop(
                     let result = if let Some(target) = requested_navigation_url(&goal) {
                         verify_direct_navigation(target.as_str(), &snapshot)
                             .map_err(anyhow::Error::msg)
+                    } else if let Some(c)=catalog.as_ref(){
+                        c.report(&orchestrator.evidence).map_err(anyhow::Error::msg)
+                    } else if crate::agent::prerequisites::route_values(&goal).is_some(){
+                        crate::agent::train_results::verify(&goal,&initial_origin,&snapshot,&orchestrator.evidence,prerequisites.route_search_sent()).map_err(anyhow::Error::msg)
                     } else if let Some(pairs)=crate::agent::prerequisites::filter_constraints(&goal) {
                         if snapshot.origin!=initial_origin || !crate::agent::prerequisites::filters_verified(&goal,&snapshot) {
                             Err(anyhow::anyhow!("Filter readback does not match the original page and requested values"))
@@ -2535,7 +2570,8 @@ pub async fn run_react_loop(
         if authentication_blocked {
             let safe_exit = matches!(&action, BrowserAction::Navigate { url }
                 if url::Url::parse(url).ok().is_some_and(|target|
-                    target.as_str() == "https://www.google.com/"));
+                    target.as_str() == "https://www.google.com/"||
+                    catalog.as_ref().is_some_and(|c|c.intent.entry(target.as_str()))));
             if !safe_exit {
                 let _ = app.emit("agent:run_error", serde_json::json!({
                     "run_id":run_id,"source":"authentication_recovery",
@@ -2567,7 +2603,21 @@ pub async fn run_react_loop(
         };
         let objective_source=snapshot.origin.clone();
         let objective_target=intelligence.dispatch_target(&goal,&snapshot,&action);
-        let (mut ok, mut outcome) = execute_gated_action(
+        let visual_target=match &action {
+            BrowserAction::Click{node_id,is_submit:false,..} if matches!(&risk,RiskLevel::Low|RiskLevel::Medium)&&matches!(&decision,PolicyDecision::Allow)=>visual_points.get(node_id).map(|p|(node_id,p)),
+            _=>None
+        };
+        let mut coordinate_dispatched=false;
+        let (mut ok, mut outcome) = if let Some((id,point))=visual_target {
+            let current=request_live_dom_snapshot(&app,&webview_label,&pending_snapshots,1800).await;
+            if cancel.is_cancelled() || !current.as_ref().zip(visual_snapshot.as_ref()).is_some_and(|(now,before)|crate::agent::multimodal_perception::same_observation(before,now)){
+                (false,"FAILED: visual target stale or cancelled".into())
+            }else{
+                let result=crate::agent::action_executor::execute_visual_click(&app,&webview_label,id,point).await;
+                coordinate_dispatched=result.success;
+                (result.success,format!("{}: {}",if result.success{"OK"}else{"FAILED"},result.detail))
+            }
+        }else{execute_gated_action(
             &app,
             run_id,
             trace_id,
@@ -2583,7 +2633,11 @@ pub async fn run_react_loop(
             &approval_tx,
             &cancel,
         )
-        .await;
+        .await};
+        if coordinate_dispatched {
+            let _=app.emit("agent:vision",serde_json::json!({"run_id":run_id,"step_index":step,"status":"coordinate_click"}));
+            model_route.push_str(" / vision:coordinate_click");
+        }
 
         // A WebView action acknowledgment does not prove the desired effect.
         // Re-observe the live webpage before marking navigation or a submit as
@@ -2670,6 +2724,7 @@ pub async fn run_react_loop(
                 prerequisites.observe_route_action(&goal,&before,&after,&action);
                 if let Some(s)=skill.as_mut(){s.receipt(&before,&after,&action);}
                 replacement.note(&goal,&before,&action,changed);
+                if let Some(c)=catalog.as_mut(){c.receipt(&before,&after,&action);}
                 snapshot = after;
                 orchestrator.observe(&snapshot);
                 if safe_named_search_enter && check_named_title_search_navigation(
@@ -3006,6 +3061,12 @@ pub async fn run_react_loop(
         }
     }
 
+    if matches!(final_status.as_str(),"unverified"|"max_steps"){
+        if let Some(c)=catalog.as_ref(){
+            let report=c.partial_report(&orchestrator.evidence);
+            let _=app.emit("agent:verification_report",serde_json::json!({"run_id":run_id,"report":report}));
+        }
+    }
     if final_status!="completed" {
         graph.stop(final_status=="cancelled");
         checkpoint_proof=None;

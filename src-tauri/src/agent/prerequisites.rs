@@ -114,7 +114,7 @@ pub fn route_values(goal:&str)->Option<(&str,&str)> {
         && s.chars().all(|c|c.is_alphabetic()||c==' '||c=='-'||c=='.');
     if valid(a)&&valid(b) {Some((a,b))} else {None}
 }
-fn requested_date(goal:&str)->Option<NaiveDate> {
+pub(super) fn requested_date(goal:&str)->Option<NaiveDate> {
     goal.split(|c:char| !c.is_ascii_digit() && c!='-')
         .find_map(|token|NaiveDate::parse_from_str(token,"%Y-%m-%d").ok())
 }
@@ -263,6 +263,7 @@ impl PrerequisitePlanner {
             route_date_readback(goal,page)&&!page.interactive_nodes.iter().any(|n|n.role=="option")
     }
     pub fn mark_route_search(&mut self){self.route_search_sent=true;}
+    pub fn route_search_sent(&self)->bool{self.route_search_sent}
     pub fn next(&mut self,goal:&str,page:&DomSnapshot)->Option<(BrowserAction,&'static str)> {
         let excerpt=normalized(&page.text_excerpt);
         let proposal=if excerpt.starts_with("active dialog:") {

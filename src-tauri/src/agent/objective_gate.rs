@@ -1,7 +1,7 @@
 //! Final run-local objective constraints. This can only narrow native policy,
 //! never grant a permission, submit a transaction, or certify a factual answer.
 use super::{dom_extractor::{DomSnapshot,DomNodeSummary},policy::BrowserAction,semantic_core::ObjectiveLedger};
-pub const REVISION:&str="lucia-evidence-acquisition-v13";
+pub const REVISION:&str="lucia-adaptive-catalog-orchestration-v13.7";
 fn words(s:&str)->Vec<String>{s.split(|c:char|!c.is_alphanumeric()).filter(|w|!w.is_empty()).map(str::to_lowercase).collect()}
 fn phrase(text:&str,part:&str)->bool{
     let t=words(text);let p=words(part);
@@ -84,15 +84,25 @@ fn docs_waypoint(goal:&str,label:&str,url:&str)->bool{
     (path.contains("/doc")||path.contains("/reference"))&&
         ["current","current version","documentation","reference","sql commands","command reference","manual","user guide"].iter().any(|p|label.trim().eq_ignore_ascii_case(p))
 }
+fn lookup_link_matches(subject:&str,label:&str,url:&str)->bool{
+    let Ok(u)=url::Url::parse(url)else{return false;};
+    let path=u.path().replace(['-','_','/']," ");
+    let decoded=url::form_urlencoded::parse(path.as_bytes()).next().map(|(s,_)|s.into_owned()).unwrap_or_default();
+    let exact=words(label)==words(subject)||phrase(&decoded,subject);
+    let search=u.query_pairs().any(|(k,v)|matches!(k.as_ref(),"search"|"q"|"query")&&words(&v)==words(subject));
+    exact||search
+}
 fn relevant_navigation(goal:&str,page:&DomSnapshot,url:&str)->bool{
     if off_topic(goal,url){return false}
+    if super::catalog_research::entry_allowed(goal,url){return true;}
     if goal.split_whitespace().any(|s|s.trim_matches(['(',')','[',']','"', '\'',',','.',';'])==url){return true;}
     if super::policy::requested_navigation_url(goal).is_some_and(|u|u.as_str()==url){return true;}
+    if super::policy::requested_search_entry_url(goal).is_some_and(|u|u.as_str()==url){return true;}
+    if let Some(subject)=super::deliberation::lookup_subject(goal){return page.interactive_nodes.iter().any(|n|!n.is_sensitive&&!n.is_submit&&n.href.as_deref()==Some(url)&&lookup_link_matches(&subject,&n.label,url));}
     if super::skills::TaskSpec::compile(goal).and_then(|s|s.explicit_repository_url(&page.origin)).as_deref()==Some(url){return true;}
     if super::requirements::repository_fact_link(goal,page,url){return true;}
     if super::skills::TaskSpec::compile(goal).is_some_and(|spec|page.interactive_nodes.iter().any(|n|n.href.as_deref()==Some(url)&&spec.link_score_on(page,n)>0)){return true;}
     if super::policy::requested_search_entry_url(goal).is_some_and(|u|u.as_str()==url){return true;}
-    if super::deliberation::lookup_subject(goal).is_some()&&super::deliberation::navigation_grounded(goal,page,url){return true;}
     page.interactive_nodes.iter().any(|n|!n.is_sensitive&&!n.is_submit&&n.href.as_deref()==Some(url)&&
         (super::semantic_core::relevance(goal,&format!("{} {}",n.label,url::Url::parse(url).map(|u|u.path().replace(['-','_','/']," ")).unwrap_or_default()))>0||
             docs_waypoint(goal,&n.label,url)||phrase(&n.label,"search")))
@@ -154,6 +164,16 @@ impl ReplacementPlanner{
 }
 pub fn check(goal:&str,initial:&str,page:&DomSnapshot,ledger:&ObjectiveLedger,action:&BrowserAction)->Result<(),&'static str>{
     route_guard(goal,initial,page,action)?;
+    if super::skills::TaskSpec::compile(goal).is_some_and(|s|s.kind==super::skills::TargetKind::Reference){
+        let target=match action{
+            BrowserAction::Navigate{url}=>Some(url.as_str()),
+            BrowserAction::Click{node_id,..}=>control(page,node_id).and_then(|n|n.href.as_deref()),
+            _=>None
+        };
+        if target.is_some_and(|u|!super::reference_track::reference_track_allowed(page,u)){
+            return Err("Reference navigation would leave the observed documentation release");
+        }
+    }
     if ledger.active(){
         match action{
             BrowserAction::Navigate{url} if ledger.permitted_destination(url)=>{},
@@ -171,6 +191,11 @@ pub fn check(goal:&str,initial:&str,page:&DomSnapshot,ledger:&ObjectiveLedger,ac
             let n=control(page,node_id).ok_or("Research control is not a live public control")?;
             if off_topic(goal,&n.label)||n.href.as_ref().is_some_and(|h|off_topic(goal,h)){
                 return Err("Research cannot navigate to unrelated account, pricing or transaction controls");
+            }
+            if let Some(subject)=super::deliberation::lookup_subject(goal){
+                let exact=words(&n.label)==words(&subject)||n.href.as_ref().is_some_and(|u|lookup_link_matches(&subject,&n.label,u));
+                let search_control=search_field(n)||phrase(&n.label,"search");
+                if !exact&&!search_control{return Err("Named lookup must use its search control or exact requested result");}
             }
         }
         BrowserAction::TypeText{node_id,text,is_sensitive:false}=>{
@@ -215,6 +240,16 @@ mod tests{
   assert!(matches!(planner.next(g,&p,&l,&routes),Some(BrowserAction::Navigate{url}) if url=="https://example.org/sql-insert.html"));
   assert!(planner.next(g,&p,&l,&routes).is_none());
   assert!(check(g,&p.origin,&p,&l,&BrowserAction::Navigate{url:"https://example.org/televisions".into()}).is_err());
+ }
+ #[test]fn named_lookup_rejects_irrelevant_but_observed_navigation(){
+  let mut p=page();
+  p.interactive_nodes.push(node("correct","Grace Hopper",Some("https://example.org/wiki/Grace_Hopper")));
+  p.interactive_nodes.push(node("wrong_wiki","Article size",Some("https://example.org/wiki/Article_size")));
+  let g="Search for Grace Hopper and open the corresponding article. Report its page title.";
+  let l=ObjectiveLedger::new(g);
+  assert!(check(g,&p.origin,&p,&l,&BrowserAction::Navigate{url:"https://example.org/wiki/Article_size".into()}).is_err());
+  assert!(check(g,&p.origin,&p,&l,&BrowserAction::Click{node_id:"wrong_wiki".into(),element_label:"Article size".into(),is_submit:false}).is_err());
+  assert!(check(g,&p.origin,&p,&l,&BrowserAction::Navigate{url:"https://example.org/wiki/Grace_Hopper".into()}).is_ok());
  }
  #[test]fn generic_research_rejects_login_but_preserves_observed_relevant_links(){
   let p=page();let g="Find the SQL INSERT reference and report its syntax.";let l=ObjectiveLedger::new(g);

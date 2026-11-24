@@ -4768,7 +4768,7 @@
           var stage = task.plan?.stages?.[payload.index];
           if (stage) stage.status = payload.status;
           if (payload.evidence_count != null) task.evidence = payload.evidence_count;
-        } else if (kind === 'verification' && payload.report?.status === 'evidence_checked') {
+        } else if (kind === 'verification' && ['evidence_checked','partial_evidence'].includes(payload.report?.status)) {
           task.verificationReport = payload.report;
           task.verificationSummary = payload.report.summary;
         } else if (kind === 'workflow_graph') {
@@ -4794,16 +4794,18 @@
               if (node.state === 'active' || node.state === 'pending') node.state = payload.status === 'cancelled' ? 'cancelled' : 'blocked';
             }
           }
-          task.status = payload.status === 'completed' && task.verificationReport ? 'Completed' :
+          task.status = payload.status === 'completed' && task.verificationReport?.status === 'evidence_checked' ? 'Completed' :
             (payload.status === 'cancelled' || payload.status === 'tab_closed') ? 'Stopped' : 'Not verified';
           task.approval = null;
           thread.pending = false;
           // A completed run is not a factual report on its own. The verification
           // specialist's last accepted summary is the best available result.
           var stages = task.plan?.stages || [];
-          if (payload.status === 'completed' && task.verificationReport) {
+          if (payload.status === 'completed' && task.verificationReport?.status === 'evidence_checked') {
             var completion = task.verificationReport.summary;
             thread.messages.push({role:'assistant',content:completion,model:'Lucia · Source-checked findings'});
+          } else if (task.verificationReport?.status === 'partial_evidence') {
+            thread.messages.push({role:'assistant',content:task.verificationReport.summary,model:'Lucia ? Partial evidence (not completed)'});
           } else if (payload.status === 'tab_closed') {
             thread.messages.push({role:'assistant',content:task.error || 'Lucia stopped because its assigned task tab was closed.'});
           } else if (payload.status === 'tab_missing') {

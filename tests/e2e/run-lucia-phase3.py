@@ -5,7 +5,7 @@ import argparse, datetime, hashlib, json, os, re, socket, subprocess, sys, time
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[2]
-REVISION="lucia-evidence-acquisition-v13"
+REVISION="lucia-adaptive-catalog-orchestration-v13.7"
 MODELS={"LUCIA_TEST_LOCAL_MODEL":"qwen3.5:0.8b","LUCIA_TEST_PLANNER_MODEL":"qwen2.5:3b-instruct","LUCIA_TEST_SUPERVISOR_MODEL":"lfm3:1.7b","LUCIA_TEST_VISION_MODEL":"lfm3-vl:2b"}
 def case(id,tier,kind,mode=None,marker=None,timeout=200,expect="completion"):
     return dict(id=id,tier=tier,kind=kind,mode=mode or {},marker=marker,timeout=timeout,expect=expect)
@@ -19,6 +19,8 @@ for key in ("search-wikipedia","search-wiktionary","nav-rust","nav-python","extr
     CASES.append(case(key,"skill","live",{"LUCIA_PHASE3_CASE":key},"PHASE3_RESULT"))
 CASES.append(case("public-controls","skill","controls",timeout=180))
 CASES.append(case("vision-fixture","skill","live",{"LUCIA_PHASE3_CASE":"vision-fixture"},"VISION_RESULT",timeout=220))
+CASES.append(case("vision-real-example","skill","live",{"LUCIA_PHASE3_CASE":"vision-real-example"},"VISION_REAL_RESULT",timeout=180))
+CASES.append(case("vision-real-python","skill","live",{"LUCIA_PHASE3_CASE":"nav-python","LUCIA_REQUIRE_COORDINATE":"1"},"PHASE3_RESULT",timeout=180))
 CASES.append(case("form-filter","skill","live",{"LUCIA_FILTER_TEST":"1"},"FILTER_RESULT"))
 for key in ("compose-wiki","compose-dictionary"):
     CASES.append(case(key,"composition","live",{"LUCIA_PHASE3_CASE":key},"PHASE3_RESULT"))
@@ -140,6 +142,7 @@ def main():
             print("PHASE3_ABORT executable changed",flush=True);return 2
         env={k:v for k,v in os.environ.items() if not k.startswith(("LUCIA_","WEBVIEW2_","BROWSER_CDP_PORT"))}
         env.update(MODELS);env.update(c["mode"]);env["LUCIA_TRAIN_DATE"]=args.train_date
+        if c["id"]=="level-4" and os.environ.get("LUCIA_CATALOG_RAW_PROBE")=="1":env["LUCIA_CATALOG_RAW_PROBE"]="1"
         kind=c["kind"]
         if kind=="cargo":cmd=["cargo","test","-p","browsphere-core","--offline","--","--test-threads=2"]
         elif kind=="node":cmd=["node","--test","tests/lucia-local-model.test.cjs","tests/lucia-local-profiles.test.cjs","tests/lucia-activity.test.cjs"]

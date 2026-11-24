@@ -234,7 +234,9 @@ pub fn evaluate_user_navigation_policy(
     let Ok(actual) = Url::parse(url) else { return base };
     let user_explicitly_named_destination = requested_navigation_url(goal)
         .is_some_and(|expected| actual == expected)
-        || crate::agent::deliberation::explicit_research_sources(goal).iter().any(|expected| &actual==expected);
+        || crate::agent::deliberation::explicit_research_sources(goal).iter().any(|expected| &actual==expected)
+        || crate::agent::catalog_research::entry_allowed(goal,url)
+        || crate::agent::catalog_research::discovery_navigation_allowed(goal,active_origin,url);
     let user_explicitly_named_music_entry = requested_music_entry_url(goal)
         .is_some_and(|expected| actual == expected);
     let user_explicitly_named_search_site = requested_search_host(goal)

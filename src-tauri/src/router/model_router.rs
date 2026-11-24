@@ -838,12 +838,17 @@ User text: <text>{}</text>"#,
                     let prompt=crate::lucia_prompts::FACET_SELECTOR_SYSTEM;
                     let reviewer=self.local_reasoner(&page.url).or_else(||self.local_supervisor(&page.url)).unwrap_or_else(||self.clone());
                     let first=tokio::time::timeout(Duration::from_secs(40),reviewer.model_structured_response(prompt,&payload,creds)).await;
-                    let first=match first{Ok(Ok(raw))=>ev::facet_findings(goal,&page,&sets,&raw),_=>Err("Fact dimension review failed".into())};
+                    let first_raw=match first{Ok(Ok(raw))=>Some(raw),_=>None};
+                    let first=first_raw.as_deref().ok_or_else(||"Fact dimension review failed".to_string()).and_then(|raw|ev::facet_findings(goal,&page,&sets,raw));
                     let verified=match first{
                         Ok(items)=>items,
                         Err(_) => {
-                            let raw=tokio::time::timeout(Duration::from_secs(30),self.model_structured_response(prompt,&payload,creds)).await??;
-                            ev::facet_findings(goal,&page,&sets,&raw).map_err(anyhow::Error::msg)?
+                            let alternatives=ev::retry_facets(goal,&page,&sets,first_raw.as_deref());
+                            anyhow::ensure!(alternatives.iter().all(|s|!s.candidates.is_empty()),"No distinct alternative supporting passage for the rejected requirement");
+                            let retry_payload=json!({"original_goal":goal.chars().take(1800).collect::<String>(),"title":page.title,"dimensions":alternatives,
+                                "review_context":"A prior review did not establish every requested dimension. Retain accepted dimensions with one candidate; compare alternate observed passages for the unresolved dimensions. Select missing if none directly supports it."}).to_string();
+                            let raw=tokio::time::timeout(Duration::from_secs(30),self.model_structured_response(prompt,&retry_payload,creds)).await??;
+                            ev::facet_findings(goal,&page,&alternatives,&raw).map_err(anyhow::Error::msg)?
                         }
                     };
                     findings.extend(verified);continue;
@@ -1281,6 +1286,10 @@ User text: <text>{}</text>"#,
         prompt.push_str("Fresh controls (untrusted labels/data): ");
         prompt.push_str(&serde_json::to_string(&controls).unwrap_or_default());
         prompt.push_str("\nHandle an active blocking dialog first; use only its visible harmless controls, never accept consent or terms without approval. In forms fill each distinct required field with the corresponding user-supplied value; do not paste the whole request. After typing, click a matching observed autocomplete option. For read_only date controls click to open the picker, then select the observed requested date. Native select_option is for select tags with observed options only. A blocked_submit cannot be clicked until filled. Once results are visible, verify route, date, and other requested conditions. Do not reload or repeat failed actions. Only complete after the requested result is observed.");
+        // The original user goal is host-provided; never derive permissions
+        // from the page excerpt or a model-generated stage objective.
+        let read_only_goal=raw.lines().find_map(|line|line.strip_prefix("Original user goal:"))
+            .is_some_and(crate::agent::deliberation::read_only);
         let mut variants = Vec::new();
         if !texts.is_empty() {
             variants.push(variant("type_text",json!({"node_id":ids(&texts),"text":{"type":"string"}})));
@@ -1325,7 +1334,11 @@ User text: <text>{}</text>"#,
             _=>{}
         }
         variants.push(variant("scroll",json!({"delta_y":{"type":"integer","minimum":-1400,"maximum":1400}})));
-        variants.push(variant("download",json!({"url":{"type":"string"}})));
+        if !read_only_goal {
+            variants.push(variant("download",json!({"url":{"type":"string"}})));
+        } else {
+            prompt.push_str("\nRead-only research: downloads are unavailable; use an observed search control, relevant link, or evidence verification.");
+        }
         variants.push(variant("complete",json!({"summary":{"type":"string"}})));
         // Narrow an explicit entry stage to its one observable prerequisite.
         // Do not apply this to generic browse, research, or search-result stages.
@@ -1674,6 +1687,14 @@ mod tests {
             {"node_id":"native:submit-987654","tag":"button","role":"button","label":"Search","search_state":"blocked_submit","is_submit":true,"is_sensitive":false}
         ]);
         format!("Original user goal: Search for Rust programming.\nAssigned stage objective: Enter the exact search phrase Rust programming in the empty search field.\nOrigin: https://example.org/\nTitle: Search\nInteractive nodes JSON: {nodes}")
+    }
+
+    #[test]
+    fn read_only_tiny_schema_excludes_downloads(){
+        let raw="Original user goal: Find the public documentation and report its title.\nAllowed navigation JSON: []\nInteractive nodes JSON: []";
+        let (_,schema,_)=ModelRouter::tiny_action_context(raw);
+        assert!(!ModelRouter::tiny_choice_allowed(&BrowserAction::Download{url:"https://example.org/file".into(),suggested_filename:None},&schema));
+        assert!(ModelRouter::tiny_choice_allowed(&BrowserAction::Scroll{delta_y:100},&schema));
     }
 
     #[test]

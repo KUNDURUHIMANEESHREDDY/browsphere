@@ -1,0 +1,24 @@
+"""Real Edge fixture for product card label grounding. No network access."""
+import html,json,os,re,subprocess,tempfile
+from pathlib import Path
+ROOT=Path(__file__).resolve().parents[2]
+EDGE=Path(os.environ.get("ProgramFiles(x86)",r"C:\Program Files (x86)"))/"Microsoft/Edge/Application/msedge.exe"
+source=(ROOT/"src-tauri/src/agent/dom_extractor.rs").read_text(encoding="utf-8")
+template=re.search(r'r#"\(function\(\) \{\{(.*?)\}\}\)\(\);"#',source,re.S).group(0)[3:-2]
+js=template.replace("{request_id}","test-observer").replace("{max_nodes}","120").replace("{max_text_chars}","2400").replace("{{","{").replace("}}","}")
+fixture="""<!doctype html><html><body><main>
+<article class="product-card"><a aria-label="Go to Image" href="/product/opaque-1"><span>Image</span></a><h2>Apple MacBook Air M4 13 inch 16GB 256GB SSD</h2><a href="/product/opaque-1">View product</a><h2 hidden>Wrong hidden title</h2></article>
+<article class="product-card"><a aria-label="Generic image" href="/product/opaque-2">Image</a><a href="/product/opaque-3">Other</a><h2>Wrong mixed card product</h2></article>
+<article class="product-card"><a aria-label="Generic button" href="/product/opaque-4">Image</a><h2>Competing title one</h2><h2>Competing title two</h2></article>
+</main><script>const observe=()=>"""+js.rstrip(";")+""";const result=document.createElement('pre');result.id='probe-result';result.textContent=JSON.stringify(observe());document.body.append(result);</script></body></html>"""
+with tempfile.TemporaryDirectory(prefix="catalog-grounding-") as work:
+    root=Path(work); f=root/"fixture.html"; f.write_text(fixture,encoding="utf-8")
+    proc=subprocess.run([str(EDGE),"--headless=new","--disable-gpu","--no-first-run","--disable-background-networking","--user-data-dir="+str(root/"profile"),"--dump-dom",f.as_uri()],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=45)
+    m=re.search(r'<pre id="probe-result">(.*?)</pre>',proc.stdout,re.S)
+    assert m, "Missing native observer result"
+    result=json.loads(html.unescape(m.group(1)))
+    labels=[n["label"] for n in result["interactive_nodes"]]
+    assert labels.count("Apple MacBook Air M4 13 inch 16GB 256GB SSD")==2,labels
+    assert "Generic image" in labels and "Generic button" in labels,labels
+    assert "Wrong hidden title" not in labels and "Wrong mixed card product" not in labels,labels
+    print("PASS catalog grounding: image/text duplicate links, hidden title, mixed destinations, ambiguous headings")

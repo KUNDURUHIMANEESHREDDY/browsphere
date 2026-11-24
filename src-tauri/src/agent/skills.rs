@@ -92,6 +92,7 @@ impl TaskSpec{
     pub fn link_score_on(&self,page:&DomSnapshot,n:&DomNodeSummary)->u32{
         let (Ok(from),Some(to))=(url::Url::parse(&page.origin),n.href.as_deref().and_then(super::browser_skills::public_url))else{return 0;};
         if from.origin()!=to.origin()||to.query().is_some()||to.fragment().is_some(){return 0;}
+        if self.kind==TargetKind::Reference&&!super::reference_track::reference_track_allowed(page,to.as_str()){return 0;}
         let score=self.link_score(n);
         if self.kind==TargetKind::Reference&&score<100{
             let source=from.path().trim_end_matches('/').trim_end_matches("index.html").trim_end_matches('/');
