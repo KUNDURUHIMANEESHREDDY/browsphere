@@ -859,6 +859,9 @@
       emitUiEvent('aether:traces-updated', st);
     });
 
+    listen('agent:workflow_graph', (event) => {
+      emitUiEvent('aether:agent-workflow_graph', event.payload || {});
+    });
     listen('agent:plan', (event) => {
       emitUiEvent('aether:agent-plan', event.payload || {});
     });

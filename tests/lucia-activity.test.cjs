@@ -80,3 +80,13 @@ test('loop guard stop is not reported as specialist completion', () => {
   assert.equal(result.label, 'Stopped by loop guard');
   assert.match(result.explanation, /not complete/);
 });
+
+test('adaptive graph renders bounded dependencies and never exposes raw evidence',()=>{
+  const graph=activity.workflowGraph({graph:{revision:4,nodes:[
+    {id:0,kind:'tool',state:'completed',depends_on:[],secret:'private-value'},
+    {id:1,kind:'verification',state:'active',depends_on:[0]}]}});
+  assert.equal(graph.nodes[0].label,'MCP tool check');
+  assert.deepEqual(graph.nodes[1].depends_on,[0]);
+  assert.equal(JSON.stringify(graph).includes('private-value'),false);
+  assert.equal(activity.workflowGraph({graph:{revision:1,nodes:[{id:0,kind:'tool',state:'completed',depends_on:[99]}]}}),null);
+});

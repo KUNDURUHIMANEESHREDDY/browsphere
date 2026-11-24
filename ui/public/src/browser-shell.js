@@ -4373,7 +4373,7 @@
         window.addEventListener('aether:downloads-updated', hydrateDownloadsFromNative);
         window.addEventListener('aether:itp-updated', hydrateItpFromNative);
         window.addEventListener('aether:traces-updated', hydrateTracesFromNative);
-        ['plan','stage','activity','trace','approval','status','error','verification'].forEach(function (type) {
+        ['plan','stage','activity','trace','approval','status','error','verification','workflow_graph'].forEach(function (type) {
           window.addEventListener('aether:agent-' + type, function (event) {
             applyLuciaAgentEvent(type, event.detail || {});
           });
@@ -4613,6 +4613,14 @@
                 '<small>' + esc(stage.objective) + '</small></div>' +
                 '<span class="main-chat-stage-status">' + esc(labels[stage.status] || stage.status) + '</span></div>';
             }).join('') + '</div>' +
+            (task.workflowGraph ? '<div class="main-chat-agent-plan" aria-label="Adaptive workflow dependencies"><strong>Workflow graph</strong>' +
+              task.workflowGraph.nodes.map(function(node) {
+                return '<div class="main-chat-agent-stage" data-state="' + esc(node.state) + '">' +
+                  '<span class="main-chat-stage-index">' + (node.id+1) + '</span>' +
+                  '<div class="main-chat-stage-name">' + esc(node.label) +
+                  '<small>' + esc(node.depends_on.length ? 'Depends on '+node.depends_on.map(d=>d+1).join(', ') : 'No dependencies') + '</small></div>' +
+                  '<span class="main-chat-stage-status">' + esc(node.state) + '</span></div>';
+              }).join('')+'</div>' : '') +
             '<div class="main-chat-agent-activity" aria-label="Lucia live activity">' +
             '<div class="main-chat-activity-heading"><strong>Live activity</strong>' +
             '<small>Actions and decision summaries, not private internal reasoning</small></div>' +
@@ -4754,6 +4762,9 @@
         } else if (kind === 'verification' && payload.report?.status === 'evidence_checked') {
           task.verificationReport = payload.report;
           task.verificationSummary = payload.report.summary;
+        } else if (kind === 'workflow_graph') {
+          const graph=window.BrowsphereLuciaActivity?.workflowGraph(payload);
+          if (graph && (!task.workflowGraph || graph.revision>=task.workflowGraph.revision)) task.workflowGraph=graph;
         } else if (kind === 'activity') {
           window.BrowsphereLuciaActivity?.append(
             task, window.BrowsphereLuciaActivity.activity(payload));
@@ -4766,6 +4777,11 @@
         } else if (kind === 'error') {
           task.error = payload.message || 'The agent could not complete this step.';
         } else if (kind === 'status') {
+          if (task.workflowGraph && payload.status !== 'completed') {
+            for (const node of task.workflowGraph.nodes) {
+              if (node.state === 'active' || node.state === 'pending') node.state = payload.status === 'cancelled' ? 'cancelled' : 'blocked';
+            }
+          }
           task.status = payload.status === 'completed' && task.verificationReport ? 'Completed' :
             (payload.status === 'cancelled' || payload.status === 'tab_closed') ? 'Stopped' : 'Not verified';
           task.approval = null;

@@ -1,5 +1,6 @@
 //! Bounded workflow DAG for explicitly authorized MCP tasks and a terminal browser task.
 use anyhow::{ensure,Context,Result};
+use super::adaptive_graph::{WorkflowGraph,Kind,Receipt};
 use serde::Deserialize;
 use serde_json::{json,Value};
 use std::{collections::{BTreeMap,BTreeSet},path::Path,time::Duration};
@@ -136,7 +137,7 @@ fn compare(left:&Reference,right:&Reference,results:&BTreeMap<String,Evidence>)-
     ensure!(resolve(left,results)?==resolve(right,results)?,"Independent source results disagree");
     Ok(())
 }
-pub struct Outcome { pub completed:usize, pub browser:Option<String>, pub evidence:Vec<(String,String)> }
+pub struct Outcome { pub completed:usize, pub browser:Option<String>, pub evidence:Vec<(String,String)>, pub graph:WorkflowGraph, pub handoff:Option<usize> }
 pub(super) async fn await_resume(cancel:&CancellationToken,pause:&mut watch::Receiver<bool>)->Result<()>{
     while *pause.borrow(){
         tokio::select!{biased; _=cancel.cancelled()=>anyhow::bail!("Workflow cancelled"),r=pause.changed()=>{r?;}}
@@ -211,7 +212,7 @@ fn parallel_partner(plan:&Plan,ready:&[usize],config:&super::mcp::WorkflowConfig
     Ok(None)
 }
 pub async fn execute<F>(plan:Plan,path:&Path,local_url:&str,model:&str,cancel:CancellationToken,pause:&mut watch::Receiver<bool>,mut progress:F,mut observer:Option<&mut BrowserObserver<'_>>)->Result<Outcome>
-where F:FnMut(usize,&str,&str) {
+where F:FnMut(usize,&str,&str,&WorkflowGraph) {
     let order=plan.order()?;
     let config=super::mcp::workflow_config(path).await?;
     for n in &plan.steps{
@@ -223,27 +224,43 @@ where F:FnMut(usize,&str,&str) {
     }
     let mut results=BTreeMap::new();
     let mut evidence=Vec::new();
-    let mut done=BTreeSet::new();
-    while done.len()<order.len(){
+    let mut graph=WorkflowGraph::new(plan.steps.iter().map(|node|{
+        let kind=match &node.action{Action::Call{..}|Action::Auto{..}=>Kind::Tool,Action::Compare{..}=>Kind::Comparison,Action::Review{..}=>Kind::Review,Action::Observe{..}=>Kind::Observation,Action::Browser{..}=>Kind::Handoff};
+        (kind,node.depends_on.iter().map(|d|plan.steps.iter().position(|n|&n.id==d).expect("validated dependency")).collect())
+    }).collect())?;
+    for (i,n) in plan.steps.iter().enumerate(){
+        let criterion=match &n.action{
+            Action::Call{..}|Action::Auto{..}=>"User-defined expected value matches tool result",
+            Action::Compare{..}=>"Independent configured sources agree",
+            Action::Review{..}=>"Reviewer returns a grounded exact excerpt",
+            Action::Observe{..}=>"Fresh browser URL and title match",
+            Action::Browser{..}=>"Browser stages and final verification complete"
+        };
+        graph.describe(i,&n.id,criterion)?;
+    }
+    while !graph.is_complete(){
         await_resume(&cancel,pause).await?;
-        let ready:Vec<_>=order.iter().copied().filter(|i|!done.contains(&plan.steps[*i].id)&&plan.steps[*i].depends_on.iter().all(|d|done.contains(d))).collect();
+        let runnable=graph.ready();
+        let ready:Vec<_>=order.iter().copied().filter(|i|runnable.contains(i)).collect();
         let i=*ready.first().context("No runnable workflow step")?;
         let node=&plan.steps[i];
-        progress(i,&node.id,"active");
+        graph.start(i)?;
+        progress(i,&node.id,"active",&graph);
         if let Action::Browser{task}=&node.action{
-            progress(i,&node.id,"handoff");
-            return Ok(Outcome{completed:done.len(),browser:Some(task.clone()),evidence});
+            progress(i,&node.id,"handoff",&graph);
+            return Ok(Outcome{completed:graph.completed(),browser:Some(task.clone()),evidence,graph,handoff:Some(i)});
         }
         if let Action::Observe{url,title}=&node.action{
             let run=observer.as_mut().context("No native browser adapter configured")?;
             match run(url.clone(),title.clone()).await{
-                Ok(())=>{done.insert(node.id.clone());evidence.push((node.id.clone(),"Fresh browser URL and title matched".into()));progress(i,&node.id,"completed");continue;}
-                Err(e)=>{progress(i,&node.id,"failed");return Err(e.context("Browser observation failed; dependent actions blocked"));}
+                Ok(())=>{graph.complete(i,Receipt::NativeObservation)?;evidence.push((node.id.clone(),"Fresh browser URL and title matched".into()));progress(i,&node.id,"completed",&graph);continue;}
+                Err(e)=>{graph.fail(i);graph.stop(false);progress(i,&node.id,"failed",&graph);return Err(e.context("Browser observation failed; dependent actions blocked"));}
             }
         }
         let batch=if let Some(j)=parallel_partner(&plan,&ready,&config)?{
             let other=&plan.steps[j];
-            progress(j,&other.id,"active");
+            graph.start(j)?;
+            progress(j,&other.id,"active",&graph);
             let mut p2=pause.clone();
             // Wait for both in-flight calls; failure never triggers a retry.
             let (a,b)=tokio::join!(
@@ -266,21 +283,23 @@ where F:FnMut(usize,&str,&str) {
                                                 let message=if matches!(node.action,Action::Review{..}){"Local model review found a grounded excerpt (not proof of factual accuracy)"}else{"Cross-server values agree"};
                         evidence.push((node.id.clone(),message.into()));
                     }
-                    done.insert(node.id.clone());
-                    progress(i,&node.id,"completed");
+                    let receipt=match &node.action{Action::Review{..}=>Receipt::QuoteCheck,Action::Compare{..}=>Receipt::ComparisonCheck,_=>Receipt::ToolCheck};
+                    graph.complete(i,receipt)?;
+                    progress(i,&node.id,"completed",&graph);
                 }
                 Err(err)=>{
-                    progress(i,&node.id,"failed");
+                    graph.fail(i);
+                    progress(i,&node.id,"failed",&graph);
                     if failure.is_none(){failure=Some(err.context(format!("Workflow stopped at step {}; no new dependent action dispatched",node.id)));}
                 }
             }
         }
-        if let Some(err)=failure{return Err(err);}
+        if let Some(err)=failure{graph.stop(false);return Err(err);}
     }
-    Ok(Outcome{completed:done.len(),browser:None,evidence})
+    Ok(Outcome{completed:graph.completed(),browser:None,evidence,graph,handoff:None})
 }
 pub async fn run<F>(plan:Plan,path:&Path,local_url:&str,model:&str,cancel:CancellationToken,pause:&mut watch::Receiver<bool>,progress:F)->Result<Outcome>
-where F:FnMut(usize,&str,&str) {
+where F:FnMut(usize,&str,&str,&WorkflowGraph) {
     tokio::select!{
         biased;
         _=cancel.cancelled()=>anyhow::bail!("Workflow cancelled; no automatic retry"),
@@ -288,7 +307,7 @@ where F:FnMut(usize,&str,&str) {
     }
 }
 pub async fn run_with_browser<F>(plan:Plan,path:&Path,local_url:&str,model:&str,cancel:CancellationToken,pause:&mut watch::Receiver<bool>,progress:F,observer:&mut BrowserObserver<'_>)->Result<Outcome>
-where F:FnMut(usize,&str,&str) {
+where F:FnMut(usize,&str,&str,&WorkflowGraph) {
     tokio::select!{
         biased;
         _=cancel.cancelled()=>anyhow::bail!("Workflow cancelled; no automatic retry"),
@@ -385,7 +404,7 @@ mod integration {
         tokio::fs::write(&path,json!({"one":{"url":a,"read_only_tools":["lookup"]},"two":{"url":b,"read_only_tools":["lookup"]}}).to_string()).await.unwrap();
         let(_tx,mut rx)=watch::channel(false);
         let mut events=Vec::new();
-        let result=run(plan(if wrong{"wrong-value"}else{"alpha-result"},auto),&path,"http://127.0.0.1:11434","lfm3:1.7b",CancellationToken::new(),&mut rx,|_,id,status|events.push(format!("{id}:{status}"))).await;
+        let result=run(plan(if wrong{"wrong-value"}else{"alpha-result"},auto),&path,"http://127.0.0.1:11434","lfm3:1.7b",CancellationToken::new(),&mut rx,|_,id,status,_|events.push(format!("{id}:{status}"))).await;
         let _=tokio::fs::remove_file(path).await;
         ah.await.unwrap();
         assert_eq!(ac.load(Ordering::SeqCst),1);
@@ -500,7 +519,7 @@ mod advanced_tests {
             };
             let p=Plan::parse("mcp workflow {\"steps\":[{\"id\":\"one\",\"action\":{\"type\":\"observe\",\"url\":\"https://example.org/\",\"title\":\"Example Domain\"}},{\"id\":\"two\",\"depends_on\":[\"one\"],\"action\":{\"type\":\"observe\",\"url\":\"https://example.org/\",\"title\":\"Example Domain\"}}]}").unwrap();
             let (_tx,mut pause)=watch::channel(false);
-            let result=run_with_browser(p,&path,"","",CancellationToken::new(),&mut pause,|_,_,_|{},&mut observer).await.unwrap();
+            let result=run_with_browser(p,&path,"","",CancellationToken::new(),&mut pause,|_,_,_,_|{},&mut observer).await.unwrap();
             assert_eq!(result.completed,2);
         }
         assert_eq!(hits,2);

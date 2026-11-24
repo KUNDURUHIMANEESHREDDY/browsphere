@@ -22,3 +22,4 @@ pub mod mcp;
 pub mod mcp_sandbox;
 
 pub mod workflow;
+pub mod adaptive_graph;

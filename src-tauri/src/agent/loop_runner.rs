@@ -950,6 +950,9 @@ pub async fn run_react_loop(
     voice_mode: bool,
     private_mode: bool,
 ) -> anyhow::Result<String> {
+    use crate::agent::adaptive_graph::{WorkflowGraph,Kind as GraphKind,Receipt as GraphReceipt};
+    let mut inherited_graph:Option<(WorkflowGraph,usize)>=None;
+    let mut inherited_checks:Option<String>=None;
     let mut initial_snapshot=initial_snapshot;
     if crate::agent::workflow::planning_requested(&goal) {
         anyhow::ensure!(!private_mode,"MCP planning is disabled in Private Browsing");
@@ -987,7 +990,8 @@ pub async fn run_react_loop(
                 anyhow::bail!("Fresh browser URL or title did not match")
             })
         });
-        let result=crate::agent::workflow::run_with_browser(plan,&crate::resolve_data_dir().join("mcp-servers.json"),&cfg.ollama_url,model,cancel.clone(),pause_rx,|index,id,status|{
+        let result=crate::agent::workflow::run_with_browser(plan,&crate::resolve_data_dir().join("mcp-servers.json"),&cfg.ollama_url,model,cancel.clone(),pause_rx,|index,id,status,graph|{
+            let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":graph}));
             let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"Workflow Agent","objective":id,"status":if status=="handoff"{"active"}else{status},"index":index}));
         },&mut *observe).await;
         drop(observe);
@@ -995,10 +999,15 @@ pub async fn run_react_loop(
         let result=result?;
         let summary=format!("{} workflow steps passed user-defined checks. {}",result.completed,result.evidence.iter().map(|(id,e)|format!("{id}: {e}")).collect::<Vec<_>>().join("; "));
         if let Some(task)=result.browser {
+            inherited_checks=Some(summary.clone());
+            inherited_graph=Some((result.graph,result.handoff.ok_or_else(||anyhow::anyhow!("Missing workflow handoff"))?));
             if let Some(fresh)=request_live_dom_snapshot(&app,&webview_label,&pending_snapshots,1800).await{initial_snapshot=fresh;}
             let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"Workflow Agent","status":"completed","index":0,"summary":summary}));
             task
         }else{
+            anyhow::ensure!(result.graph.is_complete(),"Incomplete workflow graph");
+            let report=VerificationReport{status:"evidence_checked",summary:summary.clone(),findings:vec![],limitations:"User-defined workflow checks passed; this is not independent fact-checking of external claims.".into()};
+            let _=app.emit("agent:verification_report",serde_json::json!({"run_id":run_id,"report":report}));
             let _=app.emit("agent:run_completed",summary);
             return Ok("completed".into());
         }
@@ -1110,6 +1119,16 @@ pub async fn run_react_loop(
             .await.map_err(|_| anyhow::anyhow!("Lucia's task planner timed out. Try a faster or more reliable model in Settings > AI & ML."))??
     };
     let mut orchestrator = Orchestrator::from_plan(model_plan);
+    let kinds:Vec<_>=orchestrator.plan.stages.iter().map(|s|if s.specialist==Specialist::Verification{GraphKind::Verification}else{GraphKind::Browser}).collect();
+    let (mut graph,stage_nodes)=if let Some((mut g,id))=inherited_graph{
+        let ids=g.expand_handoff(id,&kinds)?;(g,ids)
+    }else{
+        let mut g=WorkflowGraph::chain(&kinds)?;g.start(0)?;
+        (g,(0..kinds.len()).collect::<Vec<_>>())
+    };
+    for (i,s) in orchestrator.plan.stages.iter().enumerate(){graph.describe(stage_nodes[i],&s.objective,&s.success_criteria)?;}
+    let mut recovery_node:Option<usize>=None;
+    let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
     orchestrator.begin();
     let _ = app.emit("agent:plan", serde_json::json!({
         "run_id": run_id, "plan": &orchestrator.plan
@@ -1291,7 +1310,7 @@ pub async fn run_react_loop(
         orchestrator.observe(&snapshot);
         // A dedicated, local writer handles explicit drafting in the current
         // page. Native binding, policy, and readback remain mandatory.
-        if crate::agent::writer::requested(&goal) {
+        if graph.completed()==0 && recovery_node.is_none() && graph.nodes.len()==stage_nodes.len() && crate::agent::writer::requested(&goal) {
             let cfg = router.lock().await.get_config();
             let local_route = router.lock().await.select_backend(&snapshot.origin) == "ollama";
             if local_route && !cfg.writer_model.trim().is_empty() {
@@ -1303,6 +1322,13 @@ pub async fn run_react_loop(
                         let _=app.emit("agent:run_error",serde_json::json!({"run_id":run_id,"message":"The editor is not empty. Explicit replacement permission is required."}));
                         return Ok("unverified".into());
                     }
+                    let previous_revision=graph.revision;
+                    graph=WorkflowGraph::chain(&[GraphKind::Browser,GraphKind::Verification])?;
+                    graph.revision=previous_revision+1;
+                    graph.describe(0,"Write draft in the observed editor","Native type action succeeds")?;
+                    graph.describe(1,"Verify the live draft","Exact native editor readback matches the validated draft")?;
+                    graph.start(0)?;
+                    let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
                     let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"Writer Agent","objective":"Generate original draft","status":"active","index":0}));
                     let text = tokio::select!{
                         _=cancel.cancelled()=>return Ok("cancelled".into()),
@@ -1324,11 +1350,15 @@ pub async fn run_react_loop(
                         let _=app.emit("agent:run_error",serde_json::json!({"run_id":run_id,"message":outcome}));
                         return Ok(if cancel.is_cancelled(){"cancelled"}else{"unverified"}.into());
                     }
+                    graph.complete(0,GraphReceipt::StageGate)?;graph.start(1)?;
+                    let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
                     let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"Writer Agent","status":"completed","index":0,"summary":"Draft entered; readback pending"}));
                     let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"Verification Agent","objective":"Compare live editor to the generated draft","status":"active","index":1}));
                     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                     let (_,matched)=crate::agent::writer::readback(&app,&webview_label,&origin,&node_id,&text).await?;
-                    anyhow::ensure!(matched,"Editor readback differs from generated draft");
+                    anyhow::ensure!(matched&&!cancel.is_cancelled(),"Editor readback differs from generated draft or task cancelled");
+                    graph.complete(1,GraphReceipt::FinalReport)?;
+                    let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
                     let summary=format!("Wrote and independently confirmed {} words in the live editor.",text.split_whitespace().count());
                     let report=VerificationReport{status:"evidence_checked",summary:summary.clone(),findings:vec![],limitations:"Native editor readback matched the validated draft exactly. No publishing or remote save was verified.".into()};
                     let _=app.emit("agent:verification_report",serde_json::json!({"run_id":run_id,"report":report}));
@@ -1995,6 +2025,12 @@ pub async fn run_react_loop(
             run_core.record(semantic_attempt.clone(),false);
             duplicate_retries += 1;
             if duplicate_retries <= 2 {
+                if recovery_node.is_none()&&orchestrator.specialist()!=Specialist::Verification&&crate::agent::deliberation::read_only(&goal){
+                    if let Ok(id)=graph.insert_recovery(stage_nodes[orchestrator.current]){
+                        recovery_node=Some(id);
+                        let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
+                    }
+                }
                 recent_outcomes.push(
                     if redundant_navigation {
                         "Already at the requested destination: do not navigate there again. Inspect the observed controls and pursue the remaining objective.".into()
@@ -2430,6 +2466,13 @@ pub async fn run_react_loop(
             used_reviewer|=model_route=="review:observed_stage_handoff";
             used_visual|=visual_used_for_action;
         }
+        if ok&&progress=="executed"&&(!matches!(action,BrowserAction::Complete{..})||is_complete){
+            if let Some(id)=recovery_node.take(){
+                graph.complete(id,GraphReceipt::ObservedProgress)?;
+                graph.start(stage_nodes[orchestrator.current])?;
+                let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
+            }
+        }
         run_core.record(semantic_attempt,ok && progress=="executed");
         recent_outcomes.push(format!("{action_kind}: {progress} | {}",
             sanitize_untrusted_page_text(&outcome, 200)));
@@ -2498,7 +2541,14 @@ pub async fn run_react_loop(
             };
             let summary = summary_text.as_str();
             let just_finished = orchestrator.specialist().label();
+            let receipt=if orchestrator.specialist()==Specialist::Verification{
+                anyhow::ensure!(verified_report.is_some(),"No independent final verification receipt");
+                GraphReceipt::FinalReport
+            }else{GraphReceipt::StageGate};
+            graph.complete(stage_nodes[orchestrator.current],receipt)?;
             let all_complete = orchestrator.complete_stage(summary);
+            if !all_complete{graph.start(stage_nodes[orchestrator.current])?;}
+            let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
             let _ = app.emit("agent:stage", serde_json::json!({
                 "run_id": run_id,
                 "specialist": just_finished,
@@ -2508,7 +2558,12 @@ pub async fn run_react_loop(
                 "evidence_count": orchestrator.evidence.len()
             }));
             if all_complete {
-                if let Some(report) = verified_report {
+                anyhow::ensure!(graph.is_complete(),"Workflow has unresolved objectives");
+                if let Some(mut report) = verified_report {
+                    if let Some(checks)=inherited_checks.as_ref(){
+                        report.summary=format!("{}\nEarlier workflow: {}",report.summary,checks.chars().take(1500).collect::<String>());
+                        report.limitations.push_str(" Earlier tool steps passed their user-defined checks; they are not external factual verification.");
+                    }
                     let _ = app.emit("agent:verification_report", serde_json::json!({
                         "run_id": run_id,
                         "report": report,
@@ -2576,6 +2631,10 @@ pub async fn run_react_loop(
         }
     }
 
+    if final_status!="completed" {
+        graph.stop(final_status=="cancelled");
+        let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
+    }
     if final_status == "max_steps" {
         let _ = app.emit("agent:run_error", serde_json::json!({
             "run_id": run_id,
