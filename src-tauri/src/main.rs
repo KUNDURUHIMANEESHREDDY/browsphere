@@ -1992,6 +1992,9 @@ async fn aws_invoke_lambda(state: tauri::State<'_, Arc<AppState>>, payload: Stri
 }
 
 #[tauri::command]
+fn lucia_runtime_revision()-> &'static str {agent::objective_gate::REVISION}
+
+#[tauri::command]
 async fn get_router_config(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<RouterConfig, String> {
@@ -2503,7 +2506,7 @@ fn initial_task_tab_snapshot(origin: String) -> DomSnapshot {
     // A new task WebView has not been observed yet. Never copy another tab's
     // DOM labels, text, or node IDs into it.
     DomSnapshot {
-        origin,
+        structure: Default::default(), origin,
         title: String::new(),
         text_excerpt: String::new(),
         interactive_nodes: Vec::new(),
@@ -2555,7 +2558,7 @@ async fn start_agent_run(
         ).await?;
         if start_url == "about:blank" {
             DomSnapshot {
-                origin: "about:blank".into(), title: String::new(),
+                structure: Default::default(), origin: "about:blank".into(), title: String::new(),
                 text_excerpt: String::new(), interactive_nodes: Vec::new(),
             }
         } else {
@@ -2582,7 +2585,7 @@ async fn start_agent_run(
             Some(private_mode),
         ).await?;
         DomSnapshot {
-            origin: "about:blank".into(),
+            structure: Default::default(), origin: "about:blank".into(),
             title: String::new(),
             text_excerpt: String::new(),
             interactive_nodes: Vec::new(),
@@ -3036,6 +3039,7 @@ fn main() {
             submit_action_result,
             capture_live_snapshot,
             record_navigation,
+            lucia_runtime_revision,
             get_router_config,
             get_aws_config,
             update_aws_config,

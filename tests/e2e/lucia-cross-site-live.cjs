@@ -53,6 +53,9 @@ function record(name,success,details){
 async function main(){
   const {evalJs,close}=await attach();
   try{
+    const revision=await evalJs("window.__TAURI__.core.invoke('lucia_runtime_revision')");
+    console.log('LUCIA_RUNTIME_REVISION',revision);
+    if(revision!=='lucia-evidence-acquisition-v13')throw Error('Native runtime is not the expected objective-gate build');
     const modelStatus=await fetch('http://127.0.0.1:11434/api/tags',{signal:AbortSignal.timeout(3000)})
       .then(r=>r.json()).catch(()=>({models:[]}));
     const localModel=process.env.LUCIA_TEST_LOCAL_MODEL?.trim() || 'qwen2.5:3b-instruct';
@@ -69,10 +72,10 @@ async function main(){
       litellm_url:cloudEndpoint,litellm_model:cloudModel,domain_overrides:{}
     } : {
       prefer_local_for_simple:true,lucia_cloud_only:false,
-      ollama_url:'http://127.0.0.1:11434',ollama_model:localModel,vision_model:visionModel,domain_overrides:{}
+      ollama_url:'http://127.0.0.1:11434',ollama_model:localModel,vision_model:visionModel,planner_model:process.env.LUCIA_TEST_PLANNER_MODEL||'qwen2.5:3b-instruct',supervisor_model:process.env.LUCIA_TEST_SUPERVISOR_MODEL||'lfm3:1.7b',domain_overrides:{}
     };
     await evalJs("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');Object.assign(c,"+
-      JSON.stringify(overrides)+");await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__crossSiteEvents=[];for(const name of ['agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required','agent:stage','agent:vision','agent:prerequisite','agent:supervisor'])await window.__TAURI__.event.listen(name,e=>window.__crossSiteEvents.push({kind:name,payload:e.payload}));return true})()");
+      JSON.stringify(overrides)+");await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__crossSiteEvents=[];for(const name of ['agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required','agent:stage','agent:vision','agent:prerequisite','agent:supervisor','agent:workflow_graph','agent:objective_state','agent:skill_state','agent:model_role','agent:execution_state','agent:requirement_state','agent:evidence_acquisition'])await window.__TAURI__.event.listen(name,e=>window.__crossSiteEvents.push({kind:name,payload:e.payload}));return true})()");
     async function nativeState(){
       // A newly created WebView2 may not have a loaded native snapshot yet.
       // Treat absence as pending, never as a verified page or a JS exception.
@@ -106,8 +109,412 @@ async function main(){
           decision:e.payload?.decision,
           modelRoute:e.payload?.model_route})),
         errors:mine.filter(e=>e.kind==='agent:run_error').map(e=>String(e.payload?.message||'').slice(0,150)),
-        vision:mine.filter(e=>e.kind==='agent:vision').map(e=>e.payload?.status),prerequisites:mine.filter(e=>e.kind==='agent:prerequisite').map(e=>({phase:e.payload?.phase,specialist:e.payload?.specialist,dialog:e.payload?.active_dialog})),
+        acquisitions:mine.filter(e=>e.kind==='agent:evidence_acquisition').map(e=>({status:e.payload?.status,attempt:e.payload?.attempt,missing:e.payload?.missing})),
+        requirements:mine.filter(e=>e.kind==='agent:requirement_state').map(e=>e.payload?.ledger),
+        executionStates:mine.filter(e=>e.kind==='agent:execution_state').map(e=>({phase:e.payload?.phase,strategy:e.payload?.strategy,world:e.payload?.world,page:e.payload?.page})),
+        modelRoles:mine.filter(e=>e.kind==='agent:model_role').map(e=>({role:e.payload?.role,model:e.payload?.model,status:e.payload?.status})),
+        vision:mine.filter(e=>e.kind==='agent:vision').map(e=>e.payload?.status),
+        visionDetails:mine.filter(e=>e.kind==='agent:vision').map(e=>({status:e.payload?.status,reason:e.payload?.reason,fusion:e.payload?.fusion,matchedControl:e.payload?.matched_control})),prerequisites:mine.filter(e=>e.kind==='agent:prerequisite').map(e=>({phase:e.payload?.phase,specialist:e.payload?.specialist,dialog:e.payload?.active_dialog})),
+        skills:mine.filter(e=>e.kind==='agent:skill_state').map(e=>({phase:e.payload?.phase,diagnosis:e.payload?.diagnosis,strategy:e.payload?.recovery_strategy})),
+        objectives:mine.filter(e=>e.kind==='agent:objective_state').map(e=>({revision:e.payload?.revision,required:e.payload?.required_sources,observed:e.payload?.observed_sources})),
+        graph:mine.filter(e=>e.kind==='agent:workflow_graph').at(-1)?.payload?.graph||null,
+        report:mine.filter(e=>e.kind==='agent:verification_report').at(-1)?.payload?.report||null,
         verified:mine.some(e=>e.kind==='agent:verification_report' && e.payload?.report?.status==='evidence_checked')};
+    }
+    // Phase 3 cases keep expected answers in the evaluator, never in the model prompt.
+    if(process.env.LUCIA_PHASE3_CASE){
+      if(useCloud||!hasQwen)throw Error('Phase 3 requires installed local models');
+      const key=process.env.LUCIA_PHASE3_CASE;
+      const cases={
+        'search-wikipedia':{tier:'skill',skill:'search',start:'https://en.wikipedia.org/wiki/Main_Page',
+          goal:'On this Wikipedia page, search for Grace Hopper and open the corresponding article. Then report its page title.',
+          path:'/wiki/Grace_Hopper',title:/Grace Hopper/i},
+        'search-wiktionary':{tier:'skill',skill:'search',start:'https://en.wiktionary.org/wiki/Wiktionary:Main_Page',
+          goal:'On this Wiktionary page, search for the word resilient and open the corresponding article. Then report its page title.',
+          path:'/wiki/resilient',title:/resilient/i},
+        'nav-rust':{tier:'skill',skill:'navigation',start:'https://doc.rust-lang.org/stable/book/index.html',
+          goal:'On this Rust Book page, click the Getting Started link. Then report the page title.',
+          path:'/stable/book/ch01-00-getting-started.html',title:/Getting Started/i},
+        'nav-python':{tier:'skill',skill:'navigation',start:'https://docs.python.org/3/',
+          goal:'On this Python documentation page, click the Tutorial link. Then report the page title.',
+          path:'/3/tutorial/index.html',title:/Python Tutorial/i},
+        'extract-mdn':{tier:'skill',skill:'extraction',start:'https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/isArray',
+          goal:'Read the current official Array.isArray documentation and report what the method determines. Cite the observed source evidence.',
+          path:'/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/isArray',fact:/array/i,extra:/determin|check|whether|true|false/i},
+        'extract-python':{tier:'skill',skill:'extraction',start:'https://docs.python.org/3/library/collections.html',
+          goal:'Read the current official collections documentation and explain the purpose of Counter. Cite a supporting passage.',
+          path:'/3/library/collections.html',fact:/counter/i,extra:/count|tally/i},
+        'compose-wiki':{tier:'composition',skill:'search-navigation-extraction',start:'https://en.wikipedia.org/wiki/Main_Page',
+          goal:'On this website, search for the planet Uranus and open the corresponding article. Report its position from the Sun.',
+          path:'/wiki/Uranus',fact:/seventh|7th/i,extra:/sun/i,requiresSearch:true},
+        'compose-dictionary':{tier:'composition',skill:'search-navigation-extraction',start:'https://en.wiktionary.org/wiki/Wiktionary:Main_Page',
+          goal:'On this website, search for the word ephemeral and open its dictionary entry. Report its English meaning.',
+          path:'/wiki/ephemeral',fact:/short|brief|transient|temporary|fleeting/i,extra:/time|duration|lasting|live/i,requiresSearch:true},
+        'heldout-mdn':{tier:'heldout',skill:'reference-research',start:'https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/isInteger',
+          goal:'Read the current Number.isInteger reference. Explain what the method determines, with an exact supporting passage.',
+          path:'/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/isInteger',fact:/integer/i,extra:/determin|whether|true|false/i},
+        'heldout-wiki':{tier:'heldout',skill:'search-navigation-extraction',start:'https://en.wikipedia.org/wiki/Main_Page',
+          goal:'On this website, search for the planet Saturn and open the corresponding article. Report its position from the Sun.',
+          path:'/wiki/Saturn',fact:/sixth|6th/i,extra:/sun/i,requiresSearch:true},
+      };
+      const c=cases[key];
+      if(c){
+        try{
+          await evalJs('window.browsphereApp.newTab('+JSON.stringify(c.start)+')');
+          let before;
+          for(let i=0;i<45;i++){before=await nativeState().catch(()=>null);if(before?.controls>0&&hostname(before.observed)===hostname(c.start)&&!/access denied|not found|privacy error/i.test(before.title||''))break;await sleep(400);}
+          if(!before?.controls||hostname(before.observed)!==hostname(c.start)||/access denied|not found|privacy error/i.test(before.title||'')){
+            console.log('PHASE3_RESULT',JSON.stringify({key,tier:c.tier,skill:c.skill,pass:false,blocked:true,reason:'Starting page unavailable',before}));process.exitCode=1;return;
+          }
+          const task=await runTask(c.goal,before.observed,110);
+          const after=await nativeState().catch(()=>null);
+          const exact=hostname(after?.observed)===hostname(c.start)&&new URL(after.observed).pathname===c.path;
+          const acts=task.actions.filter(a=>['ok','confirmed'].includes(a.outcome)&&a.type!=='complete');
+          const findings=task.report?.findings||[];
+          const checks={terminal:task.status==='completed',verified:task.verified,noApproval:!task.approvalRequired,exactDestination:exact};
+          if(c.title){checks.title=c.title.test(after?.title||'');checks.actionObserved=acts.length>0;}
+          if(c.fact){
+            checks.fact=!!findings.some(f=>{try{return hostname(f.url)===hostname(c.start)&&new URL(f.url).pathname===c.path&&c.fact.test(f.quote||'')&&c.extra.test(f.quote||'')&&c.fact.test(f.claim||'')&&c.extra.test(f.claim||'')}catch{return false}});
+          }
+          if(c.requiresSearch)checks.searchAndNavigation=acts.some(a=>a.type==='type_text')&&acts.some(a=>a.type==='navigate'||a.type==='click'||a.type==='press_key');
+          const pass=Object.values(checks).every(Boolean);
+          console.log('PHASE3_RESULT',JSON.stringify({key,tier:c.tier,skill:c.skill,pass,checks,before,after,task}));
+          if(!pass)process.exitCode=1;return;
+        }catch(e){console.log('PHASE3_RESULT',JSON.stringify({key,tier:c.tier,skill:c.skill,pass:false,blocked:true,reason:String(e).slice(0,300)}));process.exitCode=1;return;}
+      }
+      if(key==='vision-fixture'){
+        const http=require('node:http');
+        const requests=[];
+        const server=http.createServer((req,res)=>{
+          requests.push({method:req.method,path:req.url});
+          if(req.method!=='GET'||!['/catalog','/guide','/help','/favicon.ico'].includes(req.url)){res.writeHead(403);res.end();return;}
+          if(req.url==='/favicon.ico'){res.writeHead(404);res.end();return;}
+          res.setHeader('Content-Type','text/html; charset=utf-8');
+          const style='<style>body{font:22px Arial;padding:35px;color:#151b2e;background:#fff}a{display:inline-block;margin:15px;padding:18px 30px;border:2px solid #234c91;border-radius:8px;color:#102d60}h1{font-size:36px}</style>';
+          if(req.url==='/catalog'){res.end('<!doctype html><title>Public library</title>'+style+'<h1>Public document catalog</h1><div>Read a public document about the garden or browse general help.</div><a href="/guide">Field Guide</a><a href="/help">Help</a>');return;}
+          if(req.url==='/guide'){res.end('<!doctype html><title>Field Guide</title>'+style+'<main><h1>Field Guide</h1><p>A garden grows with sunlight, water and healthy soil.</p><p>The plants use sunlight to produce energy and the soil supplies essential nutrients.</p></main>');return;}
+          res.end('<!doctype html><title>Help</title>'+style+'<h1>Help</h1><div>General catalog information, not the garden field guide.</div><a href="/catalog">Public catalog</a>');
+        });
+        await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve)});
+        const start='http://127.0.0.1:'+server.address().port+'/catalog';
+        try{
+          await evalJs('window.browsphereApp.newTab('+JSON.stringify(start)+')');
+          let before;
+          for(let i=0;i<40;i++){before=await nativeState().catch(()=>null);if(before?.observed===start&&before.controls>=2)break;await sleep(300);}
+          if(before?.observed!==start||before.controls<2)throw Error('Visual fixture did not load');
+          const task=await runTask('Find the Field Guide in this public document catalog and report what a garden needs to grow. Cite the observed document.',start,125);
+          const details=task.visionDetails||[];
+          const observations=details.filter(e=>e.status==='observed'&&e.fusion);
+          const after=await nativeState().catch(()=>null);
+          // Validate actual structured inference and safe fusion independently
+          // of the language model's final factual-task result.
+          const checks={structuredObservation:observations.length>0,groundedControl:observations.some(e=>e.fusion.matched_controls>0),
+            budget:details.filter(e=>e.status==='analyzing').length<=3,
+            noApproval:!task.approvalRequired,readOnly:requests.every(r=>r.method==='GET'),
+            correctPage:after?.observed===start.replace('/catalog','/guide'),
+            verifiedTask:task.status==='completed'&&task.verified,
+            fact:(task.report?.findings||[]).some(f=>f.url===start.replace('/catalog','/guide')&&/sunlight/i.test(f.quote||'')&&/water/i.test(f.quote||''))};
+          const pass=Object.values(checks).every(Boolean);
+          console.log('VISION_RESULT',JSON.stringify({pass,checks,task,before,after,requests}));
+          if(!pass)process.exitCode=1;return;
+        }finally{await new Promise(r=>server.close(r));}
+      }
+      if(!['delayed-link','missing-link'].includes(key))throw Error('Unknown Phase 3 case: '+key);
+      // Local fault fixture. Expected target is known by label only. Never
+      // ask the agent to submit, authenticate, make a purchase, or write data.
+      const http=require('node:http');
+      const audit=[];
+      const delayed=key==='delayed-link';
+      const server=http.createServer((req,res)=>{
+        audit.push({method:req.method,path:req.url});
+        if(req.method!=='GET'||!['/start','/guide','/other','/favicon.ico'].includes(req.url)){res.writeHead(403);res.end();return;}
+        res.setHeader('content-type','text/html; charset=utf-8');
+        if(req.url==='/guide'){res.end('<!doctype html><title>Field Guide</title><main><h1>Field Guide</h1><p>The public field guide describes how a garden grows with sunlight, soil and water.</p></main>');return;}
+        if(req.url==='/other'){res.end('<!doctype html><title>Unrelated Index</title><main><h1>Unrelated Index</h1><p>This is not the requested guide.</p></main>');return;}
+        if(req.url==='/favicon.ico'){res.writeHead(404);res.end();return;}
+        res.end('<!doctype html><title>Public document library</title><main><h1>Public document library</h1><p>Read-only test catalog of public educational documents. The requested item may take time to load.</p><a href="/other">Unrelated Index</a><div id="list"></div></main>'+(delayed?'<script>setTimeout(()=>{const a=document.createElement("a");a.href="/guide";a.textContent="Field Guide";document.querySelector("#list").append(a)},4500)</script>':''));
+      });
+      await new Promise((ok,no)=>{server.once('error',no);server.listen(0,'127.0.0.1',ok)});
+      const start='http://127.0.0.1:'+server.address().port+'/start';
+      try{
+        await evalJs('window.browsphereApp.newTab('+JSON.stringify(start)+')');
+        let before;
+        for(let i=0;i<35;i++){before=await nativeState().catch(()=>null);if(before?.observed===start&&before.controls>0)break;await sleep(300);}
+        if(before?.observed!==start||!before.controls)throw Error('Local fault fixture did not load');
+        const initial=await evalJs("(async()=>{const s=await window.__TAURI__.core.invoke('capture_live_snapshot');return s.interactive_nodes.map(n=>n.label)})()");
+        const task=await runTask('On this public document library page, click the Field Guide link. Then report its page title. Do not navigate to unrelated pages.',start,delayed?60:40);
+        const after=await nativeState().catch(()=>null);
+        const checks={noApproval:!task.approvalRequired,noUnexpectedWrite:audit.every(a=>a.method==='GET'),noDecoy:!audit.some(a=>a.path==='/other'),initiallyMissing:!initial.includes('Field Guide')};
+        if(delayed){checks.terminal=task.status==='completed';checks.verified=task.verified;checks.destination=after?.observed===start.replace('/start','/guide');checks.actualRead=audit.some(a=>a.path==='/guide');}
+        else{checks.safeStop=['failed','cancelled','unverified'].includes(task.status);checks.noFalseVerification=!task.verified;checks.noInventedDestination=!audit.some(a=>a.path==='/guide');checks.stayed=after?.observed===start;}
+        const pass=Object.values(checks).every(Boolean);
+        console.log('PHASE3_RESULT',JSON.stringify({key,tier:'failure',skill:'recovery',pass,checks,before,after,task,audit}));
+        if(!pass)process.exitCode=1;return;
+      }finally{await new Promise(r=>server.close(r));}
+    }
+    if(process.env.LUCIA_LEVEL_TEST){
+      if(useCloud||!hasQwen)throw Error('Complex suite requires installed local models');
+      const level=Number(process.env.LUCIA_LEVEL_TEST);
+      const requests='https://requests.readthedocs.io/en/latest/user/quickstart/';
+      const httpx='https://www.python-httpx.org/async/';
+      const aiohttp='https://docs.aiohttp.org/en/stable/client_quickstart.html';
+      const timeouts='https://www.python-httpx.org/advanced/timeouts/';
+      const compatibility='https://www.python-httpx.org/compatibility/';
+      const cases={
+        2:{start:requests,goal:'Research and compare three HTTP client libraries using their official documentation: '+requests+' '+httpx+' '+aiohttp+' . Explain a useful feature and one limitation or usage caveat for each library. Cite both properties from each of the three sources.',verify:(findings)=>{
+          const has=(host,re)=>findings.some(f=>hostname(f.url)===host&&re.test(f.quote||'')&&re.test(f.claim||''));
+          return {requestsFeature:has('requests.readthedocs.io',/requests\.(get|post)|response object|json response|response content/i),requestsCaveat:has('requests.readthedocs.io',/timeout|raise_for_status|exception/i),httpxFeature:has('www.python-httpx.org',/asyncclient|async request|async support/i),httpxCaveat:has('www.python-httpx.org',/hot loop|close|context manager|streaming response/i),aiohttpFeature:has('docs.aiohttp.org',/clientsession|session\.get|http request/i),aiohttpCaveat:has('docs.aiohttp.org',/session per request|session per application|connection pool|close|reuse/i)};
+        }},
+        3:{start:'https://github.com/',goal:'Find the official psf Requests repository on GitHub. Open its README or installation documentation. Report the installation command and the supported Python version, using exact source-backed evidence from the repository or its linked official documentation.',verify:(findings,task,after)=>{
+          const official=f=>hostname(f.url)==='github.com'&&new URL(f.url).pathname.startsWith('/psf/requests')||hostname(f.url)==='requests.readthedocs.io';
+          return {repositoryObserved:after.observed?.startsWith('https://github.com/psf/requests')||findings.some(f=>hostname(f.url)==='github.com'&&new URL(f.url).pathname.startsWith('/psf/requests')),installation:findings.some(f=>official(f)&&/pip install requests/i.test(f.quote||'')&&/pip install requests/i.test(f.claim||'')),pythonVersion:findings.some(f=>official(f)&&/python\s*3\.\d+|requires-python/i.test(f.quote||'')&&/python\s*3\.\d+|requires-python/i.test(f.claim||''))};
+        }},
+        4:{start:'https://www.croma.com/',goal:'Research the Apple MacBook Air 13-inch with M4 chip, 16 GB memory and 256 GB SSD on Croma and Reliance Digital. Find matching public product listings, compare their listed Indian rupee prices and confirm that the chip, memory and storage match. Cite both product pages and their observed price evidence. If unavailable, report the limitation. Do not perform any transaction.',verify:(findings)=>{
+          const forSite=host=>findings.filter(f=>hostname(f.url)===host&&new URL(f.url).pathname!=='/');const checks={};
+          for(const [name,host] of [['croma','www.croma.com'],['reliance','www.reliancedigital.in']]){
+            const items=forSite(host);const text=items.map(f=>f.quote).join(' ');
+            checks[name+'Specs']=/macbook air/i.test(text)&&/\bM4\b/i.test(text)&&/16\s*GB/i.test(text)&&/256\s*GB/i.test(text);
+            checks[name+'Price']=items.some(f=>/(\u20b9|Rs\.?|INR)\s*[\d,]{4,}/i.test(f.quote||'')&&/(\u20b9|Rs\.?|INR)\s*[\d,]{4,}/i.test(f.claim||''));
+          }return checks;
+        }},
+        7:{start:requests,goal:'Research and reconcile these apparently conflicting claims about default HTTP request timeouts: some requests wait indefinitely, while others time out after five seconds. Compare the official sources '+requests+' '+timeouts+' '+compatibility+' . Explain which library each claim applies to, why the two statements are compatible, and cite evidence from all three pages.',verify:(findings,task)=>{
+          const from=url=>findings.filter(f=>f.url===url);
+          const a=from(requests),b=from(timeouts),c=from(compatibility);
+          return {requestsDefault:a.some(f=>/no timeout|do not specify a timeout|no timeout is set/i.test(f.quote||'')),httpxDefault:b.some(f=>/5 seconds|five seconds/i.test(f.quote||'')),compatibility:c.some(f=>/timeout/i.test(f.quote||'')),reconciled:!!task.report?.findings?.some(f=>/requests.*httpx|httpx.*requests/i.test(f.claim||'')&&/timeout/i.test(f.claim||''))||/different librar|different default/i.test(task.report?.summary||'')};
+        }},
+        8:{start:'https://www.postgresql.org/docs/',goal:'Starting from the PostgreSQL documentation index, find the SQL INSERT command reference. Locate the ON CONFLICT clause and explain the difference between DO NOTHING and DO UPDATE. Cite observed source evidence for each behavior.',verify:(findings,task,after)=>{
+          const official=f=>hostname(f.url)==='www.postgresql.org'&&/\/sql-insert\.html$/.test(new URL(f.url).pathname);
+          return {correctReference:findings.some(official),doNothing:findings.some(f=>official(f)&&/do nothing/i.test(f.quote||'')&&/avoid|skip|not insert|not inserted/i.test(f.quote||'')),doUpdate:findings.some(f=>official(f)&&/do update/i.test(f.quote||'')&&/update/i.test(f.quote||'')),multiStep:task.actions.filter(a=>['ok','confirmed'].includes(a.outcome)&&a.type!=='complete').length>=2};
+        }}
+      };
+      const c=cases[level];if(!c)throw Error('Unsupported level');
+      await evalJs('window.browsphereApp.newTab('+JSON.stringify(c.start)+')');
+      let before;
+      for(let i=0;i<40;i++){before=await nativeState().catch(()=>null);if(before?.controls&&hostname(before.observed)===hostname(c.start))break;await sleep(400);}
+      if(!before?.controls||hostname(before.observed)!==hostname(c.start)||/access denied|not found|privacy error/i.test(before.title||'')){
+        console.log('LEVEL_RESULT',JSON.stringify({level,pass:false,blocked:true,before,reason:'Starting website unavailable'}));process.exitCode=1;return;
+      }
+      const task=await runTask(c.goal,before.observed,100);
+      const after=await nativeState().catch(()=>null);
+      const findings=task.report?.findings||[];
+      const checks=c.verify(findings,task,after);
+      const pass=task.status==='completed'&&task.verified&&!task.approvalRequired&&Object.values(checks).every(Boolean);
+      console.log('LEVEL_RESULT',JSON.stringify({level,pass,checks,before,after,task}));
+      if(!pass)process.exitCode=1;
+      return;
+    }
+    if(process.env.LUCIA_COMPLEX_TEST==='1'){
+      if(useCloud||!hasQwen)throw Error('Complex suite requires installed local models');
+      const http=require('node:http'),fs=require('node:fs'),path=require('node:path');
+      const mode=process.env.LUCIA_COMPLEX_CASE||'all';
+      const wanted=name=>mode==='all'||mode===name;
+      async function startAt(url){
+        await evalJs('window.browsphereApp.newTab('+JSON.stringify(url)+')');
+        for(let i=0;i<45;i++){const before=await nativeState();if(before?.observed===url&&before.controls>0&&!/access denied|not found|privacy error/i.test(before.title))return before;await sleep(400);}
+        throw Error('Public starting page unavailable: '+url);
+      }
+      if(wanted('research')){
+        const py='https://docs.python.org/3/tutorial/datastructures.html';
+        const js='https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/map';
+        try{
+          await startAt(py);
+          const goal='Research and compare Python list comprehensions and JavaScript Array.map using the official documentation pages '+py+' and '+js+' . Read both sources. Explain what each produces and one limitation or distinction of each. Cite exact supporting excerpts from both pages.';
+          const task=await runTask(goal,py,150);
+          const findings=task.report?.findings||[];
+          const python=findings.some(f=>hostname(f.url)==='docs.python.org'&&/list comprehens/i.test(f.quote)&&/list/i.test(f.claim)&&/list/i.test(f.quote));
+          const javascript=findings.some(f=>hostname(f.url)==='developer.mozilla.org'&&/new array/i.test(f.quote)&&/array/i.test(f.claim));
+          const distinct=findings.some(f=>hostname(f.url)==='docs.python.org'&&/condition|filter|if clause|for clause/i.test(f.quote))&&findings.some(f=>hostname(f.url)==='developer.mozilla.org'&&/callback|sparse|side.effect|return/i.test(f.quote));
+          const pass=task.status==='completed'&&task.verified&&!task.approvalRequired&&python&&javascript&&distinct;
+          console.log('COMPLEX_RESEARCH',JSON.stringify({pass,python,javascript,distinct,task}));
+          record('Cross-site technical comparison with two sourced distinctions',pass,{status:task.status,python,javascript,distinct,verified:task.verified});
+        }catch(e){record('Cross-site technical comparison',false,{error:String(e)});}
+      }
+      if(wanted('graph')||wanted('negative')||wanted('outage')){
+        const root=path.join(process.env.LOCALAPPDATA,'BrowsphereAI');
+        if(!process.env.LOCALAPPDATA.includes('browsphere-cross-site-'))throw Error('Refusing non-isolated MCP configuration');
+        fs.mkdirSync(root,{recursive:true});
+        const configPath=path.join(root,'mcp-servers.json');
+        const audit=[];
+        const schema=(name,key,value)=>({name,annotations:{readOnlyHint:true,destructiveHint:false},inputSchema:{type:'object',properties:{[key]:{type:'string',enum:[value]}},required:[key],additionalProperties:false}});
+        function makeServer(lane){
+          return http.createServer(async(req,res)=>{
+            try{
+              if(req.method==='DELETE'){res.writeHead(204);res.end();return;}
+              if(req.method!=='POST'||req.url!=='/mcp'){res.writeHead(404);res.end();return;}
+              let raw='';for await(const c of req){raw+=c;if(raw.length>32768)throw Error('request too large');}
+              const r=JSON.parse(raw);let value;
+              audit.push({lane,method:r.method,name:r.params?.name,args:r.method==='tools/call'?r.params?.arguments:undefined});
+              if(lane==='empty'&&mode==='outage'){res.writeHead(503);res.end('Service temporarily unavailable');return;}
+              if(r.method==='initialize')value={protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'complex-test-'+lane,version:'1'}};
+              else if(r.method==='notifications/initialized'){res.writeHead(202);res.end();return;}
+              else if(r.method==='tools/list')value={tools:lane==='empty'?[]:lane==='github'?[schema('repository_metadata','repository','psf/requests')]:[schema('package_metadata','package','requests')]};
+              else if(r.method==='tools/call'){
+                const args=r.params.arguments;
+                let target;
+                if(lane==='github'&&r.params.name==='repository_metadata'&&args?.repository==='psf/requests')target='https://api.github.com/repos/psf/requests';
+                else if(lane==='pypi'&&r.params.name==='package_metadata'&&args?.package==='requests')target='https://pypi.org/pypi/requests/json';
+                else throw Error('unapproved tool call');
+                const response=await fetch(target,{headers:{'User-Agent':'Browsphere-complex-readonly-test/1.0','Accept':'application/json'},signal:AbortSignal.timeout(15000),redirect:'error'});
+                if(!response.ok)throw Error('Public API status '+response.status);
+                const data=await response.json();
+                const name=lane==='github'?data.name:data.info?.name;
+                if(typeof name!=='string'||name.length>80)throw Error('Missing package name');
+                audit.push({lane,publicHttpStatus:response.status,name});
+                value={content:[{type:'text',text:name}],structuredContent:{value:name},isError:false};
+              }else throw Error('unsupported method');
+              res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({jsonrpc:'2.0',id:r.id,result:value}));
+            }catch(e){audit.push({lane,error:String(e)});res.writeHead(500);res.end('test adapter failed');}
+          });
+        }
+        const servers={empty:makeServer('empty'),github:makeServer('github'),pypi:makeServer('pypi')};
+        try{
+          await Promise.all(Object.values(servers).map(s=>new Promise((ok,no)=>{s.once('error',no);s.listen(0,'127.0.0.1',ok)})));
+          fs.writeFileSync(configPath,JSON.stringify(Object.fromEntries(Object.entries(servers).map(([k,s])=>[k,{url:'http://127.0.0.1:'+s.address().port+'/mcp',read_only_tools:k==='empty'?[]:[k==='github'?'repository_metadata':'package_metadata']}]))));
+          const start='https://docs.python.org/3/';
+          const target='https://pypi.org/project/requests/';
+          const ptr='/structuredContent/value';
+          const ref=step=>({step,pointer:ptr});
+          const steps=wrong=>[
+            {id:'repository',action:{type:'auto',servers:['empty','github'],task:'Use repository_metadata for repository psf/requests to retrieve its package name.',expect:{pointer:ptr,equals:wrong?'deliberately-incorrect':'requests'}}},
+            {id:'registry',depends_on:['repository'],action:{type:'call',server:'pypi',tool:'package_metadata',arguments:{package:ref('repository')},expect:{pointer:ptr,equals:'requests'}}},
+            {id:'crosscheck',depends_on:['repository','registry'],action:{type:'compare',left:ref('repository'),right:ref('registry')}},
+            {id:'web',depends_on:['repository','registry','crosscheck'],action:{type:'browser',task:'Open '+target}}
+          ];
+          for(const negative of [false,true]){
+            if(negative?!wanted('negative'):!(wanted('graph')||wanted('outage')))continue;
+            const offset=audit.length;
+            try{
+              await startAt(start);
+              const task=await runTask('mcp workflow '+JSON.stringify({steps:steps(negative)}),start,120);
+              const calls=audit.slice(offset);
+              const after=await nativeState();
+              const github=calls.some(a=>a.lane==='github'&&a.publicHttpStatus===200&&a.name==='requests');
+              const pypi=calls.some(a=>a.lane==='pypi'&&a.publicHttpStatus===200&&a.name==='requests');
+              const transferred=calls.some(a=>a.lane==='pypi'&&a.method==='tools/call'&&a.args?.package==='requests');
+              const emptyNoDispatch=!calls.some(a=>a.lane==='empty'&&a.method==='tools/call');
+              const emptyDiscovered=calls.some(a=>a.lane==='empty'&&a.method==='tools/list');
+              const graph=task.graph?.nodes||[];
+              const receipts=graph.filter(n=>n.state==='completed').map(n=>n.receipt);
+              const fullGraph=graph.length>=5&&graph.every(n=>n.state==='completed')&&receipts.includes('comparison_check')&&receipts.includes('final_report');
+              const blocked=graph.some(n=>n.state==='failed')&&graph.some(n=>n.state==='blocked');
+              const pass=negative?github&&emptyNoDispatch&&!pypi&&!calls.some(a=>a.lane==='pypi'&&a.method==='tools/call')&&!task.verified&&task.status!=='completed'&&blocked&&after.observed===start&&!task.approvalRequired:
+                github&&pypi&&transferred&&emptyNoDispatch&&(mode==='outage'?calls.some(a=>a.lane==='empty'&&a.method==='initialize'):emptyDiscovered)&&fullGraph&&after.observed===target&&task.status==='completed'&&task.verified&&!task.approvalRequired;
+              console.log('COMPLEX_GRAPH',JSON.stringify({negative,pass,github,pypi,transferred,emptyNoDispatch,emptyDiscovered,fullGraph,blocked,after,task,audit:calls}));
+              record(negative?'Failed evidence blocks dependent external call':'Four-step MCP dependency chain and native browser verification',pass,{status:task.status,github,pypi,transferred,fullGraph,blocked,verified:task.verified});
+            }catch(e){record(negative?'Dependency stop':'Hybrid DAG',false,{error:String(e),audit:audit.slice(offset)});}
+          }
+        }finally{await Promise.all(Object.values(servers).map(s=>new Promise(r=>s.close(r))));fs.rmSync(configPath,{force:true});}
+      }
+      console.log('COMPLEX_RESULT',JSON.stringify({passed:result.filter(x=>x.success).length,total:result.length,results:result}));
+      if(!result.length||result.some(x=>!x.success))process.exitCode=1;
+      return;
+    }
+    if(process.env.LUCIA_RESEARCH_CAPTURE_TEST==='1'){
+      const urls=['https://en.wikipedia.org/wiki/Neptune','https://en.wiktionary.org/wiki/serendipity'];
+      for(const url of urls){
+        await evalJs('window.browsphereApp.newTab('+JSON.stringify(url)+')');
+        let snap;
+        for(let i=0;i<45;i++){
+          snap=await evalJs("window.__TAURI__.core.invoke('capture_live_snapshot')");
+          if(snap?.origin===url&&snap.text_excerpt?.length>500)break;
+          await sleep(500);
+        }
+        console.log('PUBLIC_CAPTURE',JSON.stringify({url:snap?.origin,title:snap?.title,excerpt:snap?.text_excerpt?.slice(0,4800)}));
+      }
+      return;
+    }
+    if (process.env.LUCIA_FACT_RESEARCH_TEST === '1') {
+      if(useCloud||!hasQwen)throw Error('Research test requires local model configuration');
+      const dictionary=process.env.LUCIA_FACT_SUBJECT==='dictionary';
+      const url=dictionary?'https://en.wiktionary.org/wiki/Wiktionary:Main_Page':'https://en.wikipedia.org/wiki/Main_Page';
+      const finalUrl=dictionary?'https://en.wiktionary.org/wiki/serendipity':'https://en.wikipedia.org/wiki/Neptune';
+      await evalJs('window.browsphereApp.newTab('+JSON.stringify(url)+')');
+      let before;
+      for(let i=0;i<45;i++){
+        before=await nativeState();
+        if(hostname(before?.observed)===hostname(url)&&before.controls>0)break;
+        await sleep(400);
+      }
+      if(hostname(before?.observed)!==hostname(url)||!before.controls)throw Error('Research website unavailable');
+      const goal=dictionary?'On this website, search for the word serendipity and open its dictionary entry. Report its English meaning.':'On this website, search for the planet Neptune and open the corresponding article. Report its position from the Sun.';
+      const task=await runTask(goal,url,120);
+      const after=await nativeState();
+      const report=await evalJs("window.__crossSiteEvents.filter(e=>e.kind==='agent:verification_report').at(-1)?.payload?.report||null");
+      const matchAnswer=s=>dictionary?(/discover|event|find|experience/i.test(s)&&/fortunate|happy|beneficial|luck/i.test(s)&&/chance|accident|unexpected|unplanned/i.test(s)):(/eighth|8th/i.test(s)&&/sun/i.test(s));
+      const evidence=report?.findings?.some(f=>f.url===finalUrl&&matchAnswer(f.claim)&&matchAnswer(f.quote));
+      const pass=task.status==='completed'&&task.verified&&after.observed===finalUrl&&!!evidence&&!task.approvalRequired;
+      console.log('FACT_RESEARCH_RESULT',JSON.stringify({pass,task,after,report,evidence:!!evidence}));
+      if(!pass)process.exitCode=1;
+      return;
+    }
+    if (process.env.LUCIA_FILTER_TEST === '1') {
+      if (useCloud || !hasQwen) throw Error('Filter test requires local model configuration');
+      const http=require('node:http');
+      let requests=0,unexpected=0;
+      const server=http.createServer((req,res)=>{
+        requests++;
+        if(req.method!=='GET'||!['/','/favicon.ico'].includes(req.url)){unexpected++;res.writeHead(403);res.end();return;}
+        res.setHeader('content-type','text/html; charset=utf-8');
+        res.end('<!doctype html><title>Public catalog filters</title><h1>Public catalog filters</h1><p>Choose a category, format and language to filter the sample catalog. This fixture only changes local page state.</p><label for="cat">Category</label><select id="cat"><option>All</option><option>Books</option><option>Maps</option></select><label for="fmt">Format</label><select id="fmt"><option>PDF</option><option>Text</option></select><label for="lang">Language</label><select id="lang"><option>Any</option><option>English</option><option>Hindi</option></select><p id="result" aria-live="polite">Catalog results: All / PDF / Any</p><script>function update(){document.getElementById("result").textContent="Catalog results: "+["cat","fmt","lang"].map(id=>document.getElementById(id).value).join(" / ")}document.querySelectorAll("select").forEach(el=>el.addEventListener("change",update));</script>');
+      });
+      await new Promise((ok,no)=>{server.once('error',no);server.listen(0,'127.0.0.1',ok)});
+      const url='http://127.0.0.1:'+server.address().port+'/';
+      try {
+        await evalJs('window.browsphereApp.newTab('+JSON.stringify(url)+')');
+        let before;
+        for(let i=0;i<45;i++){
+          before=await nativeState();
+          if(before?.observed===url&&before.controls>=3)break;
+          await sleep(400);
+        }
+        if(before?.observed!==url||before.controls<3)throw Error('Fixture unavailable');
+        const goal='Filter results only. Set "Category" to "Books". Set "Format" to "Text". Set "Language" to "English". Report the selected filters.';
+        const task=await runTask(goal,url,90);
+        const observed=await evalJs("(async()=>{const s=await window.__TAURI__.core.invoke('capture_live_snapshot');return {url:s?.origin,excerpt:s?.text_excerpt,fields:s?.interactive_nodes?.filter(n=>n.tag==='select').map(n=>({label:n.label,state:n.search_state}))}})()");
+        const expected={Category:'selected_option:Books',Format:'selected_option:Text',Language:'selected_option:English'};
+        const values=observed?.fields?.length===3&&observed.fields.every(n=>expected[n.label]===n.state);
+        const resultObserved=observed?.excerpt?.includes('Catalog results: Books / Text / English');
+        const successful=task.actions.filter(a=>a.type==='select_option'&&['ok','confirmed'].includes(a.outcome));
+        const pass=task.status==='completed'&&task.verified&&!task.approvalRequired&&successful.length===3&&values&&resultObserved&&observed.url===url&&unexpected===0;
+        console.log('FILTER_RESULT',JSON.stringify({pass,task,observed,values,resultObserved,requests,unexpected}));
+        if(!pass)process.exitCode=1;
+      }finally{await new Promise(r=>server.close(r));}
+      return;
+    }
+    if (process.env.LUCIA_GENERALIZATION_TEST === '1') {
+      if (useCloud || !hasQwen) throw Error('Generalization tests require a local model');
+      // New targets, not the URLs from the three-task MCP benchmark.
+      // Expected paths are used ONLY for independent test assertions.
+      const cases=[
+        {label:'Wikipedia different search subject',url:'https://en.wikipedia.org/wiki/Main_Page',goal:'On this Wikipedia page, search for Alan Turing and open the corresponding article. Then report its page title.',expected:'/wiki/Alan_Turing'},
+        {label:'Wiktionary search',url:'https://en.wiktionary.org/wiki/Wiktionary:Main_Page',goal:'On this Wiktionary page, search for algorithm and open the corresponding article. Then report its page title.',expected:'/wiki/algorithm'},
+        {label:'Rust Book unfamiliar documentation link',url:'https://doc.rust-lang.org/stable/book/index.html',goal:'On this Rust Book page, click the Getting Started link. Then report the page title.',expected:'/stable/book/ch01-00-getting-started.html'},
+        {label:'Python open-ended documentation navigation',url:'https://docs.python.org/3/',goal:'Find the introductory tutorial for learning Python on this documentation website. Open it and report the page title.',expected:'/3/tutorial/index.html'}
+      ];
+      for(const t of cases.filter(t=>!process.env.LUCIA_GENERALIZATION_MATCH||t.label.toLowerCase().includes(process.env.LUCIA_GENERALIZATION_MATCH.toLowerCase()))){
+        try{
+          await evalJs('window.browsphereApp.newTab('+JSON.stringify(t.url)+')');
+          let before;
+          for(let i=0;i<45;i++){
+            before=await nativeState();
+            if(hostname(before?.observed)===hostname(t.url)&&before.controls>0)break;
+            await sleep(400);
+          }
+          if(hostname(before?.observed)!==hostname(t.url)||!before.controls||/access denied|not found|privacy error/i.test(before.title))throw Error('Public starting page unavailable');
+          const task=await runTask(t.goal,t.url,100);
+          const after=await nativeState();
+          const exact=hostname(after.observed)===hostname(t.url)&&new URL(after.observed).pathname===t.expected;
+          const acts=task.actions.filter(a=>a.type!=='complete'&&['ok','confirmed'].includes(a.outcome));
+          const modelActed=acts.some(a=>/ollama:/.test(a.modelRoute||''));
+          const nativeActed=acts.some(a=>/prerequisite:|search_input:|search_enter:/.test(a.modelRoute||''));
+          const passed=exact&&acts.length>0&&task.status==='completed'&&task.verified&&!task.approvalRequired;
+          console.log('GENERALIZATION_DETAIL',JSON.stringify({label:t.label,passed,exact,modelActed,nativeActed,task,before,after}));
+          record(t.label,passed,{exact,modelActed,nativeActed,status:task.status,verified:task.verified});
+        }catch(e){record(t.label,false,{error:String(e)});}
+      }
+      console.log('GENERALIZATION_RESULT',JSON.stringify({passed:result.filter(x=>x.success).length,total:result.length,results:result}));
+      if(result.some(x=>!x.success))process.exitCode=1;
+      return;
     }
     if (process.env.LUCIA_MCP_PUBLIC_TEST === '1') {
       if (useCloud || !hasQwen) throw Error('Public MCP tests require a local model');
@@ -213,7 +620,11 @@ async function main(){
       const evidence=await evalJs("(async()=>{const s=await window.__TAURI__.core.invoke('capture_live_snapshot');return {excerpt:(s?.text_excerpt||'').slice(0,3500),controls:(s?.interactive_nodes||[]).filter(n=>/from|to station|journey|search|date|train|availability/i.test(n.label||'')).slice(0,12).map(n=>({label:n.label,role:n.role,tag:n.tag}))}})()");
       const hasTrainList=/train list|trains found|train number|check availability|no trains found|no train found/i.test(evidence.excerpt);
       const routeMatches=/bengaluru|bangalore|sbc|smvt|ypr/i.test(evidence.excerpt)&&/delhi|ndls|nzm/i.test(evidence.excerpt);
-      const dateMatches=evidence.excerpt.includes(date)||/24[\s/.-]+nov|24[\s/.-]+11[\s/.-]+2026/i.test(evidence.excerpt);
+      const journey=new Date(date+'T00:00:00Z');
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||Number.isNaN(journey.getTime())||journey.toISOString().slice(0,10)!==date)throw Error('Invalid train benchmark date');
+      const [year,month,day]=date.split('-');
+      const monthName=journey.toLocaleString('en-US',{month:'short',timeZone:'UTC'});
+      const dateMatches=evidence.excerpt.includes(date)||new RegExp('(?:^|\\D)0?'+Number(day)+'[\\s/.-]+(?:'+monthName+'|0?'+Number(month)+')([\\s/.-]+'+year+')?(?:\\D|$)','i').test(evidence.excerpt);
       const passed=task.status==='completed'&&task.verified&&hasTrainList&&routeMatches&&dateMatches&&task.actions.some(a=>(a.modelRoute||'').includes('ollama:'+localModel));
       console.log('TRAIN_RESULT',JSON.stringify({passed,task,before,after,evidence,checks:{hasTrainList,routeMatches,dateMatches}}));
       if(!passed)process.exitCode=1;

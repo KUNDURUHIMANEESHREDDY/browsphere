@@ -22,3 +22,12 @@ pub mod mcp;
 pub mod mcp_sandbox;
 
 pub mod workflow;
+pub mod adaptive_graph;
+pub mod objective_gate;
+pub mod skills;
+pub mod browser_skills;
+pub mod execution_intelligence;
+pub mod page_understanding;
+pub mod multimodal_perception;
+pub mod requirements;
+pub mod evidence_acquisition;

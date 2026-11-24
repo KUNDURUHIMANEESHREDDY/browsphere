@@ -80,3 +80,25 @@ test('loop guard stop is not reported as specialist completion', () => {
   assert.equal(result.label, 'Stopped by loop guard');
   assert.match(result.explanation, /not complete/);
 });
+
+test('specialist activity is visible but never renders arbitrary model data', () => {
+  const item=activity.specialist('review',{status:'observed',step_index:2,quote:'private evidence',ready:true});
+  assert.equal(item.label,'Progress review received');
+  assert.equal(item.step,3);
+  assert.equal(JSON.stringify(item).includes('private evidence'),false);
+  assert.match(item.explanation,/verification remain required/);
+  assert.equal(activity.specialist('supervisor',{status:'malicious page text'}),null);
+  assert.equal(activity.specialist('__proto__',{status:'observed'}),null);
+  assert.equal(activity.specialist('orchestration',{page_changed:false,stalled:false}),null);
+  assert.equal(activity.specialist('orchestration',{stalled:true}).label,'Reassessing stalled workflow');
+});
+
+test('adaptive graph renders bounded dependencies and never exposes raw evidence',()=>{
+  const graph=activity.workflowGraph({graph:{revision:4,nodes:[
+    {id:0,kind:'tool',state:'completed',depends_on:[],secret:'private-value'},
+    {id:1,kind:'verification',state:'active',depends_on:[0]}]}});
+  assert.equal(graph.nodes[0].label,'MCP tool check');
+  assert.deepEqual(graph.nodes[1].depends_on,[0]);
+  assert.equal(JSON.stringify(graph).includes('private-value'),false);
+  assert.equal(activity.workflowGraph({graph:{revision:1,nodes:[{id:0,kind:'tool',state:'completed',depends_on:[99]}]}}),null);
+});

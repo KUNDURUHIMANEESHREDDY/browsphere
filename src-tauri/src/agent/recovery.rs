@@ -61,7 +61,7 @@ pub const RESULTS_HINT: &str = "Recovery directive: Alternative search results a
 mod tests {
     use super::*;
     fn page(origin:&str,title:&str)->DomSnapshot {
-        DomSnapshot {origin:origin.into(), title:title.into(), text_excerpt:String::new(), interactive_nodes:vec![]}
+        DomSnapshot {structure: Default::default(), origin:origin.into(), title:title.into(), text_excerpt:String::new(), interactive_nodes:vec![]}
     }
     #[test]
     fn login_gate_is_grounded_in_native_location_and_title() {

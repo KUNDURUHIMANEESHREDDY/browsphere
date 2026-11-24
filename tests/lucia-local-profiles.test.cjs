@@ -12,5 +12,7 @@ test('LFM3 and Qwen profiles are exposed while vision stays separately configura
   assert.match(html,/data-action="use-local-lucia-profile" data-model="lfm3:1.7b"/);
   assert.match(html,/data-action="use-local-lucia-profile" data-model="qwen3.5:0.8b"/);
   assert.match(html,/id="cfgVisionModel"/);
+  assert.match(html,/id="cfgPlannerModel"/);
+  assert.match(html,/data-action="use-local-lucia-profile" data-model="role-team"/);
   assert.match(html,/data-action="use-local-lucia-fallback"/);
 });

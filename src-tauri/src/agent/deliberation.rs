@@ -9,9 +9,63 @@ use url::Url;
 
 fn norm(s:&str)->String{s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()}
 pub fn read_only(goal:&str)->bool{
-    let g=goal.to_lowercase();
+    // Match human intent, not substrings embedded in source addresses.
+    let g=goal.split_whitespace().filter(|w|!w.starts_with("https://")&&!w.starts_with("http://"))
+        .collect::<Vec<_>>().join(" ").to_lowercase();
     ["report","find ","search ","research","look up","read ","explain","compare","summarize"].iter().any(|s|g.contains(s))
         && !["book ","buy ","pay ","purchase","register","sign up","submit","send ","publish","write ","draft ","upload","download","delete","change ","update ","play ","log in","sign in","account","password","credential","consent","reserve","transfer","checkout","my ","private"].iter().any(|s|g.contains(s))
+}
+/// Track explicit public source addresses in a bounded read-only comparison.
+/// This does not grant navigation permissions or authorize external actions.
+pub fn explicit_research_sources(goal:&str)->Vec<Url>{
+    let g=goal.to_lowercase();
+    if !read_only(goal)||!["compare","comparison","both sources","each source","all sources","reconcile","cite","official documentation"].iter().any(|x|g.contains(x)){return vec![];}
+    let mut out=Vec::new();
+    for word in goal.split_whitespace(){
+        let w=word.trim_matches(['(',')','[',']','"', '\'', ',', ';']).trim_end_matches('.');
+        let Ok(u)=Url::parse(w) else{continue};
+        let Some(host)=u.host_str() else{continue};
+        if u.scheme()!="https"||u.port().is_some()||u.query().is_some()||u.fragment().is_some()||
+            !u.username().is_empty()||u.password().is_some()||host=="localhost"||host.ends_with(".local")||
+            !host.contains('.')||host.parse::<std::net::IpAddr>().is_ok(){continue;}
+        if !out.contains(&u){out.push(u);}
+        if out.len()>4{return vec![];}
+    }
+    if out.len()<2{vec![]}else{out}
+}
+pub fn source_observed(url:&Url,sources:&[super::orchestrator::SourceEvidence])->bool{
+    super::browser_skills::research::observed(url,sources)
+}
+pub fn missing_research_sources(goal:&str,sources:&[super::orchestrator::SourceEvidence])->Vec<Url>{
+    super::browser_skills::research::missing(&explicit_research_sources(goal),sources)
+}
+/// Extract only a short explicit search subject followed by an open-result
+/// instruction. This authorizes neither a transaction nor a completion claim.
+pub fn lookup_subject(goal:&str)->Option<String>{
+    if !read_only(goal){return None}
+    let lower=goal.to_ascii_lowercase();
+    let start=lower.find("search for ")?+"search for ".len();
+    let rest=goal.get(start..)?;
+    let end=rest.to_ascii_lowercase().find(" and open").or_else(||rest.to_ascii_lowercase().find(", open"))?;
+    let subject=rest.get(..end)?.trim();
+    let subject=["the word ","the planet ","the term ","the article "].iter()
+        .find_map(|p|subject.get(..p.len()).filter(|s|s.eq_ignore_ascii_case(p)).and_then(|_|subject.get(p.len()..))).unwrap_or(subject).trim();
+    if subject.len()<3||subject.len()>100||subject.split_whitespace().count()>12||
+        !subject.chars().all(|c|c.is_alphanumeric()||matches!(c,' '|'-'|'\'')){return None}
+    Some(subject.into())
+}
+pub fn lookup_landed(goal:&str,initial:&str,page:&DomSnapshot)->bool{
+    let Some(subject)=lookup_subject(goal) else{return false};
+    let (Some(start),Some(current))=(clean_url(initial),clean_url(&page.origin)) else{return false};
+    if start.origin()!=current.origin()||start==current||error_page(page)||search_listing(page)||
+        page.text_excerpt.starts_with("Active dialog:")||page.text_excerpt.trim().chars().count()<80{return false}
+    let expected=norm(&subject);
+    let title=norm(&page.title);
+    let slug=current.path_segments().and_then(|mut s|s.next_back()).unwrap_or("").replace(['_','-']," ");
+    let decoded=url::form_urlencoded::parse(slug.as_bytes()).next().map(|(s,_)|s.into_owned()).unwrap_or_default();
+    let slug=norm(&decoded);
+    let boundary=|s:&str|s==expected||s.strip_prefix(&expected).is_some_and(|rest|rest.starts_with(" - ")||rest.starts_with(" | ")||rest.starts_with(" (")||rest.starts_with(" ? "));
+    boundary(&title)&&boundary(&slug)
 }
 pub fn error_page(page:&DomSnapshot)->bool{
     let title=norm(&page.title);
@@ -74,12 +128,21 @@ impl Advisory{
     pub fn hint(&self)->String{format!("Independent assessment: {}; next phase: {}; evidence ready for review: {}. Use only current observed controls; assess remaining requirements before acting.",self.diagnosis.label(),self.phase.label(),self.ready)}
 }
 pub fn native_phase(page:&DomSnapshot,stalled:bool)->Advisory{
-    let (phase,diagnosis)=if error_page(page){(Phase::Blocked,Diagnosis::WrongDestination)}
-    else if page.text_excerpt.starts_with("Active dialog:"){(Phase::ResolveDialog,Diagnosis::BlockingDialog)}
-    else if page.interactive_nodes.iter().any(|n|n.role=="option"&&!n.is_sensitive){(Phase::ChooseOption,Diagnosis::UnselectedOption)}
-    else if search_listing(page){(Phase::OpenResult,Diagnosis::InsufficientEvidence)}
-    else if page.interactive_nodes.iter().any(|n|n.search_state.as_deref()==Some("empty")&&!n.is_sensitive){(Phase::EnterValue,Diagnosis::MissingInput)}
-    else if stalled{(Phase::Inspect,Diagnosis::RepeatedAction)}else{(Phase::Inspect,Diagnosis::Unknown)};
+    use super::page_understanding::PageKind;
+    let profile=super::page_understanding::classify(page);
+    let (phase,diagnosis)=match profile.kind{
+        PageKind::Blocked=>(Phase::Blocked,Diagnosis::WrongDestination),
+        PageKind::Dialog=>(Phase::ResolveDialog,Diagnosis::BlockingDialog),
+        PageKind::Autocomplete=>(Phase::ChooseOption,Diagnosis::UnselectedOption),
+        PageKind::SearchResults|PageKind::ProductListing=>(Phase::OpenResult,Diagnosis::InsufficientEvidence),
+        PageKind::TransportResults|PageKind::ProductDetail|PageKind::Documentation|PageKind::Article=>(Phase::ReadEvidence,Diagnosis::InsufficientEvidence),
+        PageKind::Loading|PageKind::EmptyResults=>(Phase::Inspect,Diagnosis::InsufficientEvidence),
+        _ if page.interactive_nodes.iter().any(|n|n.role=="option"&&!n.is_sensitive)=>(Phase::ChooseOption,Diagnosis::UnselectedOption),
+        _ if search_listing(page)=>(Phase::OpenResult,Diagnosis::InsufficientEvidence),
+        _ if page.interactive_nodes.iter().any(|n|n.search_state.as_deref()==Some("empty")&&!n.is_sensitive)=>(Phase::EnterValue,Diagnosis::MissingInput),
+        _ if stalled=>(Phase::Inspect,Diagnosis::RepeatedAction),
+        _=>(Phase::Inspect,Diagnosis::Unknown)
+    };
     Advisory{phase,diagnosis,target:None,ready:false,source:page.origin.clone(),quote:String::new()}
 }
 fn validate_review(raw:&str,goal:&str,page:&DomSnapshot,controls:&[super::dom_extractor::DomNodeSummary])->Option<Advisory>{
@@ -101,7 +164,7 @@ pub async fn review(config:&RouterConfig,goal:&str,page:&DomSnapshot,history:&[S
     if config.lucia_cloud_only||!config.prefer_local_for_simple{return None}
     let endpoint=Url::parse(&config.ollama_url).ok()?;
     if endpoint.scheme()!="http"||!matches!(endpoint.host_str(),Some("localhost"|"127.0.0.1"|"[::1]"))||!endpoint.username().is_empty()||endpoint.password().is_some(){return None}
-    let model=[&config.writer_model,&config.supervisor_model].into_iter().find(|m|!m.trim().is_empty()&&**m!=config.ollama_model&&!m.to_ascii_lowercase().contains("cloud"))?;
+    let model=[&config.supervisor_model,&config.planner_model,&config.writer_model].into_iter().find(|m|!m.trim().is_empty()&&**m!=config.ollama_model&&!m.to_ascii_lowercase().contains("cloud"))?;
     let controls:Vec<_>=semantic_core::rank(page,goal,20).into_iter().filter(|n|!n.is_sensitive&&!n.is_submit).collect();
     let view:Vec<_>=controls.iter().enumerate().map(|(i,n)|json!({"id":i+1,"role":n.role,"label":sanitize_untrusted_page_text(&n.label,80),"state":n.search_state})).collect();
     let input=json!({"goal":goal.chars().take(1000).collect::<String>(),"title_untrusted":sanitize_untrusted_page_text(&page.title,150),"page_untrusted":sanitize_untrusted_page_text(&page.text_excerpt,2400),"controls_untrusted":view,"action_outcomes":history.iter().rev().take(3).map(|h|sanitize_untrusted_page_text(h,160)).collect::<Vec<_>>()});
@@ -134,7 +197,31 @@ pub fn visual_targets(page:&DomSnapshot,hint:&str)->Vec<String>{
 mod tests{
  use super::*;
  use crate::agent::dom_extractor::{DomNodeSummary,BoundingBox};
- fn page()->DomSnapshot{DomSnapshot{origin:"https://example.org/search".into(),title:"Public guide".into(),text_excerpt:"The public guide describes how to use the application correctly.".into(),interactive_nodes:vec![DomNodeSummary{node_id:"native1".into(),tag:"a".into(),role:"link".into(),label:"Application guide".into(),options:vec![],checked:None,search_state:None,href:Some("https://example.org/guide".into()),is_submit:false,is_sensitive:false,bbox:Some(BoundingBox{x:1.,y:1.,width:100.,height:40.,in_viewport:true})}]}}
+ fn page()->DomSnapshot{DomSnapshot{structure: Default::default(), origin:"https://example.org/search".into(),title:"Public guide".into(),text_excerpt:"The public guide describes how to use the application correctly.".into(),interactive_nodes:vec![DomNodeSummary{node_id:"native1".into(),tag:"a".into(),role:"link".into(),label:"Application guide".into(),options:vec![],checked:None,search_state:None,href:Some("https://example.org/guide".into()),is_submit:false,is_sensitive:false,bbox:Some(BoundingBox{x:1.,y:1.,width:100.,height:40.,in_viewport:true})}]}}
+ #[test]fn exact_benchmark_three_sources_are_preserved(){
+  let g="Research and compare three HTTP client libraries using their official documentation: https://requests.readthedocs.io/en/latest/user/quickstart/ https://www.python-httpx.org/async/ https://docs.aiohttp.org/en/stable/client_quickstart.html . Explain a useful feature and one limitation or usage caveat for each library. Cite both properties from each of the three sources.";
+  assert!(read_only(g));assert_eq!(explicit_research_sources(g).len(),3);
+  assert!(!read_only("Research https://example.org/ and buy a subscription"));
+ }
+ #[test]fn read_only_lookup_never_implies_full_completion(){
+  assert_eq!(lookup_subject("Search for the planet Neptune, open the relevant article, and report its position.").as_deref(),Some("Neptune"));
+  assert_eq!(lookup_subject("Search for the word serendipity and open its dictionary entry. Report the English meaning.").as_deref(),Some("serendipity"));
+  assert!(lookup_subject("Search for a train and open its booking page and pay for a ticket.").is_none());
+ }
+ #[test]fn research_destination_is_not_a_search_listing_or_help_page(){
+  let g="Search for the planet Neptune, open its article, and report its position.";
+  let mut p=page();
+  p.origin="https://example.org/articles/Neptune".into();
+  p.title="Neptune - Encyclopedia".into();
+  p.text_excerpt="Neptune is the eighth planet from the Sun. It is an ice giant with a thick atmosphere and several moons.".into();
+  assert!(lookup_landed(g,"https://example.org/",&p));
+  assert!(!lookup_landed(g,"https://other.example/",&p));
+  p.title="Neptune-like planets - Encyclopedia".into();
+  assert!(!lookup_landed(g,"https://example.org/",&p));
+  p.title="Neptune - Encyclopedia".into();
+  p.origin="https://example.org/help/search".into();
+  assert!(!lookup_landed(g,"https://example.org/",&p));
+ }
  #[test]fn navigation_requires_observed_or_user_supplied_target(){
   let p=page();assert!(navigation_grounded("Find the guide",&p,"https://example.org/guide"));
   assert!(!navigation_grounded("Find the guide",&p,"https://example.org/guessed"));

@@ -263,7 +263,7 @@ mod tests {
     use super::*;
     fn sample() -> DomSnapshot {
         DomSnapshot {
-            origin: "https://example.org/".into(),
+            structure: Default::default(), origin: "https://example.org/".into(),
             title: "Test".into(),
             text_excerpt: "Sample".into(),
             interactive_nodes: vec![],

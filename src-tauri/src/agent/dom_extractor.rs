@@ -33,8 +33,26 @@ pub struct DomNodeSummary {
     pub bbox: Option<BoundingBox>,
 }
 
+/// Bounded structural counts from the native visible DOM. No input values,
+/// HTML, hidden metadata, or page-supplied classification instructions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PageStructure {
+    pub headings: u16,
+    pub paragraphs: u16,
+    pub code_blocks: u16,
+    pub articles: u16,
+    pub result_regions: u16,
+    pub result_links: u16,
+    pub product_cards: u16,
+    pub priced_cards: u16,
+    pub offer_blocks: u16,
+    pub loading: bool,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomSnapshot {
+    #[serde(default)]
+    pub structure: PageStructure,
     pub origin: String,
     pub title: String,
     pub text_excerpt: String,
@@ -90,7 +108,27 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     return SENSITIVE_RE.test(hint);
   }}
 
+  function calendarDateLabel(el) {{
+    if (!el.matches('a,button,[role="gridcell"]')) return null;
+    const cal = el.closest('.ui-datepicker,.p-datepicker,[role="grid"]');
+    if (!cal || !isVisible(cal) || el.closest('.ui-datepicker-other-month,.p-datepicker-other-month,[aria-disabled="true"],.ui-state-disabled,.p-disabled')) return null;
+    const day = (el.innerText || "").trim();
+    if (!/^(?:[1-9]|[12]\d|3[01])$/.test(day)) return null;
+    const monthEl=cal.querySelector('.ui-datepicker-month,.p-datepicker-month');
+    const yearEl=cal.querySelector('.ui-datepicker-year,.p-datepicker-year');
+    if (!monthEl||!yearEl||!isVisible(monthEl)||!isVisible(yearEl)) return null;
+    const months=["january","february","march","april","may","june","july","august","september","october","november","december"];
+    const name=(monthEl.innerText||"").trim().toLowerCase();
+    const year=(yearEl.innerText||"").trim();
+    const month=months.findIndex(m=>m===name||m.slice(0,3)===name)+1;
+    if (!month||!/^20\d\d$/.test(year)) return null;
+    const date=new Date(Date.UTC(Number(year),month-1,Number(day)));
+    if(date.getUTCMonth()!==month-1)return null;
+    return date.toISOString().slice(0,10);
+  }}
   function computeAccessibleName(el) {{
+    const calendarLabel=calendarDateLabel(el);
+    if(calendarLabel)return calendarLabel;
     const ariaLabel = el.getAttribute("aria-label");
     // Framework serialization bugs can expose HTML or a sanitizer diagnostic
     // as every button's aria-label. Use the rendered label instead; never use
@@ -152,7 +190,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     if ((el.tagName === "TEXTAREA" || el.isContentEditable) &&
         !el.closest("form") && el.getBoundingClientRect().height >= 72)
       return "Document editor";
-    const text = normalized(el.innerText) || normalized(el.value)
+    const text = normalized(el.innerText) || (el.matches("input,textarea,select") ? "" : normalized(el.value))
       || normalized(ancestorLabel?.innerText) || normalized(imageAlt)
       || normalized(el.getAttribute("alt"));
     return text.slice(0, 120);
@@ -274,9 +312,32 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
           // Read only the presence of a non-sensitive search query, not its value.
           search_state: (() => {{
             if (isSensitiveField(current) || sensitiveForm) return null;
+            // Read back only a visible, already-enumerated public dropdown
+            // option label. Never expose arbitrary input values.
+            if (current.tagName === "SELECT" && !current.disabled) {{
+              const option = current.selectedOptions?.[0];
+              const label = (option?.textContent || "").replace(/\s+/g, " ").trim().slice(0, 100);
+              return label && !option.disabled ? "selected_option:" + label : null;
+            }}
+            // Capture an ISO-only journey date on a visible public route
+            // form with both route fields. Never read arbitrary inputs.
+            if(current.tagName==="INPUT" && (/\b(?:journey date|date of journey|choose date|enter date)\b|dd\/mm\/yyyy/i.test(computeAccessibleName(current)+" "+(current.placeholder||"")))){{
+              const routeInputs=Array.from(document.querySelectorAll('input[role="searchbox"],input[role="combobox"],input[aria-autocomplete]')).filter(n=>isVisible(n)&&!isSensitiveField(n));
+              if(routeInputs.some(n=>/\bfrom\b/i.test(computeAccessibleName(n)))&&routeInputs.some(n=>/\bto\b/i.test(computeAccessibleName(n)))){{
+                const raw=String(current.value||"").trim();
+                const iso=raw.match(/^(\d{{4}})-(\d{{2}})-(\d{{2}})$/);
+                const dmy=raw.match(/^(\d{{2}})\/(\d{{2}})\/(\d{{4}})$/);
+                const value=iso?iso[0]:dmy?dmy[3]+"-"+dmy[2]+"-"+dmy[1]:null;
+                if(value&&Number.isFinite(Date.parse(value+"T00:00:00Z"))&&new Date(value+"T00:00:00Z").toISOString().slice(0,10)===value)return "public_date:"+value;
+              }}
+            }}
             if (current.tagName === "INPUT" && (current.readOnly || current.hasAttribute("readonly"))) return "read_only";
             const selector = 'input[type="search"], input[role="searchbox"], input[name="search"], input[name="search_query"], input[aria-label*="Search"], input[placeholder*="Search"], textarea[role="searchbox"], textarea[name="search"], textarea[name="search_query"], textarea[aria-label*="Search"], textarea[placeholder*="Search"], textarea[name="q"]';
-            if (current.matches(selector) && !current.disabled && typeAttr !== "hidden") {{
+            // Public comboboxes and route fields may use textbox semantics.
+            // Capture occupancy only, never arbitrary user-entered values.
+            const publicRoute = current.tagName === "INPUT" &&
+                /^(?:enter |select )?(?:from|to|origin|destination|departure|arrival)(?: station| city| location)?$/i.test(computeAccessibleName(current).trim());
+            if ((current.matches(selector) || current.matches('input[role="combobox"], input[aria-autocomplete="list"], input[aria-autocomplete="both"]') || publicRoute) && !current.disabled && typeAttr !== "hidden") {{
               return String(current.value || "").trim() ? "filled" : "empty";
             }}
             if (formSubmit && form) {{
@@ -347,6 +408,23 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     if (isVisible(editor) && !isSensitiveField(editor) && !editor.closest('form') &&
         editor.getBoundingClientRect().height >= 72) walk(editor, true);
   }}
+  // Reserve early capacity for visible public documentation and metadata
+  // links. Large navigation trees and repository file lists must not crowd
+  // out the links that lead to install/compatibility evidence.
+  for (const link of Array.from(document.querySelectorAll('main a[href], [role="main"] a[href], article a[href]')).slice(0,1200)) {{
+    if (nodes.length >= Math.min(MAX_NODES,48)) break;
+    if (!isVisible(link) || link.closest('form,[role="menu"],[aria-hidden="true"]')) continue;
+    try {{
+      const u=new URL(link.href);
+      if(u.origin!==location.origin || u.search || u.username || u.password)continue;
+      const label=computeAccessibleName(link).trim();
+      const file=u.pathname.split('/').pop()||"";
+      if(/^(?:readme(?:\.(?:md|rst|txt))?|pyproject\.toml|setup\.(?:py|cfg)|(?:install|installation)(?:\.(?:md|rst|html))?|docs|documentation)$/i.test(file)||
+        /^(?:current(?:\s*\(\d+(?:\.\d+)?\))?|(?:part\s+[ivxlcdm]+\.\s*)?sql language|(?:[ivxlcdm]+\.\s*)?sql commands|installation|getting started)$/i.test(label)){{
+        walk(link,true);
+      }}
+    }}catch(_e){{}}
+  }}
   // Prioritize *general page semantics*, not site-specific selectors. Many
   // websites place hundreds of links in their header/sidebar before the
   // relevant article, results, search form, or dialog. Scan those regions
@@ -369,19 +447,91 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   const contentText = isVisible(primaryTextRoot)
     ? (primaryTextRoot.innerText || "") : "";
   const bodyText = document.body?.innerText || "";
-  const visibleText = (activeDialog ? ["Active dialog: " + (activeDialog.innerText || "")] : [contentText, bodyText])
+  // Preserve actual readable content ahead of long menus and infoboxes.
+  // Semantic HTML paragraphs and definition/list items are page observations,
+  // not instructions. Do not read hidden nodes or input values.
+  let prose = "";
+  if (!activeDialog && isVisible(primaryTextRoot)) {{
+    const blocks = [];
+    const seenBlocks=new Set();
+    // Read embedded documents (README, help article, API reference) ahead of
+    // surrounding repository file trees and sidebars. Use rendered content
+    // only; never fetch raw files or hidden metadata.
+    const contentRoots=Array.from(primaryTextRoot.querySelectorAll('article,[role="article"],.markdown-body,[itemprop="text"]'))
+      .filter(el=>isVisible(el)&&!el.closest('nav,aside,form,[aria-hidden="true"]'))
+      .filter(el=>(el.innerText||"").trim().length>=80).slice(0,12);
+    const orderedRoots=[...contentRoots,primaryTextRoot];
+    for(const root of orderedRoots){{
+    for (const el of root.querySelectorAll('p, dd, li, pre, blockquote, [role="code"]')) {{
+      if (blocks.length >= 160 || !isVisible(el) ||
+          el.closest('nav, aside, header, footer, table, form, [role="navigation"], [role="menu"], [role="listbox"], [role="dialog"], [aria-hidden="true"]')) continue;
+      if (el.querySelector('p, dd, li, pre')) continue;
+      const text = (el.innerText || "").replace(/\s+/g, " ").trim();
+      if ((text.length>=45 || ((el.tagName==="PRE"||el.getAttribute("role")==="code")&&text.length>=12&&text.length<=800))
+          && !seenBlocks.has(text)){{seenBlocks.add(text);blocks.push(text);}}
+      if (blocks.join(" ").length >= MAX_TEXT) break;
+    }}
+    if(blocks.length>=160||blocks.join(" ").length>=MAX_TEXT)break;
+    }}
+    prose = blocks.join(" ");
+    if (prose.length < 180) prose = "";
+  }}
+  const visibleText = (activeDialog ? ["Active dialog: " + (activeDialog.innerText || "")] : [prose, contentText, bodyText])
     .filter(Boolean).join(" ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, MAX_TEXT);
 
+  // Structural signals supplement text. Only visible bounded regions count;
+  // neither CSS names nor hidden schema alone prove a result or product.
+  const structure = (() => {{
+    const root = isVisible(primaryTextRoot) ? primaryTextRoot : (document.body || document.documentElement);
+    const outsideChrome = el => isVisible(el) && !el.closest('nav,header,footer,aside,[role="navigation"],[aria-hidden="true"]');
+    const scoped = selector => Array.from(root.querySelectorAll(selector)).slice(0,320).filter(outsideChrome);
+    const counts = selector => Math.min(120,scoped(selector).length);
+    const regionSelector = '[role="feed"],[role="list"],.search-results,[class*="search-results"],[data-testid*="search-results"],[class*="result-list"],[class*="results-list"]';
+    const regions = scoped(regionSelector);
+    const links = new Set();
+    for(const region of regions.slice(0,16)){{
+      for(const a of Array.from(region.querySelectorAll('a[href]')).slice(0,80)){{
+        if(outsideChrome(a) && (a.innerText||a.querySelector('img[alt]')?.alt||"").trim().length>=3) links.add(a);
+      }}
+    }}
+    const pricePattern = /(?:\u20b9|Rs\.?|INR|USD|EUR|GBP|\$|\u20ac|\u00a3)\s*\d[\d,.]*/i;
+    const cards = scoped('[itemtype*="schema.org/Product"],[data-testid*="product-card"],[class*="product-card"],[class*="productCard"],[class*="product-item"],[class*="product-tile"],li[class*="product"],article');
+    let productCards=0,pricedCards=0;
+    for(const el of cards){{
+      if(cards.some(other=>other!==el&&el.contains(other)))continue;
+      const txt=(el.innerText||"").trim().slice(0,1200);
+      const identity=el.querySelector('h2,h3,h4,[itemprop="name"],a[href]');
+      if(!identity||!outsideChrome(identity)||txt.length<12||!pricePattern.test(txt))continue;
+      pricedCards++;
+      if(el.matches('[itemtype*="schema.org/Product"],[data-testid*="product-card"],[class*="product-card"],[class*="productCard"],[class*="product-item"],[class*="product-tile"],li[class*="product"]'))productCards++;
+    }}
+    const offers=scoped('[itemprop="price"],[itemtype*="schema.org/Offer"],[class*="product-price"],[data-testid*="price"],[class*="selling-price"]');
+    const offerBlocks=offers.filter(el=>pricePattern.test((el.innerText||"").trim().slice(0,180))).length;
+    return {{
+      headings: counts('h1,h2,h3,h4,[role="heading"]'),
+      paragraphs: scoped('p,dd').filter(el=>(el.innerText||"").trim().length>=35).length,
+      code_blocks: counts('pre,[role="code"]'),
+      articles: counts('article,[role="article"]'),
+      result_regions: regions.length,
+      result_links: Math.min(120,links.size),
+      product_cards: Math.min(120,productCards),
+      priced_cards: Math.min(120,pricedCards),
+      offer_blocks: Math.min(120,offerBlocks),
+      loading: document.readyState==="loading" || root.getAttribute('aria-busy')==="true" ||
+        scoped('[role="progressbar"],[aria-busy="true"]').some(el=>/load|progress/i.test((el.getAttribute('aria-label')||"")+" "+(el.innerText||"").slice(0,80)))
+    }};
+  }})();
   const payload = {{
     request_id: REQUEST_ID,
     snapshot: {{
       origin: window.location.href,
       title: document.title || window.location.hostname || "Untitled",
       text_excerpt: visibleText,
-      interactive_nodes: nodes
+      interactive_nodes: nodes,
+      structure
     }}
   }};
 
@@ -405,7 +555,7 @@ pub async fn request_live_dom_snapshot(
 ) -> Option<DomSnapshot> {
     // IPC from remote page origins is intentionally not permitted by Tauri.
     // Use the native WebView2 script-completion callback to read this result.
-    let script = build_snapshot_script(Uuid::new_v4(), 120, 2400);
+    let script = build_snapshot_script(Uuid::new_v4(), 120, 24000);
     let value = crate::agent::native_eval::eval_json(
         app, webview_label, script, timeout_ms
     ).await.ok()?;

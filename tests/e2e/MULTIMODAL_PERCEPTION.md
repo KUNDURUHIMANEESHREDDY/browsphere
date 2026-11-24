@@ -1,0 +1,14 @@
+﻿# Lucia multimodal perception v11
+
+The native semantic page profile remains authoritative for objective gates. The optional local vision model consumes a dedicated-tab viewport screenshot and a bounded list of visible, uniquely labelled, nonsensitive DOM candidates, with a coarse task category. The output schema contains page kind, layout, blocker, up to three candidate index/label pairs, and up to two visible excerpts. Unknown or malformed output is rejected. The screenshot is sent only to the configured loopback Ollama endpoint. The fusion layer re-observes the native DOM after inference and discards stale observations. It independently validates the exact candidate index, unique label, visibility, goal relevance, and current DOM identity. A conflicting visual class does not override native perception; visual blocker claims cannot promote controls. Only bounded classifications and counts enter the compact action prompt, and grounded candidate IDs are prioritized in its existing native control list. Native binder, policy and verifier remain mandatory.
+
+A run has at most three inference reservations, a three-step cooldown and no repeat for the same stage/page state. Eligible triggers are unknown page, sparse controls, ambiguous results, failed action or stalled recovery. Private browsing, detected sensitive forms and account paths, blocked/loading/empty pages, verification, and deterministic objective/source/route/filter tasks do not use the optional vision path. These protections are based on observed page state, not a guarantee that arbitrary public webpages contain no personal information. No screenshot, untrusted visual prose, or raw control ID is persisted in vision telemetry. The agent emits analyzing, observed, stale, unavailable, and grounded_action events. A matched action means its executed control matched a fused candidate; it is not evidence of a causal benefit from vision.
+
+Validation:
+
+    cargo test -p browsphere-core --offline -- --test-threads=2
+    node --test tests/lucia-local-model.test.cjs tests/lucia-local-profiles.test.cjs tests/lucia-activity.test.cjs
+    cargo build -p browsphere-core --offline
+    python tests/e2e/run-lucia-phase3.py --case vision-fixture --case heldout-mdn
+
+The vision fixture uses a real native WebView2 screenshot and the configured LFM3-VL model, with a controlled read-only local public-document catalog. It independently checks observed fusion, grounded control, budget, destination, source-backed answer, and no approval/write. MDN is a control case where deterministic current-reference review should not invoke vision. The original eight benchmark cases remain unchanged. The implementation does not use raw screenshot coordinates, infer exact product attributes from photos, or establish that a requested result is factually verified by vision alone. Before/after screenshot comparison and richer visual record extraction are separate future capabilities.

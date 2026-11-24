@@ -45,6 +45,38 @@
     return { kind: 'phase', label, explanation: 'Live browser progress, not private model reasoning.',
       status: phase, step: safeIndex(payload.step_index) };
   }
+  const specialistLabels = Object.freeze({
+    review: Object.freeze({reviewing:'Independent model assessing progress', observed:'Progress review received', unavailable:'Progress reviewer unavailable'}),
+    vision: Object.freeze({analyzing:'Analyzing visible page locally', observed:'Structured visual observation fused with browser state', stale:'Visual observation discarded after page change', grounded_action:'Action matched a grounded visual control', unavailable:'Local visual observation unavailable'}),
+    supervisor: Object.freeze({reviewing:'Supervisor diagnosing a stalled action', proposed:'Supervisor proposed a recovery action', unavailable:'Supervisor unavailable'})
+  });
+  function specialist(kind,payload) {
+    if (kind === 'orchestration') {
+      if (!payload?.page_changed && !payload?.stalled) return null;
+      return {kind:'phase',label:payload.stalled ? 'Reassessing stalled workflow' : 'Updating task state from a changed page',
+        explanation:'Native observation informs the next decision; it does not prove completion.',
+        status:payload.stalled ? 'deciding':'observed',step:safeIndex(payload.step_index)};
+    }
+    if (!Object.prototype.hasOwnProperty.call(specialistLabels,kind)) return null;
+    const labels=specialistLabels[kind],status=payload?.status;
+    if (!Object.prototype.hasOwnProperty.call(labels,status)) return null;
+    return {kind:'phase',label:labels[status],
+      explanation:'Advisory specialist status. Native validation and final verification remain required.',
+      status:status==='unavailable'?'unverified':status==='reviewing'?'deciding':'observed',step:safeIndex(payload.step_index)};
+  }
+  const graphKinds = Object.freeze({browser:'Browser objective',verification:'Independent verification',tool:'MCP tool check',comparison:'Cross-source comparison',review:'Evidence review',observation:'Native page observation',handoff:'Browser handoff',recovery:'Recovery prerequisite'});
+  const graphStates = new Set(['pending','active','completed','failed','blocked','cancelled']);
+  function workflowGraph(payload) {
+    const raw=payload?.graph;
+    if (!Array.isArray(raw?.nodes)||!raw.nodes.length||raw.nodes.length>32||!Number.isInteger(raw.revision)||raw.revision<0) return null;
+    const nodes=[];
+    for (const n of raw.nodes) {
+      if (!n||!Number.isInteger(n.id)||n.id!==nodes.length||!Object.prototype.hasOwnProperty.call(graphKinds,n.kind)||!graphStates.has(n.state)||
+          !Array.isArray(n.depends_on)||n.depends_on.some(d=>!Number.isInteger(d)||d<0||d>=raw.nodes.length||d===n.id)) return null;
+      nodes.push({id:n.id,label:graphKinds[n.kind],state:n.state,depends_on:n.depends_on.slice()});
+    }
+    return {revision:raw.revision,nodes};
+  }
   function trace(payload) {
     const action = typeof payload?.action?.type === 'string' ? payload.action.type : '';
     if (!Object.prototype.hasOwnProperty.call(actionNames, action)) return null;
@@ -84,5 +116,5 @@
     task.liveActivity = item.label;
     return true;
   }
-  return Object.freeze({ activity, trace, append });
+  return Object.freeze({ activity, trace, specialist, workflowGraph, append });
 });
