@@ -56,6 +56,8 @@ pub struct RouterConfig {
     /// Empty disables optional local screenshot perception.
     #[serde(default)]
     pub vision_model: String,
+    #[serde(default = "default_writer_model")]
+    pub writer_model: String,
     pub litellm_url: String,
     pub litellm_model: String,
     pub litellm_api_key: Option<String>,
@@ -71,12 +73,15 @@ pub struct RouterConfig {
     pub cloud_model_catalogs: HashMap<String, Vec<String>>,
 }
 
+fn default_writer_model() -> String { "qwen2.5:3b-instruct".into() }
+
 impl Default for RouterConfig {
     fn default() -> Self {
         Self {
             ollama_url: "http://127.0.0.1:11434".to_string(),
             ollama_model: "qwen3.5:4b".to_string(),
             vision_model: String::new(),
+            writer_model: default_writer_model(),
             litellm_url: "http://127.0.0.1:4000/v1/chat/completions".to_string(),
             litellm_model: "gpt-4o-mini".to_string(),
             litellm_api_key: None,

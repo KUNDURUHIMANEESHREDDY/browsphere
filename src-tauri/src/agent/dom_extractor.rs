@@ -168,10 +168,10 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   const vw = window.innerWidth || 1280;
   const vh = window.innerHeight || 800;
 
-  function walk(root) {{
+  function walk(root, includeRoot = false) {{
     if (!root || nodes.length >= MAX_NODES) return;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-    let current = walker.nextNode();
+    let current = includeRoot && root.nodeType === 1 ? root : walker.nextNode();
     while (current && nodes.length < MAX_NODES) {{
       if (isVisible(current) && isInteractive(current) &&
           !visitedElements.has(current)) {{
@@ -277,6 +277,10 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     const resultsRoot = document.querySelector(
       'ytd-two-column-search-results-renderer #contents');
     if (resultsRoot) walk(resultsRoot);
+  }}
+  for (const editor of Array.from(document.querySelectorAll('textarea, [contenteditable="true"]')).slice(0,24)) {{
+    if (isVisible(editor) && !isSensitiveField(editor) && !editor.closest('form') &&
+        editor.getBoundingClientRect().height >= 72) walk(editor, true);
   }}
   // Prioritize *general page semantics*, not site-specific selectors. Many
   // websites place hundreds of links in their header/sidebar before the

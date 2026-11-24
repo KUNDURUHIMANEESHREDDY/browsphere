@@ -1151,6 +1151,55 @@ pub async fn run_react_loop(
         observation_failures = 0;
         snapshot = live;
         orchestrator.observe(&snapshot);
+        // A dedicated, local writer handles explicit drafting in the current
+        // page. Native binding, policy, and readback remain mandatory.
+        if crate::agent::writer::requested(&goal) {
+            let cfg = router.lock().await.get_config();
+            let local_route = router.lock().await.select_backend(&snapshot.origin) == "ollama";
+            if local_route && !cfg.writer_model.trim().is_empty() {
+                if let Some(editor) = crate::agent::writer::editor(&snapshot).cloned() {
+                    let origin = snapshot.origin.clone();
+                    let node_id = editor.node_id.clone();
+                    let (empty, _) = crate::agent::writer::readback(&app,&webview_label,&origin,&node_id,"").await?;
+                    if !empty && !crate::agent::writer::may_replace(&goal) {
+                        let _=app.emit("agent:run_error",serde_json::json!({"run_id":run_id,"message":"The editor is not empty. Explicit replacement permission is required."}));
+                        return Ok("unverified".into());
+                    }
+                    let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"Writer Agent","objective":"Generate original draft","status":"active","index":0}));
+                    let text = tokio::select!{
+                        _=cancel.cancelled()=>return Ok("cancelled".into()),
+                        result=tokio::time::timeout(std::time::Duration::from_secs(75),crate::agent::writer::generate(&cfg,&goal))=>result.map_err(|_|anyhow::anyhow!("Writer timed out"))??
+                    };
+                    // Re-observe after inference; never type into a changed tab or stale node.
+                    let live=request_live_dom_snapshot(&app,&webview_label,&pending_snapshots,1800).await
+                        .ok_or_else(||anyhow::anyhow!("Editor observation unavailable after writing"))?;
+                    anyhow::ensure!(live.origin==origin&&crate::agent::writer::editor(&live).is_some_and(|n|n.node_id==node_id),"Editor changed during writing");
+                    let (still_empty,_)=crate::agent::writer::readback(&app,&webview_label,&origin,&node_id,"").await?;
+                    anyhow::ensure!(still_empty||crate::agent::writer::may_replace(&goal),"Editor is no longer empty");
+                    let mut action=BrowserAction::TypeText{node_id:node_id.clone(),text:text.clone(),is_sensitive:false};
+                    bind_action_to_live_dom(&mut action,&live,true).map_err(anyhow::Error::msg)?;
+                    let (risk,decision)=evaluate_live_action_policy(&origin,&action,&allowed_domains,&live);
+                    let trace_id=Uuid::new_v4();
+                    let (ok,outcome)=execute_gated_action(&app,run_id,trace_id,&action,&risk,&decision,&webview_label,&active_url,&pending_action_results,&itp,&downloads,&db,&approval_tx,&cancel).await;
+                    let _=trace_tx.send(TraceEntry{trace_id,run_id,step_index:step,active_origin:origin.clone(),thought:"Write a separately generated draft into the observed editor".into(),action,risk,decision,model_route:format!("Writer Agent / ollama:{}",cfg.writer_model),latency_ms:started.elapsed().as_millis() as u64,outcome:outcome.clone()}.sanitized()).await;
+                    if !ok || cancel.is_cancelled(){
+                        let _=app.emit("agent:run_error",serde_json::json!({"run_id":run_id,"message":outcome}));
+                        return Ok(if cancel.is_cancelled(){"cancelled"}else{"unverified"}.into());
+                    }
+                    let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"Writer Agent","status":"completed","index":0,"summary":"Draft entered; readback pending"}));
+                    let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"Verification Agent","objective":"Compare live editor to the generated draft","status":"active","index":1}));
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    let (_,matched)=crate::agent::writer::readback(&app,&webview_label,&origin,&node_id,&text).await?;
+                    anyhow::ensure!(matched,"Editor readback differs from generated draft");
+                    let summary=format!("Wrote and independently confirmed {} words in the live editor.",text.split_whitespace().count());
+                    let report=VerificationReport{status:"evidence_checked",summary:summary.clone(),findings:vec![],limitations:"Native editor readback matched the validated draft exactly. No publishing or remote save was verified.".into()};
+                    let _=app.emit("agent:verification_report",serde_json::json!({"run_id":run_id,"report":report}));
+                    let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"Verification Agent","status":"completed","index":1,"summary":summary}));
+                    let _=app.emit("agent:run_completed",summary);
+                    return Ok("completed".into());
+                }
+            }
+        }
         let _ = app.emit("agent:activity", serde_json::json!({
             "run_id": run_id, "phase": "observed", "step_index": step,
             "controls": snapshot.interactive_nodes.len()

@@ -121,6 +121,7 @@
       : '<span class="mac-ai-quiet">' + esc(state.localModelsError || 'No models detected.') + '</span>';
     var local = section('Local Models', '',
       row('Ollama server', 'Local API address.', input('cfgOllamaUrl', cfg.ollama_url, 'http://127.0.0.1:11434', 'url')) +
+      row('Lucia writer model', 'Local content generation before browser typing; leave blank to disable.', input('cfgWriterModel', cfg.writer_model ?? 'qwen2.5:3b-instruct', 'qwen2.5:3b-instruct')) +
       row('Lucia vision model (Eyes)', 'Optional local visual perception on recovery. Leave empty to disable. Screenshots stay with local Ollama; visual hints are advisory.', input('cfgVisionModel', cfg.vision_model || '', 'lfm3-vl:2b')) +
       row('Installed models', 'Select an installed model to use it.',
         '<div class="mac-ai-installed-controls">' + chips + btn('refresh-ai-models', 'Refresh') + '</div>') +
