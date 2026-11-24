@@ -25,7 +25,7 @@ fn identifier(s: &str) -> bool {
     !s.is_empty() && s.len() <= 80 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
 }
 pub fn requested(goal: &str) -> bool {
-    goal.trim().starts_with("mcp list ") || goal.trim().starts_with("mcp call ") || auto_task(goal).is_some() || super::workflow::requested(goal) || super::workflow::planning_requested(goal)
+    super::search_discovery::requested(goal).is_some() || goal.trim().starts_with("mcp list ") || goal.trim().starts_with("mcp call ") || auto_task(goal).is_some() || super::workflow::requested(goal) || super::workflow::planning_requested(goal)
 }
 enum Request {
     List(String),
@@ -111,7 +111,9 @@ impl Session {
             req = req.header("MCP-Protocol-Version", &self.version);
         }
         if let Some(id) = &self.session { req = req.header("MCP-Session-Id", id); }
-        if let Some(token)=crate::mcp_oauth::access_token_for(&self.url)? {req=req.bearer_auth(token);}
+        if let Some(token)=crate::mcp_oauth::access_token_for(&self.url)? {req=req.bearer_auth(token);}else if self.url.as_str()=="https://mcp.tavily.com/mcp/" {
+            req=req.header("X-Tavily-Access-Mode","keyless");
+        }
         let mut res = req.send().await?.error_for_status()?;
         if method == "initialize" {
             self.session = res.headers().get("MCP-Session-Id")
@@ -119,12 +121,20 @@ impl Session {
         }
         if notification { return Ok(Value::Null); }
         let content_type = res.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
-        ensure!(content_type.starts_with("application/json"), "This MCP client currently supports JSON responses only, not streaming SSE");
+        let is_sse=content_type.starts_with("text/event-stream");
+        ensure!(is_sse||content_type.starts_with("application/json"), "Unsupported MCP response content type");
         let mut data = Vec::new();
         while let Some(chunk) = res.chunk().await? {
             ensure!(data.len() + chunk.len() <= LIMIT, "MCP response exceeds limit");
             data.extend_from_slice(&chunk);
+            if is_sse {
+                if let Some(value)=sse_response(&data,self.id)? {
+                    ensure!(value.get("error").is_none(),"MCP server returned a protocol error");
+                    return value.get("result").cloned().context("Missing MCP result");
+                }
+            }
         }
+        ensure!(!is_sse,"SSE stream ended without matching response");
         let value: Value = serde_json::from_slice(&data)?;
         ensure!(value["jsonrpc"] == "2.0" && value["id"] == self.id, "Invalid MCP response ID");
         ensure!(value.get("error").is_none(), "MCP server returned a protocol error");
@@ -153,6 +163,20 @@ impl Session {
         }
     }
 }
+// Only complete SSE frames containing the matching JSON-RPC response count.
+fn sse_response(data:&[u8],id:u64)->Result<Option<Value>>{
+    let text=match std::str::from_utf8(data){Ok(t)=>t,Err(e) if e.error_len().is_none()=>return Ok(None),Err(e)=>return Err(e.into())};
+    let normalized=text.replace("\r\n","\n");
+    for frame in normalized.split_inclusive("\n\n"){
+        if !frame.ends_with("\n\n"){continue;}
+        let payload=frame.lines().filter_map(|l|l.strip_prefix("data:").map(|x|x.strip_prefix(' ').unwrap_or(x))).collect::<Vec<_>>().join("\n");
+        if payload.is_empty(){continue;}
+        let value:Value=serde_json::from_str(&payload)?;
+        ensure!(value["jsonrpc"]=="2.0","Invalid SSE JSON-RPC version");
+        if value["id"]==id{return Ok(Some(value));}
+    }
+    Ok(None)
+}
 fn approved(server: &Server, tool: &Value) -> bool {
     tool["name"].as_str().is_some_and(|n| server.read_only_tools.contains(n))
         && tool.pointer("/annotations/readOnlyHint").and_then(Value::as_bool) == Some(true)
@@ -173,7 +197,7 @@ fn validate_args(schema: &Value, args: &Value) -> Result<()> {
     }
     for (key, value) in obj {
         let prop = props.get(key).context("Unknown tool argument")?;
-        ensure!(prop.as_object().context("Invalid property schema")?.keys().all(|k| ["type","description","title","enum","default"].contains(&k.as_str())), "Unsupported property constraint");
+        ensure!(prop.as_object().context("Invalid property schema")?.keys().all(|k| ["type","description","title","enum","default","minLength","maxLength"].contains(&k.as_str())), "Unsupported property constraint");
         ensure!(match prop["type"].as_str() {
             Some("string") => value.is_string(),
             Some("integer") => value.as_i64().is_some() || value.as_u64().is_some(),
@@ -181,6 +205,13 @@ fn validate_args(schema: &Value, args: &Value) -> Result<()> {
             Some("boolean") => value.is_boolean(),
             _ => false,
         }, "Invalid or unsupported argument type");
+        for (name,is_min) in [("minLength",true),("maxLength",false)]{
+            if let Some(bound)=prop.get(name){
+                let limit=bound.as_u64().context("Invalid string length constraint")?;
+                let len=value.as_str().context("String length constraint on non-string")?.chars().count() as u64;
+                ensure!(if is_min{len>=limit}else{len<=limit},"Argument violates length constraint");
+            }
+        }
         if let Some(choices) = prop.get("enum") {
             ensure!(choices.as_array().context("Invalid enum")?.contains(value), "Argument not in enum");
         }
@@ -228,6 +259,18 @@ pub async fn execute(goal: &str, path: &std::path::Path, cancel: CancellationTok
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn sse_requires_complete_matching_response(){
+        let raw=b"event: message\r\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\r\n\r\n";
+        assert!(sse_response(raw,1).unwrap().is_none());
+        assert!(sse_response(&raw[..raw.len()-2],2).unwrap().is_none());
+        assert!(sse_response(raw,2).unwrap().is_some());
+    }
+    #[test] fn string_schema_lengths_enforced(){
+        let schema=json!({"type":"object","properties":{"query":{"type":"string","minLength":1,"maxLength":4}},"required":["query"]});
+        assert!(validate_args(&schema,&json!({"query":"test"})).is_ok());
+        assert!(validate_args(&schema,&json!({"query":""})).is_err());
+        assert!(validate_args(&schema,&json!({"query":"longer"})).is_err());
+    }
     #[test] fn explicit_only() {
         assert!(requested("mcp call local/search {}"));
         assert!(!requested("please search using MCP"));
@@ -519,6 +562,35 @@ pub(super) async fn workflow_config(path:&std::path::Path)->Result<WorkflowConfi
     Ok(WorkflowConfig(serde_json::from_slice(&raw)?))
 }
 impl WorkflowConfig {
+    // Search adapter uses explicit tool and schema, not model-generated arguments.
+    pub(super) async fn search_discovery(&self,server:&str,name:&str,query:&str,cancel:CancellationToken,pause:&mut tokio::sync::watch::Receiver<bool>)->Result<Value>{
+        ensure!(!query.is_empty()&&query.len()<=400&&query.split_whitespace().count()<=50,"Invalid public search query");
+        let s=self.0.get(server).context("Search server not configured")?;
+        ensure!(s.read_only_tools.contains(name),"Search tool not approved");
+        let run=async{
+            let mut session=ToolSession::connect(s).await?;
+            let result=async{
+                let tools=session.tools().await?;
+                let tool=tools.iter().find(|t|t["name"]==name).context("Search tool not discovered")?;
+                ensure!(approved(s,tool),"Search tool not approved and read-only");
+                // Only query is sent. Existing strict schema validator rejects
+                // unsupported required inputs or constraints, without guessing.
+                let mut args=json!({"query":query});
+                if matches!(server,"exa"|"exa-oauth")&&name=="web_search_exa"&&tool["inputSchema"]["required"].as_array().is_some_and(|a|a.iter().any(|x|x=="objective")){
+                    args["objective"]=json!(query);
+                }
+                validate_args(&tool["inputSchema"],&args)?;
+                super::workflow::await_resume(&cancel,pause).await?;
+                let data=session.post("tools/call",json!({"name":name,"arguments":args}),false).await?;
+                ensure!(data.get("isError").and_then(Value::as_bool)!=Some(true),"Search tool reported error");
+                ensure!(data.get("content").and_then(Value::as_array).is_some()||data.get("structuredContent").is_some(),"Missing search result");
+                Ok(data)
+            }.await;
+            session.close().await;
+            result
+        };
+        tokio::select!{biased;_=cancel.cancelled()=>anyhow::bail!("Search cancelled"),r=tokio::time::timeout(Duration::from_secs(12),run)=>r.context("Search MCP deadline reached")?}
+    }
     pub(super) fn authorize(&self,server:&str,tool:Option<&str>)->Result<()>{
         let s=self.0.get(server).context("Workflow server is not configured")?;
         if let Some(tool)=tool{ensure!(s.read_only_tools.contains(tool),"Workflow tool not approved");}

@@ -41,6 +41,8 @@ pub struct ProductObservation {pub heading:String,pub price:String,pub context:S
 #[serde(default)]
 pub struct PageStructure {
     pub product: Option<ProductObservation>,
+    pub product_heading: Option<String>,
+    pub product_price_status: Option<String>,
     pub headings: u16,
     pub paragraphs: u16,
     pub code_blocks: u16,
@@ -74,6 +76,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   const REQUEST_ID = "{request_id}";
   const MAX_NODES = {max_nodes};
   const MAX_TEXT = {max_text_chars};
+  const POINT_PROBE = null;
 
   const SENSITIVE_RE = /(password|passwd|passcode|otp|one[-_]?time|cvv|cvc|card[-_]?num|cc[-_]|ssn|secret|api[-_]?key|token)/i;
   const INTERACTIVE_TAGS = new Set(["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "SUMMARY", "OPTION", "DIALOG"]);
@@ -202,26 +205,67 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   // A card can have separate image and text links to the same product.
   // Use only a single rendered product heading from a bounded card that
   // contains no competing product destinations. Do not read hidden metadata.
+  // Resolve only explicit, public retailer product URLs on known search
+  // result pages. Opaque redirect tokens and all tracking parameters stay
+  // private; never guess a destination or treat a snippet as evidence.
+  function publicSearchProduct(el) {{
+    if(!["https://www.google.com","https://search.brave.com"].includes(location.origin)||location.pathname!=="/search"||!isVisible(el)||el.closest('[aria-hidden="true"],[hidden]'))return null;
+    try{{
+      let u=new URL(el.href);
+      if(u.origin==="https://www.google.com"&&["/url","/goto"].includes(u.pathname)){{
+        const keys=u.pathname==="/goto"?["url"]:["q","url"];
+        const values=keys.flatMap(k=>u.searchParams.getAll(k));
+        if(values.length!==1||!values[0].startsWith("https://"))return null;
+        u=new URL(values[0]);
+      }}else if(u.origin==="https://search.brave.com"&&u.pathname==="/go/v1"){{
+        const values=u.searchParams.getAll("url");
+        if(values.length!==1||!values[0].startsWith("https://"))return null;
+        u=new URL(values[0]);
+      }}
+      if(!["www.croma.com","www.reliancedigital.in"].includes(u.hostname)||u.protocol!=="https:"||u.port||u.username||u.password||u.search||u.hash||u.pathname.length>480||!/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(u.pathname))return null;
+      return u.origin+u.pathname;
+    }}catch(_e){{return null;}}
+  }}
+  // Preserve the canonical public product destination when the only
+  // query keys are known marketing attribution keys. Variant or session
+  // parameters are not silently stripped to manufacture a product link.
+  function sameOriginProduct(el) {{
+    if(el.tagName!=="A"||!isVisible(el)||el.closest('[aria-hidden="true"],[hidden]'))return null;
+    try{{
+      const u=new URL(el.href);
+      if(u.origin!==location.origin||u.username||u.password||u.hash||
+         u.pathname.length>480||!/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(u.pathname))return null;
+      if([...u.searchParams.keys()].some(k=>!/^utm_(source|medium|campaign|term|content|id)$/i.test(k)))return null;
+      return u.origin+u.pathname;
+    }}catch(_e){{return null;}}
+  }}
   function productLinkLabel(el) {{
     if(el.tagName!=="A"||el.closest('[aria-hidden="true"],[hidden],nav,header,footer,form'))return null;
-    const productPath=a=>{{
-      try {{
-        const u=new URL(a.href);
-        return u.origin===location.origin&&!u.username&&!u.password&&!u.search&&!u.hash&&
-          /(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(u.pathname)?u.pathname:null;
-      }}catch(_e){{return null;}}
-    }};
+    const productPath=a=>sameOriginProduct(a);
     const target=productPath(el);if(!target)return null;
     const cardSelector='article,li,[itemtype*="schema.org/Product"],[data-testid*="product-card"],[class*="product-card"],[class*="productCard"],[class*="product-tile"],[class*="product-item"]';
     const titleSelector='h2,h3,h4,[role="heading"],[class*="product-title"],[class*="productTitle"],[class*="product-name"],[data-testid*="product-title"],[itemprop="name"]';
-    const card=el.closest(cardSelector);
-    if(!card||!isVisible(card)||card.closest('[aria-hidden="true"],[hidden]'))return null;
-    const links=Array.from(card.querySelectorAll('a[href]')).filter(a=>isVisible(a)&&!a.closest('[aria-hidden="true"],[hidden]'));
-    if(links.length>24||new Set(links.map(productPath).filter(Boolean)).size!==1)return null;
-    const headings=Array.from(card.querySelectorAll(titleSelector)).filter(h=>isVisible(h)&&!h.closest('[aria-hidden="true"],[hidden]'));
-    const labels=[...new Set(headings.map(h=>(h.innerText||"").replace(/\s+/g," ").trim()).filter(t=>t.length>=12&&t.length<=240))];
-    if(labels.length!==1)return null;
-    return labels[0].slice(0,200);
+    let card=el.closest(cardSelector)||el.parentElement;
+    for(let depth=0;card&&depth<4;depth++,card=card.parentElement){{
+      if(card.matches('main,body,html,nav,header,footer,form')||!isVisible(card)||card.closest('[aria-hidden="true"],[hidden]'))return null;
+      const links=Array.from(card.querySelectorAll('a[href]')).filter(a=>isVisible(a)&&!a.closest('[aria-hidden="true"],[hidden]'));
+      if(links.length>24)return null;
+      const destinations=new Set(links.map(productPath).filter(Boolean));
+      // Refuse an ancestor containing an ambiguous or uncanonicalizable
+      // product URL, even if only one other URL is canonical.
+      if(links.some(a=>/(?:\/product\/|\/p\/)/i.test(a.pathname||"")&&!productPath(a))||
+         destinations.size!==1||!destinations.has(target))return null;
+      const headings=Array.from(card.querySelectorAll(titleSelector)).filter(h=>isVisible(h)&&!h.closest('[aria-hidden="true"],[hidden]'));
+      const labels=[...new Set(headings.map(h=>(h.innerText||"").replace(/\s+/g," ").trim()).filter(t=>t.length>=12&&t.length<=240))];
+      if(labels.length>1)return null;
+      if(labels.length===1)return labels[0].slice(0,200);
+    }}
+    return null;
+  }}
+  function paginationLabel(el) {{
+    const label=computeAccessibleName(el).trim();
+    if(!/^(next|next page|go to next page|next results page)$/i.test(label)||!el.matches('button,[role="button"]')||!el.closest('nav[aria-label*="pag" i],[class*="pagination" i],[data-testid*="pagination" i]'))return null;
+    return "Next page";
   }}
   function isInteractive(el) {{
     // Disabled controls cannot be selected as actionable targets.
@@ -238,7 +282,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   // A visible blocking dialog owns the interaction surface. Do not present
   // controls underneath it as actionable (including to the policy binder).
   const dialogs = Array.from(document.querySelectorAll(
-    'dialog[open], [role="dialog"][aria-modal="true"], [role="alertdialog"], [role="dialog"]'))
+    'dialog[open], [aria-modal="true"], [role="alertdialog"], [role="dialog"]'))
     .filter(el => {{
       if (!isVisible(el)) return false;
       const box = el.getBoundingClientRect();
@@ -249,6 +293,19 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
         || getComputedStyle(el).position === 'fixed'
         || Array.from(el.parentElement?.classList || []).some(c => /(?:^|[-_])(mask|overlay|backdrop)(?:$|[-_])/i.test(c)));
     }});
+  if(!dialogs.length&&["www.croma.com","www.reliancedigital.in"].includes(location.hostname)){{
+    const headings=Array.from(document.querySelectorAll('h1,h2,h3,h4,[role="heading"]')).filter(h=>isVisible(h)&&/^(select your location|choose your location|enter your pincode)$/i.test((h.innerText||"").trim()));
+    for(const h of headings.slice(0,4)){{
+      let el=h.parentElement;
+      for(let depth=0;el&&depth<5;depth++,el=el.parentElement){{
+        if(!isVisible(el)||!el.querySelector('input[placeholder*="pincode" i],input[aria-label*="pincode" i]'))continue;
+        const r=el.getBoundingClientRect(),css=getComputedStyle(el);
+        if(css.position!=="fixed"||r.width>=innerWidth*.95||r.height>=innerHeight*.95||r.width<100||r.height<80)continue;
+        const hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+        if(hit&&el.contains(hit)){{dialogs.push(el);break;}}
+      }}
+    }}
+  }}
   const activeDialog = dialogs.at(-1) || null;
   const nodes = [];
   // Dynamic SPAs replace elements between observations. Every new node must
@@ -324,7 +381,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
             current.isContentEditable ? "textbox" :
             ((current.tagName === "INPUT" && ["checkbox", "radio"].includes(typeAttr))
               ? typeAttr : current.tagName))).toLowerCase(),
-          label: productLinkLabel(current) || computeAccessibleName(current),
+          label: productLinkLabel(current) || paginationLabel(current) || computeAccessibleName(current),
           options: current.tagName === "SELECT"
             ? Array.from(current.options)
                 .filter(option => !option.disabled && !option.parentElement?.disabled)
@@ -382,15 +439,13 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
           href: current.tagName === "A"
             ? (() => {{
                 try {{
+                  const discovered=publicSearchProduct(current);
+                  if(discovered)return discovered;
                   const address = new URL(current.href);
+                  if(/^https?:$/.test(address.protocol)&&address.origin===location.origin&&/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(address.pathname))return sameOriginProduct(current);
+                  if(address.origin==="https://www.google.com"&&["/url","/goto"].includes(address.pathname))return null;
                   if (!/^https?:$/.test(address.protocol)) return null;
-                  if(address.origin!==location.origin){{
-                    const search=location.origin==="https://www.google.com"&&location.pathname==="/search";
-                    const retailer=["www.croma.com","www.reliancedigital.in"].includes(address.hostname);
-                    const product=/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i;
-                    if(!search||!retailer||address.protocol!=="https:"||address.port||address.username||address.password||address.search||address.hash||!product.test(address.pathname)||!isVisible(current))return null;
-                    return address.origin+address.pathname.slice(0,480);
-                  }}
+                  if(address.origin!==location.origin)return null;
                   if (address.hostname === "www.youtube.com"
                       && address.pathname === "/watch") {{
                     const videoId = address.searchParams.get("v");
@@ -421,9 +476,32 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
 
   // Scope the current observation to the top modal. Once dismissed, the
   // next snapshot exposes the rest of the page without guessing controls.
+  let hitId=null;
   if (activeDialog) {{
     walk(activeDialog);
   }} else {{
+  // A visual hint is not an action. Sample exactly one point on the same
+  // viewport and prioritize the real semantic control under that point.
+  // No arbitrary div, frame, canvas, hidden control or sensitive form.
+  if(POINT_PROBE){{
+    const v=POINT_PROBE.viewport,p=POINT_PROBE.point;
+    if(location.href===v.origin&&innerWidth===v.width&&innerHeight===v.height&&scrollX===v.scroll_x&&scrollY===v.scroll_y&&devicePixelRatio===v.scale){{
+      const x=p.x*innerWidth/1000,y=p.y*innerHeight/1000;
+      let hit=document.elementFromPoint(x,y);
+      for(let depth=0;hit?.shadowRoot?.elementFromPoint&&depth<8;depth++){{
+        const child=hit.shadowRoot.elementFromPoint(x,y);if(!child||child===hit)break;hit=child;
+      }}
+      for(let depth=0;hit&&depth<7;depth++,hit=hit.parentElement||hit.getRootNode().host||null){{
+        if(hit.matches('iframe,canvas,[contenteditable="true"],[inert],[hidden],[aria-hidden="true"]'))break;
+        if(!isInteractive(hit))continue;
+        if(!hit.matches('a[href],button,input,[role="button"],[role="link"],[role="checkbox"],[role="searchbox"]')||!isVisible(hit)||isSensitiveField(hit)||hit.closest('[inert],[hidden],[aria-hidden="true"]'))break;
+        walk(hit,true);
+        const id=hit.getAttribute('data-aether-id');
+        if(nodes.some(n=>n.node_id===id&&!n.is_sensitive&&!n.is_submit))hitId=id;
+        break;
+      }}
+    }}
+  }}
   // On YouTube search results, inspect result cards before the numerous
   // navigation/toolbar controls exhaust the bounded interactive node budget.
   // This is still a fresh DOM observation, never a guessed result URL.
@@ -439,10 +517,10 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   }}
   // Direct public retailer result anchors from the public search page. No
   // tracking parameters, redirect unwrapping, or arbitrary cross-origin URLs.
-  if(location.origin==="https://www.google.com"&&location.pathname==="/search"){{
+  if(["https://www.google.com","https://search.brave.com"].includes(location.origin)&&location.pathname==="/search"){{
     for(const a of Array.from(document.querySelectorAll('a[href]')).slice(0,1500)){{
       if(nodes.length>=Math.min(MAX_NODES,70))break;
-      try{{const u=new URL(a.href);if(["www.croma.com","www.reliancedigital.in"].includes(u.hostname)&&u.protocol==="https:"&&!u.search&&!u.hash&&!u.username&&!u.password&&!u.port&&isVisible(a)&&/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(u.pathname))walk(a,true);}}catch(_e){{}}
+      if(publicSearchProduct(a))walk(a,true);
     }}
   }}
   // Reserve slots for product links before large filter panels, navigation
@@ -451,12 +529,15 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   for(const link of Array.from(document.querySelectorAll('a[href]')).slice(0,2500)){{
     if(nodes.length>=Math.min(MAX_NODES,85))break;
     if(!isVisible(link)||link.closest('nav,header,footer,form,[aria-hidden="true"]'))continue;
-    try{{
-      const u=new URL(link.href);
-      if(u.origin!==location.origin||u.username||u.password||u.search||u.hash)continue;
-      if(!/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(u.pathname))continue;
-      walk(link,true);
-    }}catch(_e){{}}
+    if(sameOriginProduct(link))walk(link,true);
+  }}
+  // Reserve bounded slots for semantic pagination buttons. Do not infer
+  // meaning from icon shapes, class names or arbitrary page text.
+  if(/(?:\/products|\/search(?:\/|$)|\/search-results)/i.test(location.pathname)){{
+    for(const el of Array.from(document.querySelectorAll('button,[role="button"]')).slice(0,1200)){{
+      if(nodes.length>=Math.min(MAX_NODES,95))break;
+      if(isVisible(el)&&!el.closest('[aria-hidden="true"],[hidden]')&&/^(next page|go to next page|next results page|next)$/i.test(computeAccessibleName(el).trim())&&el.closest('nav[aria-label*="pag" i],[class*="pagination" i],[data-testid*="pagination" i]'))walk(el,true);
+    }}
   }}
   // Catalog filter lists can be hundreds of entries long. Keep a bounded
   // sample of rendered processor/model facets before the generic traversal.
@@ -468,7 +549,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
       if(chipFacets>=20||nodes.length>=Math.min(MAX_NODES,105))break;
       if(!isVisible(field)||isSensitiveField(field)||field.closest('nav,header,footer,[aria-hidden="true"]'))continue;
       const label=computeAccessibleName(field).trim();
-      if(!/^(?:[A-Za-z]+\s+)?[A-Za-z]{{1,3}}\d{{1,3}}(?:\s+chip)?$/i.test(label))continue;
+      if(!/^(?:[A-Za-z]+\s+)?[A-Za-z]{{1,3}}\d{{1,3}}(?:\s+chip)?(?:[ /-]+\d{{1,2}}\s*c(?:ore)?\s*(?:cpu|gpu))*$/i.test(label))continue;
       walk(field,true);chipFacets++;
     }}
   }}
@@ -548,6 +629,8 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   // Observe a primary product heading and its nearest bounded offer
   // ancestor. Reject multiple distinct prices unless a single explicit
   // selling-price node identifies the active offer.
+  let productHeading=null;
+  let productPriceStatus=null;
   const product = (() => {{
     if(activeDialog)return null;
     const eligible=el=>isVisible(el)&&!el.closest('nav,header,footer,aside,[aria-hidden="true"]');
@@ -561,6 +644,8 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     if(hs.length!==1)return null;
     const h=hs[0],heading=(h.innerText||"").replace(/\s+/g," ").trim();
     if(heading.length<20||heading.length>360)return null;
+    if(/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(location.pathname))productHeading=heading;
+    productPriceStatus="no_scoped_selling_price";
     const re=/(?:\u20b9|Rs\.|INR)\s*\d[\d,]*(?:\.\d{{2}})?(?![\d.])/g;
     for(let el=h.parentElement,depth=0;el&&el!==document.body&&depth<7;el=el.parentElement,depth++){{
       const context=(el.innerText||"").replace(/\s+/g," ").trim();
@@ -570,16 +655,33 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
         !el.querySelector('[class*="product-price"],[class*="selling-price"],[data-testid*="price"],[itemprop="price"]'))continue;
       const matches=Array.from(context.matchAll(re)).map(m=>m[0]);
       if(!matches.length)continue;
-      const offers=Array.from(el.querySelectorAll('[class*="selling-price"],[class*="sale-price"],[class*="offer-price"],[class*="product-price"],[data-testid*="selling-price"],[itemprop="price"]')).filter(n=>isVisible(n)&&!n.closest('del,s,strike,[aria-hidden="true"]'));
+      // Stop before crossing into a separate recommendation/card region.
+      // Do not read hidden schema, data attributes or account-specific offers.
+      if(Array.from(el.querySelectorAll('article,[class*="product-card"],[class*="productCard"],[class*="recommendation"],[class*="related-product"]')).some(n=>isVisible(n)&&!n.contains(h)))break;
+      const excluded=n=>{{
+        if(!isVisible(n)||n.closest('del,s,strike,[hidden],[aria-hidden="true"]'))return true;
+        for(let x=n;x&&x!==el;x=x.parentElement){{
+          const meta=(String(x.className||"")+" "+(x.getAttribute("aria-label")||"")).toLowerCase();
+          if(/(?:^|[^a-z])(?:mrp|original-price|list-price|was-price|emi|installment|cashback|savings|discount-amount|exchange-price|monthly)(?:[^a-z]|$)/.test(meta))return true;
+          if(getComputedStyle(x).textDecorationLine.includes("line-through"))return true;
+        }}
+        const t=(n.innerText||"").replace(/\s+/g," ").trim();
+        return /\b(?:mrp|list price|original price|was price|emi|installments?|cashback|save|savings|per month|monthly|exchange|off)\b|\/\s*(?:mo|month)\b/i.test(t);
+      }};
+      const offers=Array.from(el.querySelectorAll('[class*="selling-price"],[class*="sale-price"],[class*="offer-price"],[class*="product-price"],[data-testid*="selling-price"],[itemprop="price"]')).filter(n=>!excluded(n));
       const marked=offers.flatMap(n=>Array.from((n.innerText||"").replace(/\s+/g," ").trim().matchAll(re)).map(m=>m[0]));
       const unique=[...new Set(marked)];
       const all=[...new Set(matches)];
-      const price=unique.length===1?unique[0]:all.length===1&&!/\b(?:mrp|list price|was price)\b/i.test(context)?all[0]:null;
-      if(price&&context.includes(price))return {{heading,price,context}};
+      // Unmarked single amounts are admissible only in an explicitly
+      // labelled selling-price context without a conditional price signal.
+      const conditional=/\b(?:mrp|list price|original price|was price|emi|installments?|cashback|save|savings|per month|monthly|exchange|off|starting at|from)\b|\/\s*(?:mo|month)\b/i.test(context);
+      const price=unique.length===1?unique[0]:unique.length===0&&all.length===1&&!conditional&&/\b(?:selling price|offer price|inclusive of all taxes)\b/i.test(context)?all[0]:null;
+      if(price&&context.includes(price)){{productPriceStatus="observed_selling_price";return {{heading,price,context}};}}
+      productPriceStatus=all.length>1||conditional?"ambiguous_or_conditional_price":"no_scoped_selling_price";
     }}
     return null;
   }})();
-  const visibleText = (activeDialog ? ["Active dialog: " + (activeDialog.innerText || "")] : [product?.context, prose, contentText, bodyText])
+  const visibleText = (activeDialog ? ["Active dialog: " + (activeDialog.innerText || "")] : [product?.context, productHeading, prose, contentText, bodyText])
     .filter(Boolean).join(" ")
     .replace(/\s+/g, " ")
     .trim()
@@ -615,6 +717,8 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
     const offerBlocks=offers.filter(el=>pricePattern.test((el.innerText||"").trim().slice(0,180))).length;
     return {{
       product,
+      product_heading:productHeading,
+      product_price_status:productPriceStatus,
       headings: counts('h1,h2,h3,h4,[role="heading"]'),
       paragraphs: scoped('p,dd').filter(el=>(el.innerText||"").trim().length>=35).length,
       code_blocks: counts('pre,[role="code"]'),
@@ -641,7 +745,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
 
   // Return to the HOST WebView2 ExecuteScript callback. Untrusted pages
   // are never granted Tauri commands or asked to send their own snapshots.
-  return payload.snapshot;
+  return POINT_PROBE?{{snapshot:payload.snapshot,hit_id:hitId}}:payload.snapshot;
 }})();"#,
         request_id = request_id,
         max_nodes = max_nodes,
@@ -664,4 +768,18 @@ pub async fn request_live_dom_snapshot(
         app, webview_label, script, timeout_ms
     ).await.ok()?;
     serde_json::from_value(value).ok()
+}
+
+
+// The ordinary serializer remains the authority for all fields; only its
+// observation order is changed by an independently localized viewport point.
+pub async fn request_point_snapshot(app:&tauri::AppHandle,label:&str,point:super::multimodal_perception::VisualPoint,viewport:&super::multimodal_perception::Viewport)->Option<(DomSnapshot,String)>{
+    if !point.valid()||!viewport.valid(){return None;}
+    #[derive(Deserialize)]
+    struct Hit{snapshot:DomSnapshot,hit_id:Option<String>}
+    let payload=serde_json::json!({"point":point,"viewport":viewport});
+    let script=build_snapshot_script(Uuid::new_v4(),120,24000).replace("const POINT_PROBE = null;",&format!("const POINT_PROBE = {payload};"));
+    let value=crate::agent::native_eval::eval_json(app,label,script,1800).await.ok()?;
+    let result:Hit=serde_json::from_value(value).ok()?;
+    Some((result.snapshot,result.hit_id?))
 }

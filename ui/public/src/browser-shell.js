@@ -937,6 +937,10 @@
               break;
             case 'mcp-lucia-enable':
             case 'mcp-lucia-revoke':
+            case 'mcp-preset-exa':
+            case 'mcp-preset-tavily':
+            case 'mcp-provider-key-save':
+            case 'mcp-provider-key-clear':
             case 'mcp-oauth-begin':
             case 'mcp-oauth-copy':
             case 'mcp-oauth-finish':
@@ -3937,7 +3941,25 @@
         };
         mcpBusy = true;
         try {
-          if (action === 'mcp-oauth-begin') {
+          if (action === 'mcp-preset-exa' || action === 'mcp-preset-tavily') {
+            var exa = action === 'mcp-preset-exa';
+            endpoint = exa ? 'https://mcp.exa.ai/mcp/oauth' : 'https://mcp.tavily.com/mcp';
+            document.getElementById('cfgMcpUrl').value = endpoint;
+            document.getElementById('cfgMcpIssuer').value = exa ? 'https://auth.exa.ai' : 'https://mcp.tavily.com/';
+            document.getElementById('cfgMcpClientId').value = '';
+            document.getElementById('cfgMcpScope').value = exa ? 'mcp:tools' : 'openid';
+            document.getElementById('cfgMcpAlias').value = exa ? 'exa-oauth' : 'tavily-oauth';
+            action = 'mcp-oauth-begin';
+          }
+          if (action === 'mcp-provider-key-save' || action === 'mcp-provider-key-clear') {
+            var keyField = document.getElementById('cfgMcpProviderKey');
+            var key = action === 'mcp-provider-key-save' ? keyField?.value.trim() : '';
+            if (action === 'mcp-provider-key-save' && !key) throw new Error('Enter a provider API key.');
+            if (!window.confirm('Update the saved API key for this exact provider endpoint?')) return;
+            try { await window.aetherBridge.setMcpProviderKey(endpoint,key || ''); }
+            finally { if (keyField) keyField.value = ''; }
+            render('API key updated securely. Select Discover tools, then approve the exact search tool.');
+          } else if (action === 'mcp-oauth-begin') {
             var issuer = document.getElementById('cfgMcpIssuer')?.value.trim();
             var clientId = document.getElementById('cfgMcpClientId')?.value.trim();
             var scope = document.getElementById('cfgMcpScope')?.value.trim() || '';
@@ -3957,7 +3979,7 @@
             mcpAuthorization = null;
             render('Waiting for the reviewed OAuth callback...');
             await window.aetherBridge.finishMcpOAuth(id);
-            render('Authorization saved securely. Select Discover tools.');
+            render('Authorization saved securely. Select Discover tools, select the search tool, then Approve selected tool for Lucia.');
           } else if (action === 'mcp-oauth-forget') {
             if (!window.confirm('Forget the saved authorization for this exact MCP endpoint?')) return;
             if (mcpConnection && mcpConnection.endpoint === endpoint) {

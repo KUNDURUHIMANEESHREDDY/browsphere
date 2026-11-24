@@ -1,7 +1,7 @@
 //! Final run-local objective constraints. This can only narrow native policy,
 //! never grant a permission, submit a transaction, or certify a factual answer.
 use super::{dom_extractor::{DomSnapshot,DomNodeSummary},policy::BrowserAction,semantic_core::ObjectiveLedger};
-pub const REVISION:&str="lucia-adaptive-catalog-orchestration-v13.7";
+pub const REVISION:&str="lucia-approved-mcp-discovery-v13.11";
 fn words(s:&str)->Vec<String>{s.split(|c:char|!c.is_alphanumeric()).filter(|w|!w.is_empty()).map(str::to_lowercase).collect()}
 fn phrase(text:&str,part:&str)->bool{
     let t=words(text);let p=words(part);

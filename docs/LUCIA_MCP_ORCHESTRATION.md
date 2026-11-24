@@ -1,7 +1,7 @@
 # Lucia MCP orchestration
 
 Configure trusted servers in %LOCALAPPDATA%/BrowsphereAI/mcp-servers.json.
-The explicit read-only execution lane supports JSON Streamable HTTP and an optional
+The explicit read-only execution lane supports JSON or bounded SSE Streamable HTTP and an optional
 Docker Linux stdio container. The separate manual settings connector supports
 additional protocol variants; the marketplace only searches the official registry.
 
@@ -49,3 +49,26 @@ The second command needs local Ollama and lfm3:1.7b. The HTTP tests exercise a
 local fixture, not arbitrary live third-party tools or the complete browser UI.
 
 The MCP settings connector can now approve or revoke an exact discovered read-only tool for a named Lucia server. The configuration is updated only after user confirmation. HTTPS MCP authorization uses the same exact-resource credential store as the manual connector; see MCP.md for the supported registered-client PKCE flow. Docker remains required for actual container-isolated STDIO execution.
+
+## Unified public discovery
+Use `mcp discover PUBLIC_QUERY` for unverified public HTTPS source candidates, or
+run supported catalog research for automatic retailer-scoped discovery. The
+query is sent only to independently configured, explicitly approved read-only
+MCP search tools. Configure server names `brave`, `tavily`, `exa` and approve
+`brave_web_search`, `tavily-search`, `web_search_exa` respectively. The client
+checks live tool annotations and schema; unsupported transport/schema fails
+closed. No API keys are bundled and no server is enabled automatically.
+Searches are disabled in Private Browsing. Cache is in-memory, scoped by endpoint,
+tool, query and catalog host, with a five-minute TTL and 64-entry bound.
+One in-flight call per endpoint, ten-second spacing, five-minute failure
+cooldown; no repeated calls to endpoint aliases in the same discovery.
+An independent approved provider can be considered on failure. Browser
+verification challenges stop browser actions and require manual completion
+before a new task. Returned links are unverified hints, not evidence of facts
+or prices. Generic discovery does not automatically navigate to result URLs.
+
+Official hosted endpoints: Exa https://mcp.exa.ai/mcp and Tavily
+https://mcp.tavily.com/mcp/ support limited keyless search. The exact Tavily
+endpoint receives the documented keyless header only when no OAuth token is
+available. Brave requires an authorized API key and a separately configured
+trusted MCP server. Never place credentials in endpoint URLs.

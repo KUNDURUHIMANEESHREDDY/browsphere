@@ -10,6 +10,8 @@ fixture="""<!doctype html><html><body><main>
 <article class="product-card"><a aria-label="Go to Image" href="/product/opaque-1"><span>Image</span></a><h2>Apple MacBook Air M4 13 inch 16GB 256GB SSD</h2><a href="/product/opaque-1">View product</a><h2 hidden>Wrong hidden title</h2></article>
 <article class="product-card"><a aria-label="Generic image" href="/product/opaque-2">Image</a><a href="/product/opaque-3">Other</a><h2>Wrong mixed card product</h2></article>
 <article class="product-card"><a aria-label="Generic button" href="/product/opaque-4">Image</a><h2>Competing title one</h2><h2>Competing title two</h2></article>
+<div class="unknown-layout"><div><a aria-label="Open image" href="/product/opaque-5?utm_source=fixture">Image</a></div><h3>Matching visible heading in custom layout</h3><a href="/product/opaque-5">Details</a></div>
+<article class="product-card"><a aria-label="Variant image" href="/product/opaque-6?variant=wrong">Image</a><h2>Do not canonicalize variant URL</h2></article>
 </main><script>const observe=()=>"""+js.rstrip(";")+""";const result=document.createElement('pre');result.id='probe-result';result.textContent=JSON.stringify(observe());document.body.append(result);</script></body></html>"""
 with tempfile.TemporaryDirectory(prefix="catalog-grounding-") as work:
     root=Path(work); f=root/"fixture.html"; f.write_text(fixture,encoding="utf-8")
@@ -21,4 +23,6 @@ with tempfile.TemporaryDirectory(prefix="catalog-grounding-") as work:
     assert labels.count("Apple MacBook Air M4 13 inch 16GB 256GB SSD")==2,labels
     assert "Generic image" in labels and "Generic button" in labels,labels
     assert "Wrong hidden title" not in labels and "Wrong mixed card product" not in labels,labels
+    assert labels.count("Matching visible heading in custom layout")==2,labels
+    assert "Do not canonicalize variant URL" not in labels,labels
     print("PASS catalog grounding: image/text duplicate links, hidden title, mixed destinations, ambiguous headings")

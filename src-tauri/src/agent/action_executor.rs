@@ -227,11 +227,16 @@ fn build_type_script(request_id: Uuid, node_id: &str, text: &str) -> String {
 }
 
 fn build_key_script(node_id: &str, key: &str) -> String {
+    build_key_script_mode(node_id,key,None)
+}
+fn build_key_script_mode(node_id:&str,key:&str,native_scope:Option<(&str,&str)>)->String {
+    let scope=serde_json::to_string(&native_scope).unwrap_or_else(|_|"null".into());
     let id_json = serde_json::to_string(node_id).unwrap_or_else(|_| "\"\"".into());
     let key_json = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".into());
     format!(r#"(function() {{
       const target = {id_json};
       const key = {key_json};
+      const scope = {scope};
       function find(root) {{
         if (!root) return null;
         const here = root.querySelector('[data-aether-id="' + CSS.escape(target) + '"]');
@@ -283,6 +288,18 @@ fn build_key_script(node_id: &str, key: &str) -> String {
             if (/\b(payment|checkout|purchase|delete account|transfer|contract)\b/i.test(form.innerText || ""))
               return fail("Consequential search form blocked");
           }}
+          if(scope){{
+            if(location.href!==scope[0]||String(el.value||"")!==scope[1])return fail("Catalog search query or destination changed");
+            if(el.isContentEditable||!["input","textarea"].includes(tag))return fail("Native catalog Enter requires a native input");
+            el.focus();
+            const active=el.getRootNode().activeElement;
+            const r=el.getBoundingClientRect();
+            const x=Math.max(0,Math.min(innerWidth-1,r.left+r.width/2)),y=Math.max(0,Math.min(innerHeight-1,r.top+r.height/2));
+            let hit=document.elementFromPoint(x,y);
+            while(hit?.shadowRoot?.elementFromPoint){{const next=hit.shadowRoot.elementFromPoint(x,y);if(!next||next===hit)break;hit=next;}}
+            if(active!==el||hit!==el)return fail("Search input not focused or obstructed");
+            return {{success:true,detail:"Native search input validated; dispatch pending"}};
+          }}
           el.focus();
           const proceed = el.dispatchEvent(new KeyboardEvent("keydown",
             {{ key: "Enter", code: "Enter", bubbles: true, cancelable: true }}));
@@ -312,7 +329,7 @@ fn build_key_script(node_id: &str, key: &str) -> String {
       }} catch (error) {{
         return fail("Key action failed: " + String(error).slice(0, 120));
       }}
-    }})();"#, id_json=id_json, key_json=key_json)
+    }})();"#, id_json=id_json, key_json=key_json, scope=scope)
 }
 
 fn build_select_script(node_id: &str, option_label: &str) -> String {
@@ -458,6 +475,47 @@ pub async fn execute_visual_click(app:&tauri::AppHandle,label:&str,node_id:&str,
         Ok(value)=>serde_json::from_value(value).unwrap_or(ActionResult{success:false,detail:"No visual click acknowledgement".into()}),
         Err(_)=>ActionResult{success:false,detail:"Visual click acknowledgement unavailable".into()}
     }
+}
+
+/// Native keyboard events, only after policy-bound input and exact public
+/// catalog query have been revalidated. A dispatch is not a search receipt.
+#[cfg(windows)]
+async fn catalog_key_event(app:&tauri::AppHandle,label:&str,event:&str)->Result<(),String>{
+    use tauri::Manager;
+    use std::sync::{Arc,Mutex};
+    use tokio::sync::oneshot;
+    use webview2_com::{CallDevToolsProtocolMethodCompletedHandler,CoTaskMemPWSTR};
+    let view=app.get_webview(label).ok_or("Task tab unavailable")?;
+    let (tx,rx)=oneshot::channel::<Result<(),String>>();
+    let output=Arc::new(Mutex::new(Some(tx)));
+    let payload=serde_json::json!({"type":event,"key":"Enter","code":"Enter","windowsVirtualKeyCode":13,"nativeVirtualKeyCode":13,"text":if event=="keyDown"{"\r"}else{""}}).to_string();
+    view.with_webview(move|native|{
+        let finish=|result|{if let Some(tx)=output.lock().unwrap().take(){let _=tx.send(result);}};
+        let core=match unsafe{native.controller().CoreWebView2()}{Ok(c)=>c,Err(e)=>{finish(Err(e.to_string()));return;}};
+        let o=output.clone();
+        let handler=CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move|status,_|{
+            if let Some(tx)=o.lock().unwrap().take(){let _=tx.send(status.map_err(|e|e.to_string()));}Ok(())
+        }));
+        let method=CoTaskMemPWSTR::from("Input.dispatchKeyEvent");let params=CoTaskMemPWSTR::from(payload.as_str());
+        if let Err(e)=unsafe{core.CallDevToolsProtocolMethod(*method.as_ref().as_pcwstr(),*params.as_ref().as_pcwstr(),&handler)}{finish(Err(e.to_string()));}
+    }).map_err(|e|e.to_string())?;
+    tokio::time::timeout(std::time::Duration::from_secs(3),rx).await.map_err(|_|"Native keyboard timeout".to_string())?.map_err(|_|"Native keyboard callback closed".to_string())?
+}
+#[cfg(windows)]
+pub async fn execute_catalog_enter(app:&tauri::AppHandle,label:&str,node_id:&str,origin:&str,query:&str)->ActionResult{
+    let script=build_key_script_mode(node_id,"Enter",Some((origin,query)));
+    let prepared=match crate::agent::native_eval::eval_json(app,label,script,1800).await{
+        Ok(v)=>match serde_json::from_value::<ActionResult>(v){Ok(r)=>r,Err(_)=>return ActionResult{success:false,detail:"Native search preparation returned invalid acknowledgement".into()}},
+        Err(_)=>return ActionResult{success:false,detail:"Native search preparation script unavailable".into()},
+    };
+    if !prepared.success{return prepared;}
+    if let Err(e)=catalog_key_event(app,label,"keyDown").await{return ActionResult{success:false,detail:format!("Native Enter failed: {e}")};}
+    let _=catalog_key_event(app,label,"keyUp").await;
+    ActionResult{success:true,detail:"Native Enter dispatched; search result not yet verified".into()}
+}
+#[cfg(not(windows))]
+pub async fn execute_catalog_enter(_: &tauri::AppHandle,_:&str,_:&str,_:&str,_:&str)->ActionResult{
+    ActionResult{success:false,detail:"Native catalog keyboard is unavailable".into()}
 }
 
 /// Executes an approved `BrowserAction` directly against the `active-tab` child WebView2
@@ -620,6 +678,15 @@ mod failure_recovery_execution_tests {
         assert!(script.contains("!String(el.value || el.textContent || \"\").trim()"));
     }
 
+    #[test]
+    fn native_catalog_key_preparation_requires_exact_query_and_unobstructed_focus(){
+        let script=build_key_script_mode("search","Enter",Some(("https://www.croma.com/","apple macbook air m4")));
+        let bound=script.find("Catalog search query or destination changed").unwrap();
+        let hit=script.find("Search input not focused or obstructed").unwrap();
+        let dispatch=script.find("const proceed = el.dispatchEvent").unwrap();
+        assert!(bound<hit&&hit<dispatch);
+        assert!(script.contains("location.href!==scope[0]"));
+    }
     #[test]
     fn type_script_refuses_noneditable_or_readonly_controls() {
         let script = build_type_script(Uuid::new_v4(), "search", "NASA Artemis");

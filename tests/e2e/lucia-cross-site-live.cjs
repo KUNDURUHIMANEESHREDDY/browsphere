@@ -55,7 +55,7 @@ async function main(){
   try{
     const revision=await evalJs("window.__TAURI__.core.invoke('lucia_runtime_revision')");
     console.log('LUCIA_RUNTIME_REVISION',revision);
-    if(revision!=='lucia-adaptive-catalog-orchestration-v13.7')throw Error('Native runtime is not the expected objective-gate build');
+    if(revision!=='lucia-approved-mcp-discovery-v13.11')throw Error('Native runtime is not the expected objective-gate build');
     const modelStatus=await fetch('http://127.0.0.1:11434/api/tags',{signal:AbortSignal.timeout(3000)})
       .then(r=>r.json()).catch(()=>({models:[]}));
     const localModel=process.env.LUCIA_TEST_LOCAL_MODEL?.trim() || 'qwen2.5:3b-instruct';
@@ -115,7 +115,7 @@ async function main(){
         executionStates:mine.filter(e=>e.kind==='agent:execution_state').map(e=>({phase:e.payload?.phase,strategy:e.payload?.strategy,world:e.payload?.world,page:e.payload?.page})),
         modelRoles:mine.filter(e=>e.kind==='agent:model_role').map(e=>({role:e.payload?.role,model:e.payload?.model,status:e.payload?.status})),
         vision:mine.filter(e=>e.kind==='agent:vision').map(e=>e.payload?.status),
-        visionDetails:mine.filter(e=>e.kind==='agent:vision').map(e=>({status:e.payload?.status,reason:e.payload?.reason,fusion:e.payload?.fusion,groundedPoints:e.payload?.grounded_points,matchedControl:e.payload?.matched_control})),prerequisites:mine.filter(e=>e.kind==='agent:prerequisite').map(e=>({phase:e.payload?.phase,specialist:e.payload?.specialist,dialog:e.payload?.active_dialog})),
+        visionDetails:mine.filter(e=>e.kind==='agent:vision').map(e=>({status:e.payload?.status,reason:e.payload?.reason,fusion:e.payload?.fusion,groundedPoints:e.payload?.grounded_points,independentGrounded:e.payload?.independent_grounded,independentProposed:e.payload?.independent_proposed,matchedControl:e.payload?.matched_control})),prerequisites:mine.filter(e=>e.kind==='agent:prerequisite').map(e=>({phase:e.payload?.phase,specialist:e.payload?.specialist,dialog:e.payload?.active_dialog})),
         skills:mine.filter(e=>e.kind==='agent:skill_state').map(e=>({phase:e.payload?.phase,diagnosis:e.payload?.diagnosis,strategy:e.payload?.recovery_strategy})),
         objectives:mine.filter(e=>e.kind==='agent:objective_state').map(e=>({revision:e.payload?.revision,required:e.payload?.required_sources,observed:e.payload?.observed_sources})),
         graph:mine.filter(e=>e.kind==='agent:workflow_graph').at(-1)?.payload?.graph||null,
@@ -204,6 +204,34 @@ async function main(){
           console.log('PHASE3_RESULT',JSON.stringify({key,tier:c.tier,skill:c.skill,pass,checks,before,after,task}));
           if(!pass)process.exitCode=1;return;
         }catch(e){console.log('PHASE3_RESULT',JSON.stringify({key,tier:c.tier,skill:c.skill,pass:false,blocked:true,reason:String(e).slice(0,300)}));process.exitCode=1;return;}
+      }
+      if(key==='vision-independent'){
+        const http=require('node:http');
+        const requests=[];
+        const server=http.createServer((req,res)=>{
+          requests.push({method:req.method,path:req.url});
+          if(req.method!=='GET'||!['/catalog','/guide','/favicon.ico'].includes(req.url)){res.writeHead(403);res.end();return;}
+          if(req.url==='/favicon.ico'){res.writeHead(404);res.end();return;}
+          res.setHeader('Content-Type','text/html; charset=utf-8');
+          if(req.url==='/guide'){res.end('<!doctype html><title>Field Guide</title><main><h1>Field Guide</h1><p>This public field guide explains how plants grow using sunlight and water.</p><p>Healthy soil supplies essential nutrients for a garden.</p></main>');return;}
+          // 140 rendered ordinary controls precede the target in DOM order,
+          // but sit well below the viewport. The named link is visible.
+          res.end('<!doctype html><title>Public library</title><style>body{font:24px Arial;color:#172038;background:#fff;padding:25px}main{padding-top:2000px}button{display:block}#target{position:fixed;left:120px;top:110px;padding:24px 65px;background:#eef4ff;color:#123b75;border:3px solid #123b75;border-radius:8px;font-size:30px}h1{position:fixed;top:15px;left:120px;font-size:34px}</style><main><h1>Public document catalog</h1>'+Array.from({length:140},(_,i)=>'<button>Unrelated option '+i+'</button>').join('')+'<a id="target" href="/guide">Field Guide</a></main>');
+        });
+        await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve)});
+        const start='http://127.0.0.1:'+server.address().port+'/catalog';
+        try{
+          await evalJs('window.browsphereApp.newTab('+JSON.stringify(start)+')');
+          let before;
+          for(let i=0;i<40;i++){before=await nativeState().catch(()=>null);if(before?.observed===start&&before.controls>=120)break;await sleep(300);}
+          const missing=await evalJs("(async()=>{const s=await window.__TAURI__.core.invoke('capture_live_snapshot');return !s?.interactive_nodes?.some(n=>n.label==='Field Guide')})()");
+          if(!missing||before?.observed!==start||before.controls!==120)throw Error('Target must be omitted from the initial bounded DOM observation');
+          const task=await runTask('On this public document catalog page, click the Field Guide link. Then report its page title. Do not navigate to unrelated pages.',start,125);
+          const after=await nativeState().catch(()=>null);
+          const checks={initialTargetOmitted:missing,independentModelProposal:task.visionDetails.some(e=>e.independentProposed),nativeHitGrounding:task.visionDetails.some(e=>e.independentGrounded>0),coordinateDispatch:task.actions.some(a=>a.modelRoute?.includes('vision:coordinate_click')&&['ok','confirmed'].includes(a.outcome)),correctPage:after?.observed===start.replace('/catalog','/guide'),verifiedTask:task.status==='completed'&&task.verified,noApproval:!task.approvalRequired,readOnly:requests.every(r=>r.method==='GET')};
+          const pass=Object.values(checks).every(Boolean);
+          console.log('VISION_INDEPENDENT_RESULT',JSON.stringify({pass,checks,task,before,after,requests}));if(!pass)process.exitCode=1;return;
+        }finally{await new Promise(r=>server.close(r));}
       }
       if(key==='vision-fixture'){
         const http=require('node:http');

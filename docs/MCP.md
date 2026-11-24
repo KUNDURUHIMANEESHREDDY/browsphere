@@ -14,3 +14,16 @@ The manual connector supports the registered-public-client OAuth flow described 
 Use a trusted resource with RFC 9728 protected-resource metadata and an issuer with RFC 8414 authorization-server metadata, S256 PKCE, and a registered public native client that accepts ephemeral loopback redirects. Enter the resource URL, exact issuer URL, client ID and least-privilege scope. Start authorization, copy the reviewed URL into your regular browser, and authorize there. Finish authorization in Browsphere, then discover tools. The loopback callback expires after 180 seconds. OAuth access tokens are bound to the exact resource URL and saved in Windows Credential Manager; no refresh token is retained. Reauthorize on expiry. Forget authorization deletes local credentials but does not revoke the provider grant.
 
 This is a deliberately restricted subset: no dynamic client registration, automatic WWW-Authenticate challenge discovery, cross-origin authorization endpoints, refresh-token handling, or silent account login. The protected resource URL must exactly match the configured endpoint. Models never receive authorization URLs, callback codes or tokens. Remote service sign-in must be performed by the user.
+
+## OAuth-first search providers
+Settings > AI & ML > MCP Tools > Sign in to Exa / Sign in to Tavily
+selects the exact official OAuth endpoint and issuer. The native client checks
+live protected resource and issuer metadata, registers a public PKCE client
+with the exact ephemeral loopback redirect, and displays the authorization URL
+for manual login and consent. Finish authorization, discover tools, then approve
+only web_search_exa under exa-oauth or tavily_search under tavily-oauth.
+These aliases take precedence over the same provider's anonymous route.
+Optional API keys are saved separately in Windows Credential Manager and sent
+only to the exact provider endpoint when no saved OAuth token exists.
+OAuth refresh and provider-side revocation are not automatic; reauthorize when
+expired. Brave requires its own API key and configured MCP server.

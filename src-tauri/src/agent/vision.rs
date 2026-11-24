@@ -33,7 +33,7 @@ pub async fn infer(config:&RouterConfig,image:&str,goal:&str,candidates:&[Candid
         .timeout(std::time::Duration::from_secs(35)).build().map_err(|_|"Visual inference client unavailable")?;
     let response:serde_json::Value=client.post(format!("{}/api/chat",config.ollama_url.trim_end_matches('/')))
         .json(&serde_json::json!({
-            "model":config.vision_model,"stream":false,"think":false,"keep_alive":0,
+            "model":config.vision_model,"stream":false,"think":false,"keep_alive":"90s",
             "format":mm::schema(candidates.len()),
             "messages":[{"role":"user","content":mm::prompt(goal,candidates),"images":[image]}],
             "options":{"num_ctx":4096,"num_predict":380,"temperature":0}

@@ -5,7 +5,7 @@ import argparse, datetime, hashlib, json, os, re, socket, subprocess, sys, time
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[2]
-REVISION="lucia-adaptive-catalog-orchestration-v13.7"
+REVISION="lucia-approved-mcp-discovery-v13.11"
 MODELS={"LUCIA_TEST_LOCAL_MODEL":"qwen3.5:0.8b","LUCIA_TEST_PLANNER_MODEL":"qwen2.5:3b-instruct","LUCIA_TEST_SUPERVISOR_MODEL":"lfm3:1.7b","LUCIA_TEST_VISION_MODEL":"lfm3-vl:2b"}
 def case(id,tier,kind,mode=None,marker=None,timeout=200,expect="completion"):
     return dict(id=id,tier=tier,kind=kind,mode=mode or {},marker=marker,timeout=timeout,expect=expect)
@@ -19,6 +19,7 @@ for key in ("search-wikipedia","search-wiktionary","nav-rust","nav-python","extr
     CASES.append(case(key,"skill","live",{"LUCIA_PHASE3_CASE":key},"PHASE3_RESULT"))
 CASES.append(case("public-controls","skill","controls",timeout=180))
 CASES.append(case("vision-fixture","skill","live",{"LUCIA_PHASE3_CASE":"vision-fixture"},"VISION_RESULT",timeout=220))
+CASES.append(case("vision-independent","skill","live",{"LUCIA_PHASE3_CASE":"vision-independent"},"VISION_INDEPENDENT_RESULT",timeout=220))
 CASES.append(case("vision-real-example","skill","live",{"LUCIA_PHASE3_CASE":"vision-real-example"},"VISION_REAL_RESULT",timeout=180))
 CASES.append(case("vision-real-python","skill","live",{"LUCIA_PHASE3_CASE":"nav-python","LUCIA_REQUIRE_COORDINATE":"1"},"PHASE3_RESULT",timeout=180))
 CASES.append(case("form-filter","skill","live",{"LUCIA_FILTER_TEST":"1"},"FILTER_RESULT"))

@@ -138,9 +138,11 @@
           '<span class="mac-ai-quiet">Install or refresh an Ollama model first.</span>'));
     var mcp = section('MCP Tools', 'Connect a trusted local or HTTPS MCP server. This manual connection requires confirmation for each tool call.',
       row('MCP marketplace', 'Browse the official registry. Discovery only; review servers independently before configuring them.', input('cfgMcpSearch', '', 'Search server names') + btn('mcp-marketplace','Search registry')) +
+      row('Search provider sign-in', 'OAuth first. Choose an official provider, then open the reviewed sign-in URL and approve access yourself.', btn('mcp-preset-exa','Sign in to Exa') + btn('mcp-preset-tavily','Sign in to Tavily')) +
+      row('Optional API key', 'Alternative to OAuth for Exa or Tavily. Keys are stored in Windows Credential Manager, never in URLs. Brave uses its separately configured MCP server.', input('cfgMcpProviderKey', '', 'Provider API key', 'password') + btn('mcp-provider-key-save','Save key') + btn('mcp-provider-key-clear','Remove key')) +
       row('Server endpoint', 'Use HTTPS remotely or literal loopback HTTP locally. Connect only to servers you trust.', input('cfgMcpUrl', '', 'http://127.0.0.1:8765/mcp', 'url')) +
-      row('OAuth issuer', 'Registered native public client; the issuer must be advertised by the remote server.', input('cfgMcpIssuer', '', 'https://auth.example.com', 'url')) +
-      row('OAuth client ID', 'Client must support loopback redirects and S256 PKCE.', input('cfgMcpClientId', '', 'Registered public client ID')) +
+      row('OAuth issuer', 'Official presets fill the issuer automatically. Custom servers require a registered client.', input('cfgMcpIssuer', '', 'https://auth.example.com', 'url')) +
+      row('OAuth client ID', 'Leave blank for official presets. Custom clients must support loopback redirects and S256 PKCE.', input('cfgMcpClientId', '', 'Registered public client ID')) +
       row('OAuth scope', 'Optional, request only the minimum necessary scope.', input('cfgMcpScope', '', 'Read-only scope')) +
       row('Authorization', 'Start, open the reviewed URL in your browser, then finish. Tokens stay in Windows Credential Manager.',
         btn('mcp-oauth-begin','Start authorization') + btn('mcp-oauth-copy','Copy authorization URL') + btn('mcp-oauth-finish','Finish authorization') + btn('mcp-oauth-forget','Forget authorization')) +
@@ -148,6 +150,7 @@
       row('Discovered tools', 'Select an exact tool. Server-provided annotations are not permission grants.', '<select id="cfgMcpTool" class="mac-ai-select" aria-label="MCP tool"><option value="">Connect first</option></select>') +
       row('Lucia server name', 'Approve only a reviewed read-only tool for explicit mcp auto / mcp hybrid tasks.', input('cfgMcpAlias','','my-server')) +
       row('Lucia permissions', 'Approval persists for this exact server and tool. Revoke removes it from future tasks.', btn('mcp-lucia-enable','Approve selected tool') + btn('mcp-lucia-revoke','Revoke selected tool')) +
+      row('Public discovery', 'Optional approved public search providers (use mcp discover PUBLIC_QUERY or supported catalog research): server names brave, tavily or exa; tools brave_web_search, tavily_search (legacy tavily-search) or web_search_exa respectively. Connect and approve the exact read-only tool first. Search results are navigation hints, not verified prices. Human verification must be completed manually.', '<span class="mac-ai-quiet">No provider is enabled automatically.</span>') +
       row('Arguments', 'Review the JSON arguments before every call.', '<textarea id="cfgMcpArgs" class="mac-ai-input mac-ai-mono" rows="4">{}</textarea>') +
       row('Run tool', 'Explicit confirmation required. Only connect to servers you trust.', btn('mcp-call','Review and call')) +
       row('Result', '', '<pre id="cfgMcpResult" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto" aria-live="polite"></pre>'));

@@ -2987,6 +2987,7 @@ fn main() {
             mcp_oauth::mcp_oauth_begin,
             mcp_oauth::mcp_oauth_finish,
             mcp_oauth::mcp_oauth_forget,
+            mcp_oauth::mcp_provider_key,
             mcp::mcp_disconnect,
             mcp::mcp_call,
             mcp::mcp_set_lucia_tool,

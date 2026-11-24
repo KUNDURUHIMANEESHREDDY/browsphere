@@ -33,6 +33,7 @@ pub mod requirements;
 pub mod evidence_acquisition;
 pub mod train_results;
 pub mod catalog_research;
+pub mod search_discovery;
 pub mod strategy_ledger;
 pub mod reference_track;
 pub mod checkpoint;

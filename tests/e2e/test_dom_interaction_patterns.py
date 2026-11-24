@@ -39,6 +39,14 @@ def main():
     const semanticSearch=snapshot();
     main.innerHTML='<h1>Notebook Pro 16GB 256GB</h1><div><span class="selling-price">INR 59999</span><del>INR 69999</del><button>Add to cart</button></div><aside>INR 11111</aside>';
     const scopedOffer=snapshot();
+    main.innerHTML='<h1>Notebook Pro 16GB 256GB</h1><p class="product-price">INR 2999 per month EMI</p><button>Add to cart</button>';
+    const installment=snapshot();
+    main.innerHTML='<h1>Notebook Pro 16GB 256GB</h1><span class="product-price" style="text-decoration:line-through">INR 59999</span><button>Add to cart</button>';
+    const crossed=snapshot();
+    main.innerHTML='<h1>Notebook Pro 16GB 256GB</h1><p>Price unavailable</p><article class="product-card"><h2>Other notebook</h2><span class="selling-price">INR 39999</span><button>Add to cart</button></article>';
+    const unrelated=snapshot();
+    main.innerHTML='<h1>Notebook Pro 16GB 256GB</h1><span class="selling-price">INR 59999</span><span class="selling-price">INR 69999</span><button>Add to cart</button>';
+    const conflicting=snapshot();
     main.innerHTML='<h1>Library reference</h1><h2>Example</h2><p>The documentation describes the public interface and how the method behaves.</p><p>The method accepts an input and returns a value with the documented type.</p><pre>example.method(value)</pre>';
     const reference=snapshot();
     main.innerHTML='<h1>Loading</h1><div role="progressbar" aria-label="Loading results">Loading results...</div>';
@@ -46,7 +54,7 @@ def main():
     main.innerHTML='<h1>Public repository</h1>'+Array.from({length:180},(_,i)=>'<p><a href="/unrelated/'+i+'">Unrelated file '+i+'</a> Long incidental file listing that is not the documentation.</p>').join('')+'<article><h2>README</h2><p>This public widget library can be installed with the package command shown below. Its supported runtime is Python 3.10 or later, and the library provides a public interface for reading documents.</p><pre>pip install widget</pre><p>Use the published documentation to learn how the package behaves and how to use its public interface.</p><a href="/acme/widget/blob/main/README.md">README.md</a><a href="/acme/widget/blob/main/pyproject.toml">pyproject.toml</a><p style="display:none">HIDDEN FIXTURE SECRET</p></article>';
     const repository=snapshot();
     const result=document.createElement('pre'); result.id='probe-result';
-    result.textContent=JSON.stringify({modal,form,article,route,catalog,product,crowded,semanticSearch,scopedOffer,reference,loading,repository}); document.body.append(result);
+    result.textContent=JSON.stringify({modal,form,article,route,catalog,product,crowded,semanticSearch,scopedOffer,installment,crossed,unrelated,conflicting,reference,loading,repository}); document.body.append(result);
     </script></body></html>"""
     with tempfile.TemporaryDirectory(prefix="lucia-dom-") as work:
         root = Path(work)
@@ -79,6 +87,8 @@ def main():
     assert product["offer_blocks"]==1 and product["priced_cards"]==0, product
     assert any(n["label"]=="Matching notebook 16GB 256GB" for n in result["crowded"]["interactive_nodes"]), "Rendered product link was crowded out"
     assert any(n["role"]=="searchbox" and n["label"]=="What are you looking for ?" and n["search_state"]=="empty" for n in result["semanticSearch"]["interactive_nodes"]), "Semantic search field was not recognized"
+    for name in ("installment","crossed","unrelated","conflicting"):
+        assert result[name]["structure"]["product"] is None, (name,result[name]["structure"])
     # The scoped primary product extractor must never use the crossed-out MRP.
     offer=result["scopedOffer"]["structure"]["product"]
     assert offer and offer["price"]=="INR 59999", offer

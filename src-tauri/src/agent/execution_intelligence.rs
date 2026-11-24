@@ -90,6 +90,10 @@ impl ExecutionIntelligence{
         Self{world:WorldModel::default(),phase:Phase::AcquireControl,strategy:Strategy::Observe,managed,initial:initial.into(),receipt:None,pending:None,waiting:0,attempts:0}
     }
     pub fn managed(&self)->bool{self.managed}
+    pub fn visual_acquisition_due(&self,goal:&str,p:&DomSnapshot)->bool{
+        self.managed&&self.phase==Phase::AcquireControl&&self.pending.is_none()&&self.receipt.is_none()&&self.waiting>=2&&p.origin==self.initial&&
+        self.candidate(goal,p).is_none()&&super::multimodal_perception::independent_discovery_allowed(p)
+    }
     pub fn restrict(&mut self){self.phase=Phase::Blocked;self.strategy=Strategy::Stop;self.pending=None;}
     /// Accept only the exact uniquely observed named public link. A model's
     /// label or URL is never accepted without this fresh DOM correspondence.

@@ -49,7 +49,9 @@ fn account(resource:&Url)->String{
 fn creds()->CredentialStore{CredentialStore::new("BrowsphereAI")}
 pub fn access_token_for(resource:&Url)->Result<Option<String>>{
     if resource.scheme()!="https"{return Ok(None);}
-    let Some(raw)=creds().get_secret(&account(resource))? else{return Ok(None)};
+    let Some(raw)=creds().get_secret(&account(resource))? else{
+        return if provider_preset(resource).is_some(){creds().get_secret(&format!("{}:api-key",account(resource)))}else{Ok(None)};
+    };
     let v:Value=serde_json::from_str(&raw).context("Invalid saved MCP authorization")?;
     ensure!(v["resource"]==resource.as_str(),"MCP token resource mismatch");
     if let Some(exp)=v["expires_at"].as_i64(){
@@ -137,6 +139,33 @@ async fn callback(p:&Pending)->Result<String>{
         anyhow::bail!("No valid OAuth callback received")
     }).await.context("Authorization expired")?
 }
+fn provider_preset(resource:&Url)->Option<(&'static str,&'static str)>{
+    match resource.as_str(){
+        "https://mcp.exa.ai/mcp/oauth"=>Some(("https://auth.exa.ai","mcp:tools")),
+        "https://mcp.tavily.com/mcp"=>Some(("https://mcp.tavily.com/","openid")),
+        _=>None
+    }
+}
+fn registration_endpoint(metadata:&Value,issuer:&Url)->Result<Url>{
+    ensure!(metadata["token_endpoint_auth_methods_supported"].as_array().is_some_and(|a|a.iter().any(|v|v=="none")),"Issuer does not advertise public clients");
+    let endpoint=https(metadata["registration_endpoint"].as_str().context("Dynamic client registration unavailable")?)?;
+    ensure!(endpoint.origin()==issuer.origin(),"Cross-origin registration endpoint not supported");
+    Ok(endpoint)
+}
+async fn register_public_client(http:&Client,metadata:&Value,issuer:&Url,redirect:&Url)->Result<String>{
+    let endpoint=registration_endpoint(metadata,issuer)?;
+    let response=json_response(http.post(endpoint).json(&json!({
+        "client_name":"Browsphere Lucia","application_type":"native",
+        "redirect_uris":[redirect.as_str()],"grant_types":["authorization_code"],
+        "response_types":["code"],"token_endpoint_auth_method":"none"
+    })).send().await?).await?;
+    ensure!(response["token_endpoint_auth_method"]=="none","Registration did not return a public client");
+    ensure!(response["redirect_uris"].as_array().is_some_and(|a|a.iter().any(|v|v==redirect.as_str())),"Registered callback mismatch");
+    ensure!(response.get("client_secret").is_none()||response["client_secret"].is_null(),"Unexpected confidential client");
+    let id=response["client_id"].as_str().context("Registration missing client ID")?;
+    ensure!(!id.trim().is_empty()&&id.len()<=512&&!id.chars().any(char::is_control),"Invalid registered client ID");
+    Ok(id.to_owned())
+}
 fn trusted(view:&tauri::Webview)->Result<()>{
     ensure!(view.label()=="main","Only trusted browser settings may authorize MCP");
     Ok(())
@@ -146,8 +175,14 @@ pub async fn mcp_oauth_begin(view:tauri::Webview,registry:tauri::State<'_,OAuthR
     resource:String,issuer:String,client_id:String,scope:String)->Result<Value,String>{
     async {
         trusted(&view)?;
-        let resource=https(&resource)?;let issuer=https(&issuer)?;
-        ensure!(!client_id.trim().is_empty() && client_id.len()<=512 && !client_id.chars().any(char::is_control),"Registered public client ID required");
+        let resource=https(&resource)?;
+        let automatic=client_id.trim().is_empty();
+        let (issuer,scope)=if automatic{
+            let (expected,default_scope)=provider_preset(&resource).context("Automatic registration is limited to official search provider presets")?;
+            ensure!(issuer.trim().is_empty()||https(&issuer)?==https(expected)?,"Preset issuer mismatch");
+            (https(expected)?,default_scope.to_owned())
+        }else{(https(&issuer)?,scope)};
+        ensure!(client_id.len()<=512 && !client_id.chars().any(char::is_control),"Invalid public client ID");
         ensure!(scope.len()<=512 && !scope.chars().any(char::is_control),"Invalid scope");
         let http=client()?;
         let metadata=json_response(http.get(well_known(&resource,"oauth-protected-resource",true)).send().await?).await?;
@@ -156,6 +191,7 @@ pub async fn mcp_oauth_begin(view:tauri::Webview,registry:tauri::State<'_,OAuthR
         let (mut authorize,token_endpoint)=endpoints(&metadata,&issuer)?;
         let listener=TcpListener::bind("127.0.0.1:0").await?;
         let redirect=Url::parse(&format!("http://127.0.0.1:{}/oauth/callback",listener.local_addr()?.port()))?;
+        let client_id=if automatic{register_public_client(&http,&metadata,&issuer,&redirect).await?}else{client_id};
         let verifier=random_value();let state=random_value();
         authorize.query_pairs_mut().append_pair("response_type","code")
             .append_pair("client_id",&client_id).append_pair("redirect_uri",redirect.as_str())
@@ -196,9 +232,31 @@ pub async fn mcp_oauth_forget(view:tauri::Webview,resource:String)->Result<(),St
     (||{trusted(&view)?;creds().delete_secret(&account(&https(&resource)?))})()
         .map_err(|_|"Could not clear MCP authorization".into())
 }
+#[tauri::command]
+pub async fn mcp_provider_key(view:tauri::Webview,resource:String,key:String)->Result<(),String>{
+    (||{
+        trusted(&view)?;
+        let resource=https(&resource)?;
+        ensure!(provider_preset(&resource).is_some(),"API keys supported only for exact official search provider endpoints");
+        let account=format!("{}:api-key",account(&resource));
+        if key.is_empty(){return creds().delete_secret(&account);}
+        ensure!(key.len()<=1024&&!key.chars().any(|c|c.is_whitespace()||c.is_control()),"Invalid API key");
+        creds().set_secret(&account,&key)
+    })().map_err(|_|"Could not update provider API key".into())
+}
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]fn official_presets_and_registration_are_bound(){
+        assert_eq!(provider_preset(&https("https://mcp.exa.ai/mcp/oauth").unwrap()),Some(("https://auth.exa.ai","mcp:tools")));
+        assert_eq!(provider_preset(&https("https://mcp.tavily.com/mcp").unwrap()),Some(("https://mcp.tavily.com/","openid")));
+        assert!(provider_preset(&https("https://mcp.exa.ai.evil.test/mcp/oauth").unwrap()).is_none());
+        let issuer=https("https://auth.exa.ai").unwrap();
+        let mut m=json!({"registration_endpoint":"https://auth.exa.ai/api/oauth/register","token_endpoint_auth_methods_supported":["none"]});
+        assert!(registration_endpoint(&m,&issuer).is_ok());
+        m["registration_endpoint"]=json!("https://evil.test/register");
+        assert!(registration_endpoint(&m,&issuer).is_err());
+    }
     #[test]fn pkce_and_callback_binding(){
         assert_eq!(pkce("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
         let redirect=Url::parse("http://127.0.0.1:12345/oauth/callback").unwrap();

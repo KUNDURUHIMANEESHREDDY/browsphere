@@ -4,6 +4,8 @@ use super::{browser_skills as bs,dom_extractor::{DomSnapshot,DomNodeSummary},pol
 use serde::Serialize;
 use super::strategy_ledger::{Ledger as StrategyLedger,Kind as StrategyKind,Outcome as StrategyOutcome,Record as StrategyRecord};
 use std::collections::{HashSet,BTreeMap};
+use std::time::{Duration,Instant};
+const RETAILER_TIME_BUDGET:Duration=Duration::from_secs(52);
 const RETAILERS:[(&str,&str);2]=[("croma","https://www.croma.com/"),("reliance digital","https://www.reliancedigital.in/")];
 #[derive(Clone,Debug)]
 pub struct Intent{query:String,identity:Vec<String>,chip:String,ram:String,storage:String,size:String,sites:Vec<&'static str>}
@@ -45,18 +47,28 @@ impl Intent{
   let query=format!("{} {} {}GB {}GB",identity.join(" "),chip,ram,storage);
   Some(Self{query,identity,chip,ram,storage,size,sites})
  }
- pub fn entry(&self,url:&str)->bool{self.sites.iter().any(|x|*x==url||self.discovery_url(x)==url)}
+ pub fn visual_subject(&self)->String{format!("{} {}-inch",self.query,self.size)}
+ pub fn entry(&self,url:&str)->bool{self.sites.iter().any(|x|*x==url||self.discovery_url(x)==url||self.alternate_discovery_url(x)==url)}
  fn site(&self,url:&str)->Option<&'static str>{let h=host(url)?;self.sites.iter().copied().find(|s|host(s).as_deref()==Some(&h))}
  fn discovery_url(&self,site:&str)->String{
   let mut u=url::Url::parse("https://www.google.com/search").unwrap();
   u.query_pairs_mut().append_pair("q",&format!("site:{} {}",host(site).unwrap_or_default(),self.query));u.to_string()
  }
+ fn discovery_query(&self,site:&str,precise:bool)->String{
+  let base=format!("site:{} {}",host(site).unwrap_or_default(),self.query);
+  if precise{format!("{base} {}-inch",self.size)}else{base}
+ }
+ fn alternate_discovery_url(&self,site:&str)->String{
+  let mut u=url::Url::parse("https://search.brave.com/search").unwrap();
+  u.query_pairs_mut().append_pair("q",&self.discovery_query(site,true));u.to_string()
+ }
  fn discovery_site(&self,raw:&str)->Option<&'static str>{
   let u=bs::public_url(raw)?;
-  if u.scheme()!="https"||u.host_str()!=Some("www.google.com")||u.port().is_some()||u.path()!="/search"||u.fragment().is_some(){return None;}
+  if u.scheme()!="https"||!matches!(u.host_str(),Some("www.google.com"|"search.brave.com"))||u.port().is_some()||u.path()!="/search"||u.fragment().is_some(){return None;}
   let q=u.query_pairs().filter(|(k,_)|k=="q").map(|(_,v)|v.into_owned()).collect::<Vec<_>>();
   if q.len()!=1{return None;}
-  self.sites.iter().copied().find(|site|q[0]==format!("site:{} {}",host(site).unwrap_or_default(),self.query))
+  let precise=u.host_str()==Some("search.brave.com");
+  self.sites.iter().copied().find(|site|q[0]==self.discovery_query(site,precise))
  }
  fn discovery_target(&self,from:&str,to:&str)->bool{
   let Some(site)=self.discovery_site(from)else{return false;};
@@ -77,8 +89,38 @@ impl Intent{
   if has_cap(s,&self.storage,"gb"){score+=20;}
   score
  }
+ fn display_classes(s:&str)->HashSet<String>{
+  let lower=s.to_ascii_lowercase();
+  let mut classes=HashSet::new();
+  for (at,_) in lower.match_indices("inch"){
+   let rest=&lower[at+4..];
+   let rest=rest.strip_prefix("es").unwrap_or(rest);
+   if rest.chars().next().is_some_and(char::is_alphabetic){continue;}
+   let prefix=lower[..at].trim_end_matches(|c:char|c.is_whitespace()||c=='-');
+   let bytes=prefix.as_bytes();
+   let end=bytes.len();
+   let mut start=end;
+   while start>0&&bytes[start-1].is_ascii_digit(){start-=1;}
+   if start==end||end-start>2{continue;}
+   let mut major_end=end;
+   if start>0&&matches!(bytes[start-1],b'.'|b'-'){
+    let sep=start-1;
+    let mut major=sep;
+    while major>0&&bytes[major-1].is_ascii_digit(){major-=1;}
+    if major<sep&&sep-major<=2{start=major;major_end=sep;}
+   }
+   if start>0&&bytes[start-1].is_ascii_alphanumeric(){continue;}
+   classes.insert(prefix[start..major_end].to_string());
+  }
+  classes
+ }
+ fn size_compatible(&self,s:&str,required:bool)->bool{
+  let classes=Self::display_classes(s);
+  if classes.is_empty(){return !required;}
+  classes.len()==1&&classes.contains(&self.size)
+ }
  fn complete_specs(&self,s:&str)->bool{
-  if self.spec_score(s)!=170{return false;}
+  if self.spec_score(s)!=170||!self.size_compatible(s,true){return false;}
   // Every GB capacity in the primary product heading must match one of
   // the requested capacities. Never combine headings from different cards.
   let w=bs::words(s);
@@ -106,7 +148,7 @@ impl Intent{
   if !(path.starts_with("/product/")||path.contains("/p/")){return 0;}
   let text=format!("{} {}",n.label,u.path().replace(['-','_','/']," "));
   let score=self.spec_score(&text);
-  if score<130{return 0;}
+  if score<130||!self.size_compatible(&n.label,false)||!self.size_compatible(u.path(),false){return 0;}
   // A visible title with two capacities must match both requested values.
   // Generic model links with absent capacities may be inspected, but an
   // explicit contradictory variant must never be selected.
@@ -163,6 +205,14 @@ impl Intent{
   let label=bs::words(&n.label);
   let brand=self.identity.first().map(String::as_str).unwrap_or("");
   let chip=self.chip.as_str();
+  let mut prefix=label.as_slice();
+  if prefix.first().is_some_and(|x|x==brand){prefix=&prefix[1..];}
+  if prefix.first().is_some_and(|x|x==chip){
+   let mut tail=&prefix[1..];
+   if tail.first().is_some_and(|x|x=="chip"){tail=&tail[1..];}
+   if !tail.is_empty()&&tail.len()<=4&&tail.chunks_exact(2).remainder().is_empty()&&tail.chunks_exact(2).all(|pair|
+    pair[0].strip_suffix('c').is_some_and(|v|!v.is_empty()&&v.len()<=2&&v.chars().all(|c|c.is_ascii_digit()))&&matches!(pair[1].as_str(),"cpu"|"gpu")){return true;}
+  }
   matches!(label.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
     [c] if *c==chip)||
   matches!(label.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
@@ -177,6 +227,11 @@ fn input(n:&DomNodeSummary)->bool{
 }
 fn opener(n:&DomNodeSummary)->bool{
  bs::search::opener(n)||(bs::public_control(n)&&n.href.is_none()&&n.role=="combobox"&&n.tag!="input"&&n.label.trim().eq_ignore_ascii_case("search"))
+}
+fn location_dialog_close(p:&DomSnapshot,n:&DomNodeSummary)->bool{
+ p.text_excerpt.starts_with("Active dialog:")&&["select your location","choose your location","enter your pincode"].iter().any(|x|word(&p.text_excerpt,x))&&
+ !["consent","terms","accept cookies","sign in required","captcha","verify you are human"].iter().any(|x|word(&p.text_excerpt,x))&&
+ bs::public_control(n)&&n.href.is_none()&&n.role=="button"&&visible(n)&&["close","dismiss","not now","close dialog","close location dialog"].contains(&bs::normalize(&n.label).as_str())
 }
 fn search_button(n:&DomNodeSummary)->bool{
  bs::public_control(n)&&n.href.is_none()&&matches!(n.role.as_str(),"button")&&
@@ -196,10 +251,20 @@ fn price_value(s:&str)->Option<u64>{
  (amount>=1000&&amount<100_000_000).then_some(amount*100+frac.parse::<u64>().ok()?)
 }
 #[derive(Clone,Debug)]
+struct SpecEvidence{url:String,heading:String,price_status:String}
+fn spec_evidence(i:&Intent,p:&DomSnapshot,sources:&[SourceEvidence])->Option<SpecEvidence>{
+ if i.site(&p.origin).is_none()||p.structure.loading||!bs::readable(p)||!bs::public_url(&p.origin).is_some_and(|u|u.query().is_none()&&(u.path().starts_with("/product/")||u.path().contains("/p/"))){return None;}
+ let heading=p.structure.product_heading.as_ref().or_else(||p.structure.product.as_ref().map(|x|&x.heading))?;
+ if !i.complete_specs(heading)||!i.identity_ok(&p.title)||i.model_conflict(&p.title){return None;}
+ let source=sources.iter().find(|s|s.url==p.origin&&bs::verification::quote_present(s,heading))?;
+ Some(SpecEvidence{url:source.url.clone(),heading:heading.clone(),price_status:match p.structure.product_price_status.as_deref(){Some("ambiguous_or_conditional_price")=>"ambiguous_or_conditional_price",_=>"no_scoped_selling_price"}.into()})
+}
+#[derive(Clone,Debug)]
 struct Product{url:String,heading:String,price:String,amount:u64,quote:String}
 fn product(i:&Intent,p:&DomSnapshot,sources:&[SourceEvidence])->Option<Product>{
  if i.site(&p.origin).is_none()||root(&p.origin)||p.structure.loading||!bs::readable(p)||!bs::public_url(&p.origin).is_some_and(|u|u.query().is_none()&&(u.path().starts_with("/product/")||u.path().contains("/p/"))){return None;}
  let record=p.structure.product.as_ref()?;
+ if p.structure.product_price_status.as_deref().is_some_and(|s|s!="observed_selling_price"){return None;}
  if !i.complete_specs(&record.heading)||!i.identity_ok(&p.title)||i.model_conflict(&p.title){return None;}
  let amount=price_value(&record.price)?;
  if !bs::normalize(&record.context).contains(&bs::normalize(&record.heading))||
@@ -244,14 +309,38 @@ impl Expected{
  fn limit(&self)->u8{match self{Self::Search{..}|Self::Filter{..}|Self::Pagination{..}=>6,Self::Destination{..}=>4}}
 }
 #[derive(Clone,Debug,Default)]
-struct SiteState{result_signature:Vec<String>,settle_extensions:u8,actions:u8,pages:u8,discovery_started:bool,discovery_wait:u8,entry_attempted:bool,attempts:HashSet<String>,typed:Option<(String,String,String)>,waiting:u8,short_query:bool,restart:bool,blocked:bool,submitted:bool,filtered:bool,broad_query:bool,category_attempts:u8,submitted_query:Option<(String,String,String)>,strategy:StrategyLedger,expected:Option<Expected>,observations:u8}
+struct SiteState{mcp_attempted:bool,mcp_status:Option<&'static str>,started_at:Option<Instant>,stop_reason:Option<&'static str>,vision_attempted:bool,result_signature:Vec<String>,settle_extensions:u8,actions:u8,pages:u8,discovery_started:bool,alternate_discovery:bool,discovery_wait:u8,entry_attempted:bool,attempts:HashSet<String>,typed:Option<(String,String,String)>,waiting:u8,short_query:bool,restart:bool,blocked:bool,submitted:bool,filtered:bool,broad_query:bool,category_attempts:u8,submitted_query:Option<(String,String,String)>,strategy:StrategyLedger,expected:Option<Expected>,observations:u8}
 #[derive(Serialize)]
-pub struct SiteStatus{pub retailer:String,pub model:bool,pub chip:bool,pub memory:bool,pub storage:bool,pub price:bool,pub status:&'static str,pub attempts:usize,pub submitted:bool,pub filtered:bool,pub observations:u8,pub actions:u8,pub pages:u8,pub discovery_started:bool,pub strategies:Vec<StrategyRecord>}
-pub struct Run{pub intent:Intent,states:BTreeMap<&'static str,SiteState>,products:BTreeMap<&'static str,Product>}
+pub struct SiteStatus{pub retailer:String,pub model:bool,pub chip:bool,pub memory:bool,pub storage:bool,pub price:bool,pub status:&'static str,pub attempts:usize,pub submitted:bool,pub filtered:bool,pub observations:u8,pub actions:u8,pub pages:u8,pub discovery_started:bool,pub strategies:Vec<StrategyRecord>,pub stop_reason:Option<&'static str>,pub mcp_status:Option<&'static str>}
+pub struct Run{pub intent:Intent,states:BTreeMap<&'static str,SiteState>,products:BTreeMap<&'static str,Product>,specs:BTreeMap<&'static str,SpecEvidence>,mcp_candidates:BTreeMap<&'static str,Vec<String>>}
 impl Run{
- pub fn new(goal:&str)->Option<Self>{let intent=Intent::compile(goal)?;Some(Self{states:intent.sites.iter().map(|s|(*s,SiteState::default())).collect(),products:BTreeMap::new(),intent})}
+ pub fn new(goal:&str)->Option<Self>{let intent=Intent::compile(goal)?;Some(Self{states:intent.sites.iter().map(|s|(*s,SiteState::default())).collect(),products:BTreeMap::new(),intent,specs:BTreeMap::new(),mcp_candidates:BTreeMap::new()})}
+ pub fn discovery_request(&mut self,p:&DomSnapshot)->Option<(&'static str,String,String)>{
+  let site=self.intent.sites.iter().copied().find(|s|!self.products.contains_key(s)&&!self.states[s].blocked)?;
+  // Only on a retailer's own public page, not a provider challenge or auth gate.
+  if self.intent.site(&p.origin)!=Some(site)||!bs::readable(p){return None;}
+  let state=self.states.get_mut(site)?;
+  if state.mcp_attempted||state.expected.is_some(){return None;}
+  state.mcp_attempted=true;
+  Some((site,host(site)?,self.intent.discovery_query(site,true)))
+ }
+ pub fn accept_discovery(&mut self,site:&'static str,result:super::search_discovery::Discovery){
+  if let Some(s)=self.states.get_mut(site){s.mcp_status=Some(result.status);}
+  let candidates=result.urls.into_iter().filter(|u|self.mcp_target(site,u)).take(12).collect();
+  self.mcp_candidates.insert(site,candidates);
+ }
+ fn mcp_target(&self,site:&str,raw:&str)->bool{
+  let Some(u)=bs::public_url(raw)else{return false;};
+  self.intent.site(raw)==Some(site)&&u.query().is_none()&&u.fragment().is_none()&&
+   (u.path().starts_with("/product/")||u.path().contains("/p/"))&&
+   self.intent.spec_score(&u.path().replace(['-','_','/']," "))>=130&&self.intent.size_compatible(u.path(),false)
+ }
+ fn mcp_grounded(&self,p:&DomSnapshot,url:&str)->bool{
+  let Some(site)=self.intent.site(&p.origin)else{return false;};
+  self.mcp_target(site,url)&&self.mcp_candidates.get(site).is_some_and(|v|v.iter().any(|x|x==url))
+ }
  pub fn ready(&self)->bool{self.products.len()==self.intent.sites.len()}
- pub fn statuses(&self)->Vec<SiteStatus>{self.intent.sites.iter().map(|s|{let verified=self.products.contains_key(s);SiteStatus{retailer:host(s).unwrap_or_default(),model:verified,chip:verified,memory:verified,storage:verified,price:verified,status:if verified{"verified"}else if self.states[s].blocked{"unverified"}else{"missing"},attempts:self.states[s].attempts.len(),submitted:self.states[s].submitted,filtered:self.states[s].filtered,observations:self.states[s].observations,actions:self.states[s].actions,pages:self.states[s].pages,discovery_started:self.states[s].discovery_started,strategies:self.states[s].strategy.outcomes()}}).collect()}
+ pub fn statuses(&self)->Vec<SiteStatus>{self.intent.sites.iter().map(|s|{let verified=self.products.contains_key(s);let specs=verified||self.specs.contains_key(s);SiteStatus{retailer:host(s).unwrap_or_default(),model:specs,chip:specs,memory:specs,storage:specs,price:verified,status:if verified{"verified"}else if specs{"specs_only"}else if self.states[s].blocked{"unverified"}else{"missing"},attempts:self.states[s].attempts.len(),submitted:self.states[s].submitted,filtered:self.states[s].filtered,observations:self.states[s].observations,actions:self.states[s].actions,pages:self.states[s].pages,discovery_started:self.states[s].discovery_started,strategies:self.states[s].strategy.outcomes(),stop_reason:self.states[s].stop_reason,mcp_status:self.states[s].mcp_status}}).collect()}
  pub fn next(&mut self,p:&DomSnapshot,sources:&[SourceEvidence])->Next{
   let out=self.next_inner(p,sources);
   if let Some(site)=self.intent.sites.iter().copied().find(|s|!self.products.contains_key(s)&&!self.states[s].blocked){
@@ -262,17 +351,42 @@ impl Run{
  }
  fn next_inner(&mut self,p:&DomSnapshot,sources:&[SourceEvidence])->Next{
   self.products.retain(|site,item|self.intent.site(&item.url)==Some(*site)&&self.intent.complete_specs(&item.heading)&&price_value(&item.price)==Some(item.amount)&&sources.iter().any(|s|s.url==item.url&&bs::verification::quote_present(s,&item.quote)));
+  self.specs.retain(|site,item|self.intent.site(&item.url)==Some(*site)&&self.intent.complete_specs(&item.heading)&&sources.iter().any(|s|s.url==item.url&&bs::verification::quote_present(s,&item.heading)));
   let current=self.intent.site(&p.origin);
   if let Some(site)=current{
+   if let Some(item)=spec_evidence(&self.intent,p,sources){self.specs.insert(site,item);}
    if let Some(item)=product(&self.intent,p,sources){self.products.insert(site,item);}
   }
   if self.ready(){return Next::Action(BrowserAction::Complete{summary:"Matching public products observed at both requested retailers; verify evidence.".into()},"catalog:handoff");}
   let site=self.intent.sites.iter().copied().find(|s|!self.products.contains_key(s)&&!self.states[s].blocked);
   let Some(site)=site else{return Next::Stop("Matching product and price evidence unavailable from one or more named retailers; no comparison claimed");};
+  let candidate=if current==Some(site){self.mcp_candidates.get(site).and_then(|v|v.iter().find(|u|!self.states[site].attempts.contains(&format!("link:{u}"))&&u.as_str()!=p.origin)).cloned()}else{None};
   let state=self.states.get_mut(site).unwrap();
-  if state.observations>=60||state.actions>=22{state.strategy.exhaust();state.expected=None;state.blocked=true;return Next::Wait;}
+  let started=*state.started_at.get_or_insert_with(Instant::now);
+  if started.elapsed()>=RETAILER_TIME_BUDGET||state.observations>=60||state.actions>=22{
+   state.strategy.exhaust();state.expected=None;state.blocked=true;
+   state.stop_reason=Some(if started.elapsed()>=RETAILER_TIME_BUDGET{"retailer_time_budget"}else{"retailer_step_budget"});
+   return Next::Wait;
+  }
   state.observations=state.observations.saturating_add(1);
   if current==Some(site){state.entry_attempted=true;}
+  if state.expected.is_none()&&bs::readable(p){
+   if let Some(url)=candidate{
+    let key=format!("link:{url}");
+    if state.strategy.start(key.clone(),StrategyKind::Product){
+     state.attempts.insert(key);state.expected=Some(Expected::Destination{url:url.clone()});
+     return Next::Action(BrowserAction::Navigate{url},"catalog:approved_mcp_candidate");
+    }
+   }
+  }
+  // A provider challenge is a terminal access limitation, not a signal
+  // to retry, solve a CAPTCHA or circumvent provider controls.
+  let challenge=bs::public_url(&p.origin).is_some_and(|u|
+   matches!(u.host_str(),Some("www.google.com"|"search.brave.com"))&&
+   (u.path().starts_with("/sorry/")||p.text_excerpt.to_ascii_lowercase().contains("detected unusual traffic")||p.text_excerpt.to_ascii_lowercase().contains("verify you are human")));
+  if state.discovery_started&&challenge{
+   state.strategy.exhaust();state.expected=None;state.blocked=true;state.stop_reason=Some("public_search_access_restricted");return Next::Wait;
+  }
   if self.intent.discovery_site(&p.origin)==Some(site)&&state.discovery_started{
    if super::recovery::authentication_gate(p)||super::deliberation::error_page(p){state.blocked=true;return Next::Wait;}
    let ranked=bs::navigation::ranked(p,|n|self.intent.link_score(p,n),|u|!state.attempts.contains(&format!("link:{u}")));
@@ -281,7 +395,13 @@ impl Run{
     return Next::Action(BrowserAction::Navigate{url},"catalog:discovered_product");
    }
    state.discovery_wait+=1;
-   if state.discovery_wait>=5{state.blocked=true;}
+   if state.discovery_wait>=5{
+    if !state.alternate_discovery&&bs::public_url(&p.origin).is_some_and(|u|u.host_str()==Some("www.google.com")){
+     state.alternate_discovery=true;state.discovery_wait=0;
+     return Next::Action(BrowserAction::Navigate{url:self.intent.alternate_discovery_url(site)},"catalog:alternate_public_discovery");
+    }
+    state.blocked=true;state.stop_reason=Some("no_usable_matching_search_destination");
+   }
    return Next::Wait;
   }
   if current!=Some(site){
@@ -312,6 +432,16 @@ impl Run{
    // A confirmed query/filter means a rendered result can be inspected.
    // A failed query makes a different discovery strategy preferable.
    state.waiting=5;
+  }
+  if p.text_excerpt.starts_with("Active dialog:"){
+   if let Some(n)=bs::unique(p.interactive_nodes.iter().filter(|n|location_dialog_close(p,n))){
+    if state.attempts.insert(format!("location-dismiss:{}",p.origin)){
+     state.waiting=0;
+     return Next::Action(BrowserAction::Click{node_id:n.node_id.clone(),element_label:n.label.clone(),is_submit:false},"catalog:optional_location_dismiss");
+    }
+   }
+   if !state.discovery_started{state.discovery_started=true;return Next::Action(BrowserAction::Navigate{url:self.intent.discovery_url(site)},"catalog:public_search_discovery");}
+   state.blocked=true;return Next::Wait;
   }
   if p.structure.loading||!bs::readable(p){
    state.waiting+=1;
@@ -440,7 +570,7 @@ impl Run{
   }
   if !state.restart&&!root(&p.origin)&&!result_page(p){state.restart=true;state.typed=None;state.submitted=false;state.waiting=0;return Next::Action(BrowserAction::Navigate{url:site.into()},"catalog:restart_public_search");}
   if !state.discovery_started{state.discovery_started=true;state.waiting=0;return Next::Action(BrowserAction::Navigate{url:self.intent.discovery_url(site)},"catalog:public_search_discovery");}
-  state.blocked=true;Next::Wait
+  state.blocked=true;state.stop_reason=Some("matching_public_evidence_not_observed");Next::Wait
  }
  pub fn receipt(&mut self,before:&DomSnapshot,after:&DomSnapshot,a:&BrowserAction){
   let Some(site)=self.intent.site(&before.origin)else{return;};
@@ -460,6 +590,78 @@ impl Run{
    _=>{}
   }
  }
+ pub fn native_search_query(&self,p:&DomSnapshot,a:&BrowserAction)->Option<String>{
+  let BrowserAction::PressKey{key,..}=a else{return None;};
+  if key!="Enter"||self.check(p,a).is_err(){return None;}
+  let site=self.intent.site(&p.origin)?;
+  self.states[site].typed.as_ref().map(|(_,_,q)|q.clone())
+ }
+ pub fn vision_due(&self,p:&DomSnapshot)->bool{
+  let Some(site)=self.intent.site(&p.origin).or_else(||self.intent.discovery_site(&p.origin))else{return false;};
+  let state=&self.states[site];
+  !state.blocked&&!state.vision_attempted&&state.expected.is_none()&&
+  super::multimodal_perception::independent_discovery_allowed(p)&&
+  state.started_at.is_some_and(|t|t.elapsed()+Duration::from_secs(19)<RETAILER_TIME_BUDGET)&&
+  !p.interactive_nodes.iter().any(|n|self.intent.link_score(p,n)>0)&&
+  (state.strategy.score(StrategyKind::Search,90)<90||
+   state.submitted&&result_page(p)||
+   state.observations>=3&&!p.interactive_nodes.iter().any(|n|input(n)&&visible(n)||opener(n)&&visible(n)))
+ }
+ pub fn mark_vision(&mut self,p:&DomSnapshot){
+  if let Some(site)=self.intent.site(&p.origin).or_else(||self.intent.discovery_site(&p.origin)){self.states.get_mut(site).unwrap().vision_attempted=true;}
+ }
+ pub fn visual_recovery(&mut self,p:&DomSnapshot,points:&std::collections::HashMap<String,super::multimodal_perception::GroundedPoint>)->Option<BrowserAction>{
+  let site=self.intent.site(&p.origin)?;
+  let state=&self.states[site];
+  if state.blocked||state.expected.is_some()||state.actions>=22||p.text_excerpt.starts_with("Active dialog:"){return None;}
+  // A newly hit-tested product link can be used as a normal public
+  // navigation candidate. It must pass the same exact catalog predicate.
+  if let Some((_,url))=bs::navigation::ranked(p,|n|if points.contains_key(&n.node_id){self.intent.link_score(p,n)}else{0},|u|!state.attempts.contains(&format!("link:{u}"))).into_iter().next(){
+   let a=BrowserAction::Navigate{url:url.clone()};
+   if self.check(p,&a).is_err(){return None;}
+   let state=self.states.get_mut(site)?;
+   let k=format!("link:{url}");
+   if !state.strategy.start(k.clone(),StrategyKind::Product){return None;}
+   state.attempts.insert(k);state.actions=state.actions.saturating_add(1);state.waiting=0;
+   state.expected=Some(Expected::Destination{url});
+   return Some(a);
+  }
+  // A screenshot may reveal an omitted search input. The query is
+  // compiled from user intent, never taken from visual model text.
+  if !state.submitted{
+   if let Some(n)=bs::unique(p.interactive_nodes.iter().filter(|n|input(n)&&visible(n))).filter(|n|points.contains_key(&n.node_id)){
+    let query=if state.broad_query{self.intent.broad_query()}else if state.short_query{format!("{} {}",self.intent.identity.join(" "),self.intent.chip)}else{self.intent.query.clone()};
+    let k=format!("type:{}:{}",p.origin,query);
+    let a=BrowserAction::TypeText{node_id:n.node_id.clone(),text:query,is_sensitive:false};
+    if self.check(p,&a).is_ok()&&!state.attempts.contains(&k){
+     let state=self.states.get_mut(site)?;state.attempts.insert(k);state.actions=state.actions.saturating_add(1);state.waiting=0;return Some(a);
+    }
+   }
+   if let Some(n)=bs::unique(p.interactive_nodes.iter().filter(|n|opener(n)&&visible(n))).filter(|n|points.contains_key(&n.node_id)){
+    let k=format!("open:{}:{}",p.origin,n.label);let a=BrowserAction::Click{node_id:n.node_id.clone(),element_label:n.label.clone(),is_submit:false};
+    if self.check(p,&a).is_ok()&&!state.attempts.contains(&k){
+     let state=self.states.get_mut(site)?;state.attempts.insert(k);state.actions=state.actions.saturating_add(1);state.waiting=0;return Some(a);
+    }
+   }
+  }
+  let n=bs::unique(p.interactive_nodes.iter().filter(|n|points.contains_key(&n.node_id)&&self.search_button_allowed(p,n)&&visible(n)))?;
+  let a=BrowserAction::Click{node_id:n.node_id.clone(),element_label:n.label.clone(),is_submit:false};
+  if self.check(p,&a).is_err(){return None;}
+  let state=self.states.get_mut(site)?;
+  let (origin,_,query)=state.submitted_query.clone()?;
+  let k=format!("button:{}",p.origin);
+  if state.attempts.contains(&k)||!state.strategy.start(k.clone(),StrategyKind::SearchButton){return None;}
+  state.attempts.insert(k);state.actions=state.actions.saturating_add(1);state.waiting=0;
+  state.expected=Some(Expected::Search{origin,query});
+  Some(a)
+ }
+ pub fn search_effect(&self,before:&DomSnapshot,after:&DomSnapshot,a:&BrowserAction)->Option<bool>{
+  if !matches!(a,BrowserAction::PressKey{key,..} if key=="Enter")&&!matches!(a,BrowserAction::Click{node_id,..} if before.interactive_nodes.iter().any(|n|n.node_id==*node_id&&search_button(n))){return None;}
+  let site=self.intent.site(&before.origin)?;
+  let state=&self.states[site];
+  if let Some(Expected::Search{..})=&state.expected{return state.expected.as_ref().map(|e|e.confirmed(after));}
+  None
+ }
  pub fn authorized_filter(&self,p:&DomSnapshot,a:&BrowserAction)->bool{
   matches!(a,BrowserAction::SetChecked{checked:true,..})&&self.check(p,a).is_ok()
  }
@@ -473,9 +675,9 @@ impl Run{
  pub fn check(&self,p:&DomSnapshot,a:&BrowserAction)->Result<(),&'static str>{
   let n=|id:&str|p.interactive_nodes.iter().find(|n|n.node_id==id&&!n.is_sensitive);
   match a{
-   BrowserAction::Navigate{url} if self.intent.entry(url)||p.interactive_nodes.iter().any(|n|n.href.as_deref()==Some(url)&&(self.intent.link_score(p,n)>0||self.intent.category_score(p,n)>0))=>Ok(()),
+   BrowserAction::Navigate{url} if self.intent.entry(url)||self.mcp_grounded(p,url)||p.interactive_nodes.iter().any(|n|n.href.as_deref()==Some(url)&&(self.intent.link_score(p,n)>0||self.intent.category_score(p,n)>0))=>Ok(()),
    BrowserAction::TypeText{node_id,text,is_sensitive:false} if self.intent.site(&p.origin).is_some()&&self.intent.query_allowed(text)&&n(node_id).is_some_and(input)=>Ok(()),
-   BrowserAction::Click{node_id,..} if self.intent.site(&p.origin).is_some()&&n(node_id).is_some_and(|n|!forbidden(&n.label)&&bs::public_control(n)&&(opener(n)||self.intent.link_score(p,n)>0||self.search_button_allowed(p,n)||(next_page(n)&&result_page(p)&&self.intent.site(&p.origin).is_some_and(|s|matches!(self.states[s].expected,Some(Expected::Pagination{..})))&&!product_links(p).is_empty())))=>Ok(()),
+   BrowserAction::Click{node_id,..} if self.intent.site(&p.origin).is_some()&&n(node_id).is_some_and(|n|!forbidden(&n.label)&&bs::public_control(n)&&(location_dialog_close(p,n)||opener(n)||self.intent.link_score(p,n)>0||self.search_button_allowed(p,n)||(next_page(n)&&result_page(p)&&self.intent.site(&p.origin).is_some_and(|s|matches!(self.states[s].expected,Some(Expected::Pagination{..})))&&!product_links(p).is_empty())))=>Ok(()),
    BrowserAction::PressKey{node_id,key} if key=="Enter"&&n(node_id).is_some_and(|n|input(n)&&n.search_state.as_deref()==Some("filled")&&self.intent.site(&p.origin).is_some_and(|s|self.states[s].typed.as_ref().is_some_and(|(o,l,q)|o==&p.origin&&l==&n.label&&self.intent.query_allowed(q))))=>Ok(()),
    BrowserAction::SetChecked{node_id,checked:true,..} if self.intent.site(&p.origin).is_some_and(|s|self.states[s].submitted)&&n(node_id).is_some_and(|n|self.intent.chip_filter(p,n))=>Ok(()),
    BrowserAction::Complete{..} if self.ready()=>Ok(()),
@@ -489,7 +691,17 @@ impl Run{
    if let Some(p)=self.products.get(site).filter(|p|self.intent.site(&p.url)==Some(*site)&&self.intent.complete_specs(&p.heading)&&price_value(&p.price)==Some(p.amount)&&sources.iter().any(|s|s.url==p.url&&bs::verification::quote_present(s,&p.quote))){
     let claim=format!("{name}: {} ? displayed price {}",p.heading,p.price);
     summary.push_str(&format!("{claim}\nSource: {}\n",p.url));findings.push(GroundedFinding{claim,url:p.url.clone(),quote:p.quote.clone()});
+   }else if let Some(p)=self.specs.get(site).filter(|p|self.intent.site(&p.url)==Some(*site)&&self.intent.complete_specs(&p.heading)&&sources.iter().any(|s|s.url==p.url&&bs::verification::quote_present(s,&p.heading))){
+    let detail=if p.price_status=="ambiguous_or_conditional_price"{"Displayed amounts were ambiguous or conditional."}else{"No independently attributable selling price was observed."};
+    let claim=format!("{name}: matching specifications observed: {}. Selling price not verified. {detail}",p.heading);
+    summary.push_str(&format!("{claim}\nSource: {}\n",p.url));findings.push(GroundedFinding{claim,url:p.url.clone(),quote:p.heading.clone()});
    }else{summary.push_str(&format!("{name}: matching product and price not verified.\n"));}
+   if let Some(reason)=self.states[site].stop_reason{
+    let why=match reason{"retailer_time_budget"=>"Research time budget reached.","retailer_step_budget"=>"Research action/observation budget reached.","no_usable_matching_search_destination"=>"No usable matching public search destination observed.","public_search_access_restricted"=>"Public search provider required human verification; stopped without bypass.",_=>"Matching public evidence was not observed."};
+    summary.push_str(&format!("Research limitation: {why}\n"));
+   }else if self.states[site].started_at.is_none()&&!self.products.contains_key(site)&&!self.specs.contains_key(site){
+    summary.push_str("Research limitation: retailer not yet investigated.\n");
+   }
   }
   summary.push_str("No complete price comparison was verified.");
   VerificationReport{status:"partial_evidence",summary,findings,limitations:"Missing evidence is not proof of absence or stock status. Search results are discovery hints only. No transaction performed.".into()}
@@ -657,6 +869,106 @@ mod tests{
   assert_eq!(report.status,"partial_evidence");assert_eq!(report.findings.len(),1);
   assert!(report.summary.contains("reliancedigital.in: matching product and price not verified"));
   assert!(r.report(&sources).is_err());assert!(r.partial_report(&[]).findings.is_empty());
+ }
+ #[test]fn optional_location_dialog_requires_explicit_dismiss_and_no_consent(){
+  let mut r=Run::new(G).unwrap();let mut p=page(RETAILERS[0].1,"Public retailer home","INR 10000");p.structure.product=None;
+  p.text_excerpt="Active dialog: Select your location. Enter your pincode to see delivery options.".into();
+  let n=|id:&str,label:&str|DomNodeSummary{node_id:id.into(),tag:"button".into(),role:"button".into(),label:label.into(),options:vec![],checked:None,search_state:None,href:None,is_sensitive:false,is_submit:false,bbox:None};
+  p.interactive_nodes=vec![n("close","Close"),n("continue","Continue")];
+  let a=match r.next(&p,&[]){Next::Action(a,"catalog:optional_location_dismiss")=>a,_=>panic!("Expected explicit optional dismissal")};
+  assert!(r.check(&p,&a).is_ok());
+  assert!(r.check(&p,&BrowserAction::Click{node_id:"continue".into(),element_label:"Continue".into(),is_submit:false}).is_err());
+  p.text_excerpt.push_str(" Accept cookies and consent");
+  assert!(r.check(&p,&a).is_err());
+ }
+ #[test]fn native_search_needs_confirmed_query_and_real_result(){
+  let mut r=Run::new(G).unwrap();let mut p=page(RETAILERS[0].1,"Public retailer home","INR 10000");p.structure.product=None;
+  p.interactive_nodes=vec![DomNodeSummary{node_id:"search".into(),tag:"input".into(),role:"searchbox".into(),label:"Search".into(),options:vec![],checked:None,search_state:Some("filled".into()),href:None,is_sensitive:false,is_submit:false,bbox:None}];
+  let a=BrowserAction::PressKey{node_id:"search".into(),key:"Enter".into()};
+  assert!(r.native_search_query(&p,&a).is_none());
+  let query=r.intent.query.clone();
+  let state=r.states.get_mut(RETAILERS[0].1).unwrap();state.typed=Some((p.origin.clone(),"Search".into(),query.clone()));state.expected=Some(Expected::Search{origin:p.origin.clone(),query:query.clone()});
+  assert_eq!(r.native_search_query(&p,&a),Some(query.clone()));
+  assert_eq!(r.search_effect(&p,&p,&a),Some(false));
+  let mut after=p.clone();let mut u=url::Url::parse("https://www.croma.com/search").unwrap();u.query_pairs_mut().append_pair("q",&query);after.origin=u.to_string();
+  assert_eq!(r.search_effect(&p,&after,&a),Some(true));
+ }
+ #[test]fn opaque_search_results_trigger_bounded_alternate_provider(){
+  let mut r=Run::new(G).unwrap();let site=RETAILERS[0].1;
+  let url=r.intent.discovery_url(site);let mut p=page(&url,"Public search results","INR 10000");p.structure.product=None;
+  let state=r.states.get_mut(site).unwrap();state.discovery_started=true;state.discovery_wait=4;
+  let alternate=r.intent.alternate_discovery_url(site);
+  assert!(matches!(r.next(&p,&[]),Next::Action(BrowserAction::Navigate{url},"catalog:alternate_public_discovery") if url==alternate));
+  assert!(r.intent.entry(&alternate));
+  assert!(r.check(&p,&BrowserAction::Navigate{url:alternate.clone()}).is_ok());
+  assert!(!r.intent.entry("https://search.brave.com/search?q=private"));
+  assert!(discovery_navigation_allowed(G,&alternate,"https://www.croma.com/apple-macbook-air-m4-16gb-256gb/p/1"));
+  assert!(!discovery_navigation_allowed(G,&alternate,"https://www.reliancedigital.in/product/apple-macbook-air-m4"));
+  p.origin=alternate;r.states.get_mut(site).unwrap().discovery_wait=4;
+  assert!(matches!(r.next(&p,&[]),Next::Wait));assert!(r.states[site].blocked);
+ }
+ #[test]fn matching_primary_heading_without_price_reports_specs_only(){
+  let mut r=Run::new(G).unwrap();
+  let mut p=page("https://www.croma.com/macbook/p/1","Apple MacBook Air 13.6 inch M4 16GB RAM 256GB SSD","");
+  p.structure.product=None;p.structure.product_heading=Some(p.title.clone());
+  let sources=vec![source(&p)];let _=r.next(&p,&sources);
+  let report=r.partial_report(&sources);assert_eq!(report.findings.len(),1);
+  assert!(report.summary.contains("Selling price not verified"));
+  assert_eq!(report.status,"partial_evidence");assert!(!r.ready());assert!(r.report(&sources).is_err());
+  assert!(r.partial_report(&[]).findings.is_empty());
+ }
+ #[test]fn elapsed_retailer_budget_leaves_other_retailer_available(){
+  let mut r=Run::new(G).unwrap();let site=RETAILERS[0].1;
+  let mut p=page(site,"Public retailer home","INR 10000");p.structure.product=None;
+  r.states.get_mut(site).unwrap().started_at=Some(Instant::now()-RETAILER_TIME_BUDGET);
+  assert!(matches!(r.next(&p,&[]),Next::Wait));
+  assert_eq!(r.states[site].stop_reason,Some("retailer_time_budget"));
+  assert!(matches!(r.next(&p,&[]),Next::Action(BrowserAction::Navigate{url},_) if url==RETAILERS[1].1));
+  assert!(r.partial_report(&[]).summary.contains("Research time budget reached"));
+  assert!(!r.ready());
+ }
+ #[test]fn size_constraints_reject_wrong_display_and_alternative_query_is_exact(){
+  let i=Intent::compile(G).unwrap();
+  assert!(i.size_compatible("Apple MacBook Air 13.6 inch",true));
+  assert!(i.size_compatible("apple-macbook-air-13-6-inch",true));
+  assert!(!i.size_compatible("MacBook Air 15.3 inch",false));
+  assert!(!i.size_compatible("MacBook Air 13-inch and 15-inch",false));
+  assert!(!i.complete_specs("Apple MacBook Air 13.6 inch M4 16GB 256GB 15.3 inch"));
+  let alt=i.alternate_discovery_url(RETAILERS[0].1);
+  assert!(alt.contains("13-inch"));assert_eq!(i.discovery_site(&alt),Some(RETAILERS[0].1));
+  assert!(i.discovery_site(&alt.replace("13-inch","15-inch")).is_none());
+ }
+ #[test]fn mcp_candidates_are_not_evidence_and_cannot_escape_retailer_scope(){
+  let mut r=Run::new(G).unwrap();let site=RETAILERS[0].1;
+  let mut p=page(site,"Public retailer catalog","INR 10000");p.structure.product=None;
+  let (_,host,q)=r.discovery_request(&p).unwrap();assert_eq!(host,"croma.com");assert!(q.starts_with("site:croma.com "));
+  assert!(r.discovery_request(&p).is_none());
+  let good="https://www.croma.com/apple-macbook-air-m4-13-inch/p/1";
+  let bad="https://www.reliancedigital.in/product/apple-macbook-air-m4";
+  r.accept_discovery(site,super::super::search_discovery::Discovery{urls:vec![good.into(),bad.into()],status:"candidate_urls"});
+  assert!(matches!(r.next(&p,&[]),Next::Action(BrowserAction::Navigate{url},"catalog:approved_mcp_candidate") if url==good));
+  assert!(r.check(&p,&BrowserAction::Navigate{url:good.into()}).is_ok());
+  assert!(r.check(&p,&BrowserAction::Navigate{url:bad.into()}).is_err());
+  assert!(!r.ready());assert!(r.partial_report(&[]).findings.is_empty());
+ }
+ #[test]fn restricted_search_stops_without_retrying_provider(){
+  let mut r=Run::new(G).unwrap();let site=RETAILERS[0].1;
+  let mut p=page("https://www.google.com/sorry/index","Human verification","");p.structure.product=None;p.text_excerpt="Our systems have detected unusual traffic. Verify you are human.".into();
+  r.states.get_mut(site).unwrap().discovery_started=true;
+  assert!(matches!(r.next(&p,&[]),Next::Wait));
+  assert_eq!(r.states[site].stop_reason,Some("public_search_access_restricted"));
+  assert!(matches!(r.next(&p,&[]),Next::Action(BrowserAction::Navigate{url},_) if url==RETAILERS[1].1));
+  assert!(r.partial_report(&[]).summary.contains("stopped without bypass"));
+ }
+ #[test]fn ambiguous_price_cannot_complete_even_with_matching_specs(){
+  let mut r=Run::new(G).unwrap();
+  let mut p=page("https://www.croma.com/macbook/p/1","Apple MacBook Air 13.6 inch M4 16GB RAM 256GB SSD","INR 89990");
+  p.structure.product_price_status=Some("ambiguous_or_conditional_price".into());
+  let sources=vec![source(&p)];let _=r.next(&p,&sources);
+  assert!(!r.ready());let report=r.partial_report(&sources);
+  assert!(report.summary.contains("ambiguous or conditional"));
+  assert_eq!(report.findings.len(),1);
+  assert!(!report.findings[0].quote.contains("89990"));
  }
  #[test]fn pagination_requires_changed_results_and_preserved_query(){
   let mut a=page("https://www.croma.com/search?q=macbook&page=1&processor=M4","Public catalog","INR 10000");
