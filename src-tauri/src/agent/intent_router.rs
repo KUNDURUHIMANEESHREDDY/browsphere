@@ -17,6 +17,15 @@ pub struct LuciaIntent {
 }
 
 impl LuciaIntent {
+    /// A search command naming a supported destination can start without inference.
+    pub fn explicit_search_task(message: &str) -> Option<Self> {
+        super::policy::requested_search_entry_url(message)?;
+        Some(Self {
+            mode: LuciaMode::BrowserTask,
+            reason: "Explicit website search requested by the user".into(),
+        })
+    }
+
     /// Explicit media commands are browser tasks even when the intent model
     /// is unavailable. Keep this intentionally narrow: questions *about*
     /// playing music and ambiguous uses of "play" stay with the classifier.
@@ -84,6 +93,17 @@ mod tests {
             assert!(LuciaIntent::explicit_media_task(question).is_none());
         }
     }
+    #[test]
+    fn explicit_named_searches_enter_the_browser_pipeline() {
+        let intent = LuciaIntent::explicit_search_task(
+            "Search Wikipedia for Ada Lovelace and open the matching article",
+        ).unwrap();
+        assert_eq!(intent.mode, LuciaMode::BrowserTask);
+        for message in ["How do I search Wikipedia for Ada Lovelace?", "Who was Ada Lovelace?"] {
+            assert!(LuciaIntent::explicit_search_task(message).is_none());
+        }
+    }
+
     #[test]
     fn strips_json_fences_without_accepting_arbitrary_text() {
         assert_eq!(LuciaIntent::parse("```json\n{\"mode\":\"chat\"}\n```").unwrap().mode, LuciaMode::Chat);
