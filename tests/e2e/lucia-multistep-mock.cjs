@@ -524,15 +524,16 @@ async function main() {
       console.log('PASS cloud provider HTTP 401/429/503 and invalid-action fail closed without Ollama');
     }
 
-    // 5. The user-facing View task tab control must open the assigned tab.
+    // 5. The normal Lucia composer must route a named-site search to a task.
+    // Keep the run paused while checking the handoff and assigned tab.
     await evaluate("window.browsphereApp.newTab('browsphere://start')");
     await evaluate("window.__TAURI__.core.invoke('set_agent_paused',{paused:true})");
     try {
       const chatReady = await evaluate("Boolean(document.getElementById('newTabChatInput'))");
       assert.ok(chatReady, 'Main Lucia composer unavailable');
       await evaluate("(()=>{const f=document.getElementById('newTabChatInput');" +
-        "f.value='On this blank local test page, inspect available controls.';" +
-        `document.querySelector('[data-action="nt-run-agent"]').click();return true})()`);
+        "f.value='Search Wikipedia for Ada Lovelace and open the matching article';" +
+        "f.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true, cancelable:true}));return true})()");
       let viewTabId;
       for (let i=0;i<45;i++) {
         await sleep(250);
@@ -546,7 +547,7 @@ async function main() {
       const opened = await evaluate('window.browsphereApp.activeTab()');
       assert.equal(opened.id, viewTabId, 'View task tab did not select its target');
       await evaluate('window.browsphereApp.closeTab(' + JSON.stringify(viewTabId) + ')');
-      console.log('PASS task progress button opens assigned WebView2 tab');
+      console.log('PASS Lucia chat routes explicit search and opens its assigned WebView2 tab');
     } finally {
       await evaluate("window.__TAURI__.core.invoke('set_agent_paused',{paused:false})");
     }
