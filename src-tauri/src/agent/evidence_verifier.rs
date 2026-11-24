@@ -195,6 +195,9 @@ pub fn verify_observed_named_result_title(
     let wanted = requested_named_result_title(goal)
         .ok_or("Not a narrow named-result page-title request")?;
     let url = web_url(&after.origin).ok_or("Opened page has no valid web URL")?;
+    if web_url(starting_origin).is_none_or(|start|start.origin()!=url.origin()){
+        return Err("Named search result must remain on the observed website".into());
+    }
     if after.origin == starting_origin {
         return Err("The requested result page has not been opened".into());
     }
@@ -258,6 +261,9 @@ pub fn verify_observed_named_link_title(
     let label = requested_named_link_title(goal)
         .ok_or("Not a named-link page-title request")?;
     let url = web_url(&after.origin).ok_or("The destination is not a web page")?;
+    if web_url(starting_origin).is_none_or(|start|start.origin()!=url.origin()){
+        return Err("Named link destination changed origin".into());
+    }
     if starting_origin == after.origin {
         return Err("The requested link did not open a new page".into());
     }

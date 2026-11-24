@@ -52,6 +52,16 @@ pub fn rank(page:&DomSnapshot,goal:&str,limit:usize)->Vec<DomNodeSummary>{
     if !form_intent&&!writing{scored.sort_by_key(|x|x.0);}
     scored.into_iter().map(|(_,_,n)|n.clone()).collect()
 }
+pub fn visual_matches(page:&DomSnapshot,hint:&str)->Vec<String>{
+    let text=norm(hint);
+    let mut labels=HashSet::new();
+    page.interactive_nodes.iter().filter(|n|!n.is_sensitive&&n.bbox.as_ref().is_some_and(|b|b.in_viewport))
+        .filter_map(|n|{
+            let label=norm(&n.label);
+            if label.chars().count()<4||label.len()>100||!text.contains(&label)||!labels.insert(label){return None;}
+            Some(n.label.clone())
+        }).take(6).collect()
+}
 fn identity(n:&DomNodeSummary)->String{
     format!("{:?}|{}|{}|{}|{}",kind(n),n.tag,n.role,norm(&n.label),n.href.as_deref().unwrap_or(""))
 }

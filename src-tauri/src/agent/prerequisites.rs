@@ -74,6 +74,41 @@ pub fn completion_blocker(goal:&str,page:&DomSnapshot)->Option<&'static str> {
     }
     None
 }
+/// The user explicitly requested clicking a named link and reporting its title.
+pub fn named_link(goal:&str,page:&DomSnapshot)->Option<(BrowserAction,String)> {
+    let label=super::evidence_verifier::requested_named_link_title(goal)?;
+    let g=normalized(goal);
+    if !g.contains("report the page title") && !g.contains("report its page title"){return None;}
+    if ["buy ","purchase","checkout","pay ","book ","submit","register","sign up","send ","delete","download","upload","compare","extract","summarize","account","consent","subscribe"," and then "]
+        .iter().any(|s|g.contains(s)){return None;}
+    if page.text_excerpt.starts_with("Active dialog:"){return None;}
+    let source=url::Url::parse(&page.origin).ok()?;
+    let mut candidates=page.interactive_nodes.iter().filter_map(|n|{
+        if !safe(n)|| !(n.tag=="a"||n.role=="link")||normalized(&n.label)!=normalized(&label){return None;}
+        let u=url::Url::parse(n.href.as_deref()?).ok()?;
+        if !matches!(u.scheme(),"http"|"https")||u.origin()!=source.origin()||u==source
+            ||!u.username().is_empty()||u.password().is_some()||u.fragment().is_some(){return None;}
+        Some((n,u))
+    });
+    let (first,target)=candidates.next()?;
+    if candidates.any(|(_,u)|u!=target){return None;}
+    Some((click(first),target.to_string()))
+}
+pub fn named_search_control(goal:&str,page:&DomSnapshot)->Option<BrowserAction>{
+    if !super::orchestrator::is_simple_named_title_task(goal)||page.text_excerpt.starts_with("Active dialog:"){return None;}
+    if page.interactive_nodes.iter().any(|n|!n.is_sensitive&&n.tag=="input"&&(n.role=="searchbox"||normalized(&n.label).contains("search"))){return None;}
+    unique(page.interactive_nodes.iter().filter(|n|safe(n)&&n.role=="button"
+        && matches!(normalized(&n.label).as_str(),"search"|"search wikipedia"|"open search"))).map(click)
+}
+pub fn named_result(goal:&str,page:&DomSnapshot)->Option<BrowserAction>{
+    if !super::orchestrator::is_simple_named_title_task(goal)||page.text_excerpt.starts_with("Active dialog:"){return None;}
+    let wanted=normalized(&super::evidence_verifier::requested_named_result_title(goal)?);
+    let origin=url::Url::parse(&page.origin).ok()?;
+    unique(page.interactive_nodes.iter().filter(|n|{
+        safe(n)&&(n.tag=="a"||n.role=="link"||n.role=="option")&&normalized(&n.label)==wanted&&
+        n.href.as_ref().and_then(|s|url::Url::parse(s).ok()).is_some_and(|u|u.origin()==origin.origin()&&u!=origin&&u.username().is_empty()&&u.password().is_none())
+    })).map(click)
+}
 impl PrerequisitePlanner {
     pub fn next(&mut self,goal:&str,page:&DomSnapshot)->Option<(BrowserAction,&'static str)> {
         let excerpt=normalized(&page.text_excerpt);
@@ -111,6 +146,10 @@ impl PrerequisitePlanner {
                     }
                 } else {None}
             } else {None}
+        } else if let Some((action,_))=named_link(goal,page) {
+            Some((action,"named_link"))
+        } else if let Some(action)=named_search_control(goal,page) {
+            Some((action,"open_named_search"))
         } else {None};
         let (action,phase)=proposal?;
         // Attempt each semantic prerequisite at most once per observed page
@@ -138,6 +177,19 @@ mod tests {
         DomSnapshot{origin:"https://example.org".into(),title:"Test".into(),text_excerpt:text.into(),interactive_nodes:nodes}
     }
     const GOAL:&str="Test a train booking search only. Choose English if a language dialog appears. Find trains from Bengaluru to New Delhi for 2026-11-24.";
+    #[test]
+    fn named_link_is_unique_same_origin_and_exact(){
+        let goal="Click the Tutorial link. Then report the page title.";
+        let mut n=node("tutorial","a","link","Tutorial",None);
+        n.href=Some("https://example.org/tutorial/index.html".into());
+        let mut p=page("Documentation homepage",vec![n.clone()]);
+        assert_eq!(named_link(goal,&p).unwrap().1,"https://example.org/tutorial/index.html");
+        n.node_id="wrong".into();n.href=Some("https://example.org/tutorial/other.html".into());p.interactive_nodes.push(n.clone());
+        assert!(named_link(goal,&p).is_none());
+        p.interactive_nodes.remove(0);p.interactive_nodes[0].href=Some("https://other.example/tutorial".into());
+        assert!(named_link(goal,&p).is_none());
+        assert!(named_link("Click the Tutorial link and buy a subscription. Then report the page title.",&p).is_none());
+    }
     #[test]
     fn readonly_route_search_routes_to_browser_before_verifier() {
         use super::super::orchestrator::{plan_task,Specialist};
