@@ -2,13 +2,25 @@
 //! Advisory only: the live DOM binder, policy, user authorization, and final
 //! independent verifier remain the sole execution/completion authorities.
 //! Avoid site-specific URLs and never invent an action target.
-use super::{dom_extractor::{DomNodeSummary,DomSnapshot}, policy::BrowserAction, semantic_core};
+use super::{dom_extractor::DomSnapshot, policy::BrowserAction, semantic_core};
 use std::collections::HashSet;
 
 fn words(text:&str)->HashSet<String>{
     text.split(|c:char|!c.is_alphanumeric())
         .filter(|s|s.len()>=3)
         .map(|s|s.to_ascii_lowercase()).collect()
+}
+
+/// Informational, navigation, research and media tasks can safely avoid
+/// unrelated checkout/download/account controls. Real transactions or edits
+/// retain their existing dedicated native policy and approval gates.
+fn non_transactional(goal:&str)->bool{
+    if super::deliberation::read_only(goal){return true;}
+    let terms=words(goal);
+    !["buy","purchase","pay","book","checkout","order","subscribe",
+        "register","submit","send","upload","download","delete","remove",
+        "modify","edit","write","publish","install"].iter()
+        .any(|word|terms.contains(*word))
 }
 
 fn unrelated_control(goal:&str,label:&str)->bool{
@@ -33,7 +45,7 @@ fn unrelated_control(goal:&str,label:&str)->bool{
 /// read-only research. This does not deny user-authorized transactions, forms,
 /// resolving a non-sensitive dialog, or pages about these very topics.
 pub fn irrelevant_control(goal:&str,page:&DomSnapshot,action:&BrowserAction)->bool{
-    if !super::deliberation::read_only(goal){return false;}
+    if !non_transactional(goal){return false;}
     match action {
         BrowserAction::Click{node_id,..}=>{
             page.interactive_nodes.iter().find(|n|n.node_id==*node_id)
@@ -54,7 +66,7 @@ pub fn better_observed_link(
     goal:&str, stage:&str, page:&DomSnapshot, proposed:&BrowserAction,
     excluded_ids:&HashSet<String>,
 )->Option<BrowserAction>{
-    if !super::deliberation::read_only(goal)
+    if !non_transactional(goal)
         || page.text_excerpt.starts_with("Active dialog:")
         || super::deliberation::error_page(page)
         || super::recovery::authentication_gate(page)
@@ -155,7 +167,7 @@ pub fn effect_observed(
     let topicality=|page:&DomSnapshot|
         semantic_core::navigation_relevance(goal,stage,page)
             +semantic_core::relevance(goal,&page.text_excerpt);
-    if super::deliberation::read_only(goal)
+    if non_transactional(goal)
         && topicality(before)>0 && topicality(after)==0
         && !matches!(action,BrowserAction::Complete{..}|BrowserAction::Download{..}){
         return false;
@@ -188,7 +200,7 @@ pub fn effect_observed(
 #[cfg(test)]
 mod tests{
     use super::*;
-    use super::super::dom_extractor::BoundingBox;
+    use super::super::dom_extractor::{BoundingBox,DomNodeSummary};
     fn node(id:&str,label:&str,url:Option<&str>)->DomNodeSummary{
         DomNodeSummary{node_id:id.into(),tag:if url.is_some(){"a"}else{"button"}.into(),
             role:if url.is_some(){"link"}else{"button"}.into(),label:label.into(),
@@ -244,6 +256,22 @@ mod tests{
                 is_sensitive:false},&HashSet::new()).is_none());
         assert!(!irrelevant_control("Read the pricing documentation",&p,
             &BrowserAction::Click{node_id:"a".into(),element_label:String::new(),is_submit:false}));
+    }
+    #[test]
+    fn protects_nontransactional_media_and_navigation_tasks_too(){
+        let p=page(vec![
+            node("download","Download music",None),
+            node("play","Play music",None),
+            node("pricing","Pricing",Some("https://unfamiliar.docs.example/pricing"))
+        ]);
+        let click=|id:&str|BrowserAction::Click{
+            node_id:id.into(),element_label:String::new(),is_submit:false
+        };
+        assert!(irrelevant_control("play any song",&p,&click("download")));
+        assert!(irrelevant_control("play any song",&p,&click("pricing")));
+        assert!(!irrelevant_control("play any song",&p,&click("play")));
+        assert!(!irrelevant_control("Purchase music and download the album",&p,&click("download")),
+            "A clearly transactional request stays under the existing approval policy");
     }
     #[test]
     fn acknowledged_action_without_observed_change_is_not_progress(){
