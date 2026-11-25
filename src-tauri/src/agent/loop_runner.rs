@@ -491,6 +491,27 @@ fn trusted_first_youtube_video_result(
     })
 }
 
+/// For a delegated *any-song* choice, follow the exact public watch URL
+/// observed on the current YouTube results page. A fresh DOM extraction must
+/// reveal the link first; no generated video IDs, redirects or downloads.
+fn trusted_delegated_youtube_watch_navigation(
+    goal:&str,snapshot:&DomSnapshot,specialist:Specialist,
+)->Option<BrowserAction>{
+    crate::agent::policy::requested_unspecified_music_search_url(goal)?;
+    let selected=trusted_first_youtube_video_result(goal,snapshot,specialist)?;
+    let BrowserAction::Click{node_id,..}=selected else{return None;};
+    let link=snapshot.interactive_nodes.iter().find(|n|
+        n.node_id==node_id && !n.is_sensitive && n.tag=="a")?.href.as_ref()?;
+    let url=url::Url::parse(link).ok()?;
+    if url.scheme()!="https"||url.host_str()!=Some("www.youtube.com")||
+        url.path()!="/watch"||url.query_pairs().filter(|(k,_)|k=="v")
+            .count()!=1 ||
+        !url.query_pairs().any(|(k,v)|k=="v"&&!v.is_empty()){
+        return None;
+    }
+    Some(BrowserAction::Navigate{url:url.to_string()})
+}
+
 /// When a clicked first video link leaves a SPA on its results URL, follow
 /// only the exact watch URL still visible in a new native DOM capture.
 /// This avoids re-clicking the same control and triggering the loop guard.
@@ -2658,8 +2679,20 @@ async fn run_browser_loop(
                     "first_video_result:observed_href_fallback".to_string(),
                 )
             } else if freshly_observed
-                && !(delegated_music_video_attempted
-                    && crate::agent::policy::requested_unspecified_music_search_url(&goal).is_some())
+                && !delegated_music_video_attempted
+                && trusted_delegated_youtube_watch_navigation(
+                    &goal,&snapshot,orchestrator.specialist()).is_some()
+            {
+                delegated_music_video_attempted=true;
+                (
+                    "Navigate to the observed YouTube song video without repeating SPA clicks".into(),
+                    trusted_delegated_youtube_watch_navigation(
+                        &goal,&snapshot,orchestrator.specialist())
+                        .expect("live results and exact public watch URL validated"),
+                    "music_discovery:observed_watch_navigation".into()
+                )
+            } else if freshly_observed
+                && crate::agent::policy::requested_unspecified_music_search_url(&goal).is_none()
                 && trusted_first_youtube_video_result(
                     &goal, &snapshot, orchestrator.specialist()).is_some()
             {
@@ -3435,7 +3468,8 @@ async fn run_browser_loop(
                                 crate::agent::evidence_verifier::check_google_query_navigation(url, &after)
                             } else if model_route.starts_with("music_discovery:delegated_public_song") {
                                 crate::agent::evidence_verifier::check_youtube_music_search_navigation(url,&after)
-                            } else if model_route.starts_with("first_video_result:observed_href_fallback") {
+                            } else if model_route.starts_with("first_video_result:observed_href_fallback") ||
+                                model_route.starts_with("music_discovery:observed_watch_navigation") {
                                 crate::agent::evidence_verifier::check_youtube_observed_watch_navigation(url,&after)
                             } else if auth_recovery_attempts > 0 && crate::agent::recovery::navigation_confirmed(url, &after) {
                                 Ok(())
@@ -4868,9 +4902,17 @@ mod first_youtube_result_tests {
         ];
         assert!(matches!(trusted_first_youtube_video_result(goal,&page,Specialist::Browser),
             Some(BrowserAction::Click{node_id,..}) if node_id=="public-song"));
+        assert!(matches!(trusted_delegated_youtube_watch_navigation(
+            goal,&page,Specialist::Browser),
+            Some(BrowserAction::Navigate{url}) if url=="https://www.youtube.com/watch?v=music123"));
+        assert!(trusted_delegated_youtube_watch_navigation(
+            goal,&page,Specialist::Verification).is_none());
+        assert!(trusted_delegated_youtube_watch_navigation(
+            "open youtube and play any music",&page,Specialist::Browser).is_none());
         let observed="https://www.youtube.com/watch?v=music123";
         assert!(trusted_youtube_watch_link_followup(goal,&page,Specialist::Browser,observed).is_some());
         page.interactive_nodes.clear();
+        assert!(trusted_delegated_youtube_watch_navigation(goal,&page,Specialist::Browser).is_none());
         assert!(trusted_youtube_watch_link_followup(goal,&page,Specialist::Browser,observed).is_some(),
             "Previously observed and successfully clicked public watch URL remains a bounded fallback");
         assert!(trusted_youtube_watch_link_followup(
