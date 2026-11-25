@@ -99,7 +99,6 @@ fn default_writer_model() -> String { "qwen2.5:3b-instruct".into() }
 mod local_action_default_tests {
     use super::*;
     #[test]
-    #[test]
     fn browser_model_preflight_never_switches_explicit_cloud_only_to_local(){
         let mut cfg=RouterConfig::default();
         cfg.lucia_cloud_only=true;
@@ -107,6 +106,7 @@ mod local_action_default_tests {
         let rt=tokio::runtime::Runtime::new().expect("runtime");
         assert!(rt.block_on(route.preflight_agent_model("https://example.org")).is_ok());
     }
+    #[test]
     fn default_agent_model_is_a_supported_configured_role(){
         let c=RouterConfig::default();
         assert_eq!(c.ollama_model,"qwen2.5:3b-instruct");
