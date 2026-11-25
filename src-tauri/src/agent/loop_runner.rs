@@ -1765,6 +1765,41 @@ async fn run_browser_loop(
             "run_id": run_id, "phase": "observed", "step_index": step,
             "controls": snapshot.interactive_nodes.len()
         }));
+        // Public-search acceptance diagnostics are run-local counts only.
+        // Never expose raw Google queries, page text, tokens or link URLs.
+        if let Some(requested)=crate::agent::policy::requested_google_research_url(&goal){
+            let current=url::Url::parse(&snapshot.origin).ok();
+            let is_google=current.as_ref().and_then(|u|u.host_str())
+                .is_some_and(|h|matches!(h,"google.com"|"www.google.com"));
+            let page_kind=if is_google {
+                match current.as_ref().map(|u|u.path()){
+                    Some("/search")=>"results",Some("/")=>"home",_=>"other_google"
+                }
+            }else{"external"};
+            let observed_public_links=snapshot.interactive_nodes.iter()
+                .filter(|n|!n.is_sensitive&&!n.is_submit&&n.href.as_deref()
+                    .and_then(|h|url::Url::parse(h).ok()).is_some_and(|u|
+                        u.scheme()=="https" && u.host_str().is_some_and(|h|
+                            !matches!(h,"google.com"|"www.google.com"))))
+                .count();
+            let candidate=observed_google_first_result(
+                &goal,&snapshot,orchestrator.specialist(),&recorded_steps).is_some();
+            let _=app.emit("agent:google_search_diagnostic",serde_json::json!({
+                "run_id":run_id,
+                "step_index":step,
+                "page_kind":page_kind,
+                "controls":snapshot.interactive_nodes.len(),
+                "href_controls":snapshot.interactive_nodes.iter().filter(|n|n.href.is_some()).count(),
+                "external_public_links":observed_public_links,
+                "query_verified":crate::agent::evidence_verifier::check_google_query_navigation(
+                    requested.as_str(),&snapshot).is_ok(),
+                "query_dispatched":recorded_steps.iter().any(|a|
+                    matches!(a,BrowserAction::Navigate{url} if url==requested.as_str())),
+                "requested_first_result":requested_open_result(&goal),
+                "candidate_found":candidate,
+                "first_result_attempted":google_first_result_attempted
+            }));
+        }
         if let Some(before) = pending_named_search_enter.as_ref() {
             if check_named_title_search_navigation(
                 &goal, &initial_origin, before, &snapshot, &orchestrator.evidence
