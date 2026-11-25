@@ -135,9 +135,35 @@ fn host_matches_allowlist(host: &str, allowed_domains: &[String]) -> bool {
 }
 
 
+/// The user explicitly named a Wikipedia article and asked for its title
+/// and source. Build one potential destination from that exact user-supplied
+/// name. This is navigation authorization, never proof the article exists.
+/// All page evidence and the returned title/URL must be read back natively.
+pub fn requested_wikipedia_article_url(goal:&str)->Option<Url>{
+    let text=goal.trim();
+    let lower=text.to_ascii_lowercase();
+    let prefix=["open wikipedia, find the ","open wikipedia and find the "]
+        .into_iter().find(|p|lower.starts_with(p))?;
+    let remainder=text.get(prefix.len()..)?;
+    let index=remainder.to_ascii_lowercase().find(" article")?;
+    let name=remainder.get(..index)?.trim();
+    let rest=remainder.get(index+" article".len()..)?.to_ascii_lowercase();
+    if !rest.contains("report")||!rest.contains("title")
+        ||!rest.contains("source url")||!rest.contains("verify")
+        ||name.chars().count()<3||name.chars().count()>75
+        ||name.split_whitespace().count()>10
+        ||!name.chars().all(|c|c.is_ascii_alphanumeric()||matches!(c,' '|'-'))
+        ||!super::deliberation::read_only(goal)
+    {return None;}
+    let mut result=Url::parse("https://en.wikipedia.org/wiki/").ok()?;
+    result.path_segments_mut().ok()?.push(&name.replace(' ',"_"));
+    Some(result)
+}
+
 /// Only the user's short, explicit navigation request can authorize opening a
 /// new site without a second approval. Model and webpage text never qualify.
 pub fn requested_navigation_url(goal: &str) -> Option<Url> {
+    if let Some(article)=requested_wikipedia_article_url(goal){return Some(article);}
     let g = goal.trim().trim_end_matches(['.', '!', '?']).trim().to_ascii_lowercase();
     if g.chars().any(char::is_control) || g.len() > 220 { return None; }
     let value = ["open ", "visit ", "go to ", "navigate to "].iter()
@@ -753,6 +779,25 @@ mod autonomous_form_tests {
 mod explicit_google_research_tests{
     use super::*;
     const TASK:&str="Search Google for the best free note-taking apps for Windows. Open the first three relevant results, visit the apps' official websites, compare their features, offline support, and limitations, then recommend the best option. Include the source links and explain your choice.";
+    #[test]
+    fn explicit_wikipedia_article_navigation_needs_a_narrow_user_request(){
+        let goal="Open Wikipedia, find the Ada Lovelace article, and report its title and source URL. Verify the final webpage before finishing.";
+        assert_eq!(requested_navigation_url(goal).unwrap().as_str(),
+            "https://en.wikipedia.org/wiki/Ada_Lovelace");
+        assert_eq!(requested_wikipedia_article_url(goal).unwrap().host_str(),
+            Some("en.wikipedia.org"));
+        for untrusted in [
+            "What's up?",
+            "Open Wikipedia",
+            "Open Wikipedia, find the Ada Lovelace article",
+            "Open Wikipedia, find the Ada Lovelace article, download its PDF and report its title and source URL. Verify it.",
+            "Open Wikipedia, find the https://example.org article, report its title and source URL. Verify.",
+            "Open Wikipedia, find the Foo/Bar article, report its title and source URL. Verify.",
+            "Search Google for Ada Lovelace and report its source URL.",
+        ]{
+            assert!(requested_wikipedia_article_url(untrusted).is_none(),"{untrusted}");
+        }
+    }
     #[test]
     fn google_zx_homepage_is_not_a_search_or_auth_page(){
         for s in ["https://www.google.com/","https://www.google.com/?zx=1795622658721","https://google.com/?zx=AbC42"]{
