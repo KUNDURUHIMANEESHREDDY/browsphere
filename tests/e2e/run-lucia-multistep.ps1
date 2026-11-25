@@ -110,6 +110,18 @@ try {
         }
     }
 
+    # Music-entry smoke check is intentionally independent of actual audio
+    # playback, which still requires its own native advancing media receipt.
+    if (-not $CloudCompat) {
+        Write-Host 'LUCIA_MUSIC_ENTRY_DIAGNOSTIC_START'
+        & node (Join-Path $root 'tests\e2e\lucia-play-any-song-entry.cjs')
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning 'LUCIA_MUSIC_ENTRY_DIAGNOSTIC_UNVERIFIED'
+        } else {
+            Write-Host 'LUCIA_MUSIC_ENTRY_DIAGNOSTIC_PASS'
+        }
+    }
+
     $cli = Join-Path $root 'tests\e2e\cli-browsphere.cjs'
     & node $cli --json doctor
     if ($LASTEXITCODE -ne 0) { throw 'Native Browsphere test dependencies failed CLI health checks' }
