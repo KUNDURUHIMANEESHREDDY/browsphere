@@ -181,6 +181,7 @@ impl SemanticTask{
         if !task.concepts.is_empty(){
             // Validate the original input before canonicalization can hide
             // invalid stage assignments or unsupported model spans.
+            task.ground_spelling(goal)?;
             task.validate(goal,stages.len())?;
             canonicalize(&mut task)?;
         }
@@ -222,6 +223,43 @@ impl SemanticTask{
         task.validate(goal,stages.len())?;
         Ok(Some(task))
     }
+    /// Restore the exact spelling of a model span only if its case-insensitive
+    /// literal occurrence is unique. Never infer paraphrases or remove negation.
+    pub fn ground_spelling(&mut self,goal:&str)->anyhow::Result<()>{
+        for c in &mut self.concepts{
+            if goal.contains(&c.span){continue;}
+            let needle=c.span.trim();
+            anyhow::ensure!(!needle.is_empty(),"Empty semantic span");
+            let folded=goal.to_ascii_lowercase();
+            let key=needle.to_ascii_lowercase();
+            let mut matches=folded.match_indices(&key);
+            let (i,_)=matches.next().ok_or_else(||anyhow::anyhow!("Semantic span has no literal user anchor"))?;
+            anyhow::ensure!(matches.next().is_none(),"Ambiguous semantic span");
+            c.span=goal.get(i..i+key.len()).ok_or_else(||anyhow::anyhow!("Invalid semantic span boundary"))?.to_owned();
+        }
+        Ok(())
+    }
+    /// Use only a single stage's user-anchored objective for navigation.
+    /// Broad multi-stage concepts cannot bleed future targets into this stage.
+    pub fn navigation_label(&self,stage:usize)->Option<String>{
+        let mut labels=BTreeSet::new();
+        for c in &self.concepts{
+            if c.kind!=ConceptKind::Objective||c.stages!=vec![stage]{continue;}
+            let body=objective_body(&c.span);
+            let rest=["open ","click ","locate ","find "].iter().find_map(|p|body.strip_prefix(p));
+            let Some(mut rest)=rest else{continue;};
+            rest=rest.strip_prefix("the ").or_else(||rest.strip_prefix("its ")).unwrap_or(rest);
+            if let Some(n)=rest.strip_prefix("chapter on ").or_else(||rest.strip_prefix("section on ")){rest=n;}
+            let suffixes=[" chapter"," section"," link"];
+            let typed=suffixes.iter().any(|p|rest.ends_with(p))||body.contains(" chapter on ")||body.contains(" section on ")||rest.ends_with(" tutorial")||rest.ends_with(" guide")||rest.ends_with(" reference");
+            if !typed{continue;}
+            let rest=suffixes.iter().find_map(|p|rest.strip_suffix(p)).unwrap_or(rest);
+            if (3..=80).contains(&rest.len())&&rest.split_whitespace().count()<=8&&rest.chars().all(|c|c.is_alphanumeric()||c==' '||c=='-'){
+                labels.insert(rest.to_owned());
+            }
+        }
+        if labels.len()==1{labels.into_iter().next()}else{None}
+    }
     pub fn validate(&self,goal:&str,stage_count:usize)->anyhow::Result<()>{
         anyhow::ensure!((1..=12).contains(&self.concepts.len())&&self.relations.len()<=20,"Semantic concept budget exceeded");
         let mut seen=HashSet::new();
@@ -262,7 +300,8 @@ impl SemanticTask{
              self.relations.iter().any(|r|r.kind==RelationKind::RefersTo&&r.to==i+1&&self.concepts[r.from-1].stages.contains(&stage))))
     }
     pub fn focus(&self,stage:usize)->String{
-        self.concepts.iter().enumerate().filter(|(i,c)|matches!(c.kind,ConceptKind::Objective|ConceptKind::Entity)&&self.applies(*i,stage))
+        let specific=self.concepts.iter().any(|c|c.kind==ConceptKind::Objective&&c.stages==vec![stage]);
+        self.concepts.iter().enumerate().filter(|(i,c)|matches!(c.kind,ConceptKind::Objective|ConceptKind::Entity)&&self.applies(*i,stage)&&(!specific||c.kind!=ConceptKind::Objective||c.stages==vec![stage]))
             .map(|(_,c)|c.span.as_str()).collect::<Vec<_>>().join(" ")
     }
     pub fn hint(&self,stage:usize)->String{
@@ -329,6 +368,17 @@ mod tests{
         let contract=ExplicitContract::extract("First inspect the reference then compare versions; do not download files.");
         assert_eq!(contract.ordered.len(),2);
         assert_eq!(contract.constraints,vec!["do not download files"]);
+    }
+    #[test]fn case_repair_is_literal_and_stage_targets_exclude_aggregate(){
+        let goal="First open the Language Guide chapter, then locate its chapter on Pattern Matching. Do not download files.";
+        let stages=vec![stage("Open Language Guide"),stage("Locate Pattern Matching")];
+        let mut task=SemanticTask::reconcile(goal,&stages,None).unwrap().unwrap();
+        task.concepts[0].span=task.concepts[0].span.to_ascii_lowercase();
+        task.ground_spelling(goal).unwrap();
+        assert_eq!(task.navigation_label(1).as_deref(),Some("language guide"));
+        assert_eq!(task.navigation_label(2).as_deref(),Some("pattern matching"));
+        task.concepts[0].span="open a different guide".into();
+        assert!(task.ground_spelling(goal).is_err());
     }
     #[test]fn rejects_fabricated_spans_and_backward_dependencies(){
         let mut task=parse();task.concepts[2].span="submit without approval".into();assert!(task.validate(GOAL,2).is_err());

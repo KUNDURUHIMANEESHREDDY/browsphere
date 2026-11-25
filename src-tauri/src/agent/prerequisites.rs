@@ -172,6 +172,34 @@ pub fn named_link(goal:&str,page:&DomSnapshot)->Option<(BrowserAction,String)> {
     if candidates.any(|(_,u)|u!=target){return None;}
     Some((click(first),target.to_string()))
 }
+/// Same-origin, unique live link for a user-anchored stage target. An exact
+/// normalized chapter label wins; a suffix match is accepted only if unique.
+pub fn stage_named_link(label:&str,page:&DomSnapshot)->Option<BrowserAction>{
+    if page.text_excerpt.starts_with("Active dialog:"){return None;}
+    let source=url::Url::parse(&page.origin).ok()?;
+    let label=normalized(label);
+    let bare=label.split_once(' ').filter(|(prefix,_)|normalized(&page.title).split_whitespace().any(|w|w==*prefix)).map(|(_,tail)|tail).unwrap_or(&label);
+    let mut matches=Vec::new();
+    for n in &page.interactive_nodes{
+        if n.is_sensitive||n.is_submit||!(n.tag=="a"||n.role=="link"){continue;}
+        let Some(u)=n.href.as_deref().and_then(|v|url::Url::parse(v).ok())else{continue;};
+        if !matches!(u.scheme(),"http"|"https")||u.origin()!=source.origin()||u==source||u.fragment().is_some()||!u.username().is_empty()||u.password().is_some(){continue;}
+        let observed=chapter_label(&n.label);
+        let score=if observed==label{2}else if observed==bare&&label!=bare{1}else{0};
+        if score>0{matches.push((score,n,u));}
+    }
+    let score=matches.iter().map(|(s,_,_)|*s).max()?;
+    let mut best=matches.into_iter().filter(|(s,_,_)|*s==score);
+    let (_,n,u)=best.next()?;
+    if best.any(|(_,_,other)|other!=u){return None;}
+    Some(click(n))
+}
+pub fn stage_title_matches(label:&str,page:&DomSnapshot)->bool{
+    let title=normalized(&page.title);
+    let label=normalized(label);
+    !super::deliberation::error_page(page)&&page.text_excerpt.trim().chars().count()>=40&&
+        (title.contains(&label)||label.split_whitespace().all(|w|title.split_whitespace().any(|t|t.trim_matches(|c:char|!c.is_alphanumeric())==w)))
+}
 pub fn named_search_control(goal:&str,page:&DomSnapshot)->Option<BrowserAction>{
     if (!super::orchestrator::is_simple_named_title_task(goal)&&super::deliberation::lookup_subject(goal).is_none())||page.text_excerpt.starts_with("Active dialog:"){return None;}
     if page.interactive_nodes.iter().any(|n|!n.is_sensitive&&n.tag=="input"&&(n.role=="searchbox"||normalized(&n.label).contains("search"))){return None;}

@@ -686,6 +686,11 @@ User text: <text>{}</text>"#,
         if system==crate::lucia_prompts::SEMANTIC_REPAIR_SYSTEM{
             return Self::structured_schema(crate::lucia_prompts::PLANNER_SYSTEM,user)["properties"]["semantic"].clone();
         }
+        if system==crate::lucia_prompts::REPLAN_SYSTEM{
+            return json!({"type":"object","additionalProperties":false,"required":["objective","criterion"],"properties":{
+                "objective":{"type":"string","minLength":16,"maxLength":200},
+                "criterion":{"type":"string","minLength":12,"maxLength":200}}});
+        }
         if system==crate::lucia_prompts::FACET_SELECTOR_SYSTEM {
             let payload:serde_json::Value=serde_json::from_str(user).unwrap_or_default();
             let mut properties=serde_json::Map::new();
@@ -836,6 +841,12 @@ User text: <text>{}</text>"#,
         anyhow::ensure!(plan.semantic.is_some(),"Complex task semantic interpretation is incomplete");
         plan.semantic_provenance=Some("dedicated_model_repair_with_native_reconciliation");
         Ok(plan)
+    }
+    /// Ask the planner for one recovery tactic. The proposal is parsed and
+    /// validated natively by `agent::replan`; this method only bounds the call.
+    pub async fn propose_recovery_tactic(&self,input:&str,creds:&CredentialStore)->anyhow::Result<String>{
+        tokio::time::timeout(Duration::from_secs(20),
+            self.model_structured_response(crate::lucia_prompts::REPLAN_SYSTEM,input,creds)).await?
     }
     async fn plan_draft_for_origin(&self,goal:&str,origin:&str,creds:&CredentialStore)->anyhow::Result<crate::agent::orchestrator::TaskPlan>{
         // Only the explicit role profile adds an independent decomposition

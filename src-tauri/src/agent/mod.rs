@@ -29,6 +29,7 @@ pub mod skills;
 pub mod browser_skills;
 pub mod execution_intelligence;
 pub mod page_understanding;
+pub mod replan;
 pub mod multimodal_perception;
 pub mod requirements;
 pub mod evidence_acquisition;

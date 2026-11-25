@@ -175,7 +175,8 @@ pub fn parse_generated_plan(goal: &str, raw: &str) -> anyhow::Result<TaskPlan> {
         success_criteria: "Confirm observed webpages and successfully executed actions; never invent success".into(),
         status: "pending",
     });
-    if let Some(task)=semantic.as_ref(){task.validate(goal,stages.len()-1)?;}
+    let mut semantic=semantic;
+    if let Some(task)=semantic.as_mut(){task.ground_spelling(goal)?;task.validate(goal,stages.len()-1)?;}
     let semantic_provenance=semantic.as_ref().map(|_|"model_proposed");
     Ok(TaskPlan { goal: goal.to_string(), stages, semantic, semantic_provenance })
 }
@@ -421,6 +422,10 @@ impl Orchestrator {
         let anchored=self.plan.semantic.as_ref().map(|s|s.focus(self.current+1)).unwrap_or_default();
         format!("{objective} {anchored}")
     }
+    pub fn stage_navigation_label(&self)->Option<String>{
+        if self.specialist()!=Specialist::Browser{return None;}
+        self.plan.semantic.as_ref()?.navigation_label(self.current+1)
+    }
     pub fn semantic_hint(&self)->String{
         self.plan.semantic.as_ref().map(|s|s.hint(self.current+1)).unwrap_or_else(||"No model semantic graph; use original goal and native evidence.".into())
     }
@@ -447,6 +452,13 @@ impl Orchestrator {
         }
         if self.last_action_failed {
             return Err("Previous browser action failed; re-observe and recover first".into());
+        }
+        if let Some(label)=self.stage_navigation_label(){
+            if !super::prerequisites::stage_title_matches(&label,snapshot)||
+                !self.evidence.iter().any(|e|e.url==snapshot.origin&&e.title==snapshot.title&&!e.excerpt.trim().is_empty())||
+                self.actions_in_stage==0{
+                return Err("Active named navigation objective has no independently observed destination receipt".into());
+            }
         }
         if let Some(target) = requested_navigation_url(&self.plan.goal) {
             if self.confirmed_navigation.as_deref() != Some(snapshot.origin.as_str())

@@ -121,6 +121,18 @@ impl WorkflowGraph{
   *self=candidate;
   Ok((ids[0],ids[1]))
  }
+ /// Insert a validated recovery plan. The plan may name an observed control
+ /// or a model-proposed tactic outside the fixed strategy taxonomy; callers
+ /// must run `RecoveryPlan::validate` first.
+ pub fn replan_with(&mut self,parent:usize,plan:&super::replan::RecoveryPlan)->Result<(usize,usize)>{
+  let mut candidate=self.clone();
+  let ids=candidate.amend_recovery_inner(parent,&[(Kind::Observation,vec![]),(Kind::Recovery,vec![0])],true)?;
+  candidate.describe(ids[1],plan.objective(),plan.criterion())?;
+  candidate.start(ids[0])?;
+  candidate.validate()?;
+  *self=candidate;
+  Ok((ids[0],ids[1]))
+ }
  /// Insert an authorized tool prerequisite while a browser specialist is active.
  /// The caller is responsible for authorization and evidence verification.
  pub fn insert_tool_prerequisite(&mut self,parent:usize)->Result<usize>{
@@ -324,6 +336,27 @@ mod tests{
   g.complete(recovery,Receipt::ObservedProgress).unwrap();g.start(1).unwrap();
   g.complete(1,Receipt::StageGate).unwrap();g.start(2).unwrap();
   g.complete(2,Receipt::FinalReport).unwrap();assert!(g.is_complete());
+ }
+ #[test]fn custom_replan_uses_the_proposed_objective_and_criterion(){
+  use super::super::replan::{Basis,RecoveryPlan};
+  let mut g=WorkflowGraph::chain(&[Kind::Browser,Kind::Verification]).unwrap();
+  g.describe(0,"Second source","Read second source").unwrap();
+  g.start(0).unwrap();
+  let plan=RecoveryPlan{
+   objective:"Compare the two observed price panels before deciding".into(),
+   criterion:"Both panels were re-observed in the latest native snapshot".into(),
+   basis:Basis::Model,
+  };
+  let (observation,recovery)=g.replan_with(0,&plan).unwrap();
+  assert_eq!(g.nodes[recovery].objective,plan.objective);
+  assert_eq!(g.nodes[recovery].criterion,plan.criterion);
+  assert_eq!(g.nodes[0].criterion,"Read second source");
+  assert!(g.start(0).is_err());
+  g.complete(observation,Receipt::NativeObservation).unwrap();
+  g.start(recovery).unwrap();g.complete(recovery,Receipt::ObservedProgress).unwrap();
+  g.start(0).unwrap();g.complete(0,Receipt::StageGate).unwrap();
+  g.start(1).unwrap();g.complete(1,Receipt::FinalReport).unwrap();
+  assert!(g.is_complete());
  }
  #[test]fn pending_graph_revision_preserves_transitive_dependencies(){
   let mut g=WorkflowGraph::new(vec![(Kind::Observation,vec![]),(Kind::Recovery,vec![0]),(Kind::Browser,vec![0,1]),(Kind::Verification,vec![2])]).unwrap();

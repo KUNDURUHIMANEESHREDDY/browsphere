@@ -142,7 +142,8 @@ pub async fn run(app:&tauri::AppHandle,label:&str,page:&DomSnapshot,mode:Mode,co
             report.summary.push_str(&format!("\n{} ({}):",chart.caption,chart.kind));
             for p in chart.points{report.summary.push_str(&format!("\n{}: {}",p.label,p.value));}
         }
-        report.limitations=format!("Native DOM findings, if present, are verified transcriptions. Canvas/raster readings are provisional agreement between two local model passes, not independent verification. No values estimated from geometry. Unreadable or unsupported visual regions: {}.",pixels.omitted);
+        let native_limitations=report.limitations.clone();
+        report.limitations=format!("{native_limitations}\nCanvas/raster readings are provisional agreement between two local model passes, not independent verification. No values estimated from geometry. Unreadable or unsupported visual regions: {}.",pixels.omitted);
         report.summary.push_str(&format!("\nSource: {}\n{}",first.url,report.limitations));
         Ok(report)
     }=>r?};

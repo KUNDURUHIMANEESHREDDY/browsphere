@@ -1313,7 +1313,7 @@ async fn run_browser_loop(
     let mut recovery_node:Option<usize>=None;
     let mut verification_recoveries=0u8;
     let mut recovery_observation:Option<usize>=None;
-    let mut recovery_strategy:Option<crate::agent::page_understanding::RecoveryStrategy>=None;
+    let mut recovery_strategy:Option<crate::agent::replan::RecoveryPlan>=None;
     publish_graph!(&graph);
     orchestrator.begin();
     let _ = app.emit("agent:plan", serde_json::json!({
@@ -2089,16 +2089,31 @@ async fn run_browser_loop(
             !recorded_steps.iter().any(|action|matches!(action,
                 BrowserAction::Click{is_submit:true,..}|BrowserAction::Download{..}|BrowserAction::TypeText{is_sensitive:true,..})) {
             if let Some(strategy)=crate::agent::page_understanding::RecoveryStrategy::from_page(&snapshot){
-                if let Ok((observation,recovery))=graph.replan_observed(stage_nodes[orchestrator.current],strategy){
+                // Prefer a plan that names a control this page actually renders
+                // and this stage actually asks about; fall back to the fixed
+                // taxonomy when nothing observed is grounded.
+                let tried:Vec<String>=graph.nodes.iter().filter(|n|n.kind==GraphKind::Recovery).map(|n|n.objective.clone()).collect();
+                let stage_objective=orchestrator.stage().objective.clone();
+                let mut plan=crate::agent::replan::RecoveryPlan::derive(&snapshot,&stage_objective,&tried);
+                if plan.is_none(){
+                    let mut observed_urls=orchestrator.evidence.iter().map(|e|e.url.clone()).collect::<Vec<_>>();
+                    observed_urls.push(snapshot.origin.clone());
+                    observed_urls.sort();observed_urls.dedup();
+                    let selected={router.lock().await.clone()};
+                    plan=crate::agent::replan::RecoveryPlan::propose_model_plan(
+                        &selected,creds.as_ref(),&goal,&snapshot,&observed_urls,&tried).await.ok();
+                }
+                let plan=plan.unwrap_or_else(||strategy.into());
+                if let Ok((observation,recovery))=graph.replan_with(stage_nodes[orchestrator.current],&plan){
                     run_core.mark_replanned(&snapshot,orchestrator.current);
-                    recovery_observation=Some(observation);recovery_node=Some(recovery);recovery_strategy=Some(strategy);
-                    let _=app.emit("agent:objective_replan",serde_json::json!({"run_id":run_id,"step_index":step,"stage":orchestrator.current,"strategy":strategy,"revision":graph.revision}));
+                    recovery_observation=Some(observation);recovery_node=Some(recovery);recovery_strategy=Some(plan.clone());
+                    let _=app.emit("agent:objective_replan",serde_json::json!({"run_id":run_id,"step_index":step,"stage":orchestrator.current,"strategy":strategy,"objective":plan.objective(),"basis":plan.basis(),"revision":graph.revision}));
                     publish_graph!(&graph);
                     continue;
                 }
             }
         }
-        let replan_hint=recovery_strategy.map(|s|s.objective()).unwrap_or("No adaptive recovery objective active");
+        let replan_hint=recovery_strategy.as_ref().map(|s|s.objective()).unwrap_or("No adaptive recovery objective active");
         let plan_progress=orchestrator.plan_progress();
         let prompt_payload = format!("Native completion gate: {completion_gate}\nPlan progress: {plan_progress}\nSemantic task: {semantic_hint}\nAdaptive recovery objective: {replan_hint}\n{}\nTask state: {task_state}\nProgress assessment: {}\nPreferred live IDs JSON: {}\nAllowed navigation JSON: {}\nFailed choices JSON: {}\n{recovery_directive}\n{prompt_payload}{vision_context}",requirements.hint(),assessment.hint(),serde_json::to_string(&preferred_ids).unwrap_or_default(),serde_json::to_string(&navigation).unwrap_or_default(),serde_json::to_string(&failed_choices).unwrap_or_default());
         let _ = app.emit("agent:activity", serde_json::json!({
@@ -2119,7 +2134,13 @@ async fn run_browser_loop(
                 && !snapshot.text_excerpt.starts_with("Active dialog:") {
                 objectives.next(&snapshot.origin)
             }else{None};
-            let candidate = if let Some(url)=next_source {
+            let stage_link=orchestrator.stage_navigation_label().and_then(|label|{
+                if crate::agent::prerequisites::stage_title_matches(&label,&snapshot){None}
+                else{crate::agent::prerequisites::stage_named_link(&label,&snapshot)}
+            });
+            let candidate = if let Some(action)=stage_link{
+                Some((action,"semantic_stage_named_link"))
+            }else if let Some(url)=next_source {
                 objectives.attempted(&url);
                 Some((BrowserAction::Navigate{url},"explicit_research_source"))
             } else if confirmed_named_search_query && snapshot.origin!=initial_origin
@@ -2157,6 +2178,8 @@ async fn run_browser_loop(
         let (mut thought, mut action, mut model_route) =
             if let Some((action,route))=native_objective_action {
                 ("Execute the next native objective contract".into(),action,route.into())
+            } else if freshly_observed&&!last_action_failed&&orchestrator.stage_navigation_label().is_some()&&orchestrator.can_complete(&snapshot).is_ok(){
+                ("Active semantic destination independently observed".into(),BrowserAction::Complete{summary:format!("Observed requested destination: {}",snapshot.title)},"semantic:stage_destination_receipt".into())
             } else if let Some((action,phase)) = prerequisite {
                 ("Resolve the next explicitly grounded prerequisite".to_string(),action,format!("prerequisite:{phase}"))
             } else if let Some(action)=crate::agent::multimodal_perception::unique_coordinate_link(&goal,&snapshot,&visual_points,&route_ledger).filter(|a|orchestrator.specialist().allows_on_page(a,&snapshot)&&crate::agent::objective_gate::check(&goal,&initial_origin,&snapshot,&objectives,a).is_ok()){

@@ -50,6 +50,54 @@ fn numbers(input: &str) -> HashSet<String> {
         .filter(|s| s.chars().any(|c| c.is_ascii_digit()))
         .map(str::to_owned).collect()
 }
+/// Minimal suffix folding so "supports"/"support" and "included"/"includes"
+/// compare as the same content word. Only used for polarity agreement.
+fn stem(word: &str) -> String {
+    for suffix in ["ing", "ed", "es", "s"] {
+        if word.len() > suffix.len() + 3 && word.ends_with(suffix) {
+            return word[..word.len() - suffix.len()].to_string();
+        }
+    }
+    word.to_string()
+}
+fn words(input: &str) -> Vec<String> {
+    input.replace(['\'', '\u{2019}'], "")
+        .split(|ch: char| !ch.is_alphanumeric())
+        .map(str::to_lowercase).filter(|w| !w.is_empty()).collect()
+}
+/// Content words that a negation cue actually governs. A cue applies to the
+/// next content word, skipping auxiliaries and adverbs, so "does not support"
+/// marks `support` but an unrelated "does not include a charger" elsewhere in
+/// the passage marks only `include`.
+fn negated_terms(input: &str) -> HashSet<String> {
+    const CUES: [&str; 18] = ["not", "no", "never", "none", "cannot", "nor", "without",
+        "doesnt", "dont", "didnt", "isnt", "arent", "cant", "wont", "couldnt",
+        "shouldnt", "wouldnt", "unable"];
+    const SKIP: [&str; 24] = ["be", "is", "are", "was", "were", "has", "have", "had",
+        "do", "does", "did", "can", "could", "will", "would", "should", "may",
+        "might", "must", "the", "a", "an", "any", "also"];
+    let words = words(input);
+    let mut out = HashSet::new();
+    for (i, word) in words.iter().enumerate() {
+        if !CUES.contains(&word.as_str()) { continue; }
+        if let Some(next) = words.iter().skip(i + 1).take(4)
+            .find(|w| !SKIP.contains(&w.as_str())) {
+            out.insert(stem(next));
+        }
+    }
+    out
+}
+/// A claim may not assert what its quote negates, or negate what its quote
+/// asserts. Only shared content words are compared, so a correct claim is not
+/// invalidated by a caveat about something else in the same passage.
+fn polarity_conflict(claim: &str, quote: &str) -> Option<String> {
+    let claimed_terms: HashSet<String> = terms(claim).into_iter().map(|w| stem(&w)).collect();
+    let quoted_terms: HashSet<String> = terms(quote).into_iter().map(|w| stem(&w)).collect();
+    let shared: HashSet<String> = claimed_terms.intersection(&quoted_terms).cloned().collect();
+    let claimed = negated_terms(claim);
+    let quoted = negated_terms(quote);
+    shared.into_iter().find(|term| claimed.contains(term) != quoted.contains(term))
+}
 fn web_url(raw: &str) -> Option<Url> {
     let url = Url::parse(raw).ok()?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
@@ -609,6 +657,10 @@ pub fn check_model_verification(
         if !numbers(claim).is_subset(&numbers(quote)) {
             return Err(format!("Claim cites a number missing from the quote: {url}"));
         }
+        if let Some(term) = polarity_conflict(claim, quote) {
+            return Err(format!(
+                "Claim polarity contradicts the quoted passage at '{term}': {url}"));
+        }
         if !unique.insert((url.to_string(), claim.to_lowercase())) {
             return Err("Duplicate cited finding".into());
         }
@@ -1033,6 +1085,44 @@ mod tests {
             }
             assert!(check_model_verification(&test.to_string(),&sources,false).is_err());
         }
+    }
+    #[test]
+    fn claim_may_not_invert_the_quoted_polarity() {
+        let sources=[src("https://one.test/api",
+            "The streaming API does not support pagination. Responses are returned in full.")];
+        let agree=serde_json::json!({"status":"verified","findings":[{
+            "claim":"The streaming API does not support pagination",
+            "url":"https://one.test/api",
+            "quote":"The streaming API does not support pagination"
+        }]});
+        assert!(check_model_verification(&agree.to_string(),&sources,false).is_ok());
+        // Asserting what the passage denies is a semantic inversion, not a
+        // grounding gap: token overlap and numbers both look correct.
+        let inverted=serde_json::json!({"status":"verified","findings":[{
+            "claim":"The streaming API supports pagination",
+            "url":"https://one.test/api",
+            "quote":"The streaming API does not support pagination"
+        }]});
+        assert!(check_model_verification(&inverted.to_string(),&sources,false).is_err());
+        // Inventing a negation the passage never makes is equally unsupported.
+        let positive=[src("https://one.test/api",
+            "The streaming API supports pagination with a cursor.")];
+        let invented=serde_json::json!({"status":"verified","findings":[{
+            "claim":"The streaming API does not support pagination",
+            "url":"https://one.test/api",
+            "quote":"The streaming API supports pagination"
+        }]});
+        assert!(check_model_verification(&invented.to_string(),&positive,false).is_err());
+        // A caveat about something else in the same passage must not
+        // invalidate a correct claim.
+        let caveat=[src("https://one.test/api",
+            "The streaming API supports pagination. It does not include a bulk export.")];
+        let correct=serde_json::json!({"status":"verified","findings":[{
+            "claim":"The streaming API supports pagination",
+            "url":"https://one.test/api",
+            "quote":"The streaming API supports pagination. It does not include a bulk export."
+        }]});
+        assert!(check_model_verification(&correct.to_string(),&caveat,false).is_ok());
     }
     #[test]
     fn comparisons_require_two_observed_hosts() {
