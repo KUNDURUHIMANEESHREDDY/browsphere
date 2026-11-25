@@ -3152,7 +3152,9 @@ async fn run_browser_loop(
                         crate::agent::prerequisites::completion_blocker(&goal,&after).map_or(Ok(()),|r|Err(r.into()))
                     }else{match &action {
                         BrowserAction::Navigate { url } =>
-                            if auth_recovery_attempts > 0 && crate::agent::recovery::navigation_confirmed(url, &after) {
+                            if model_route.starts_with("google_research:exact_user_query") {
+                                crate::agent::evidence_verifier::check_google_query_navigation(url, &after)
+                            } else if auth_recovery_attempts > 0 && crate::agent::recovery::navigation_confirmed(url, &after) {
                                 Ok(())
                             } else { check_navigation_result(url, &after) },
                         BrowserAction::Click { is_submit: true, .. } =>
