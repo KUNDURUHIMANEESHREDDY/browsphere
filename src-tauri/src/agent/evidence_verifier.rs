@@ -755,6 +755,35 @@ pub fn check_model_verification(
 
 /// Navigation dispatch is not completion: require the requested URL and
 /// actual document evidence (text or meaningful title) from a later WebView snapshot.
+/// Google can add presentation/analytics parameters to a search URL without
+/// changing the requested public query. Require the same Google search path and
+/// decoded q value, a readable real page, and no challenge/error page. This
+/// narrows the special case to the exact user-requested read-only search.
+pub fn check_google_query_navigation(requested:&str,after:&DomSnapshot)->Result<(),String>{
+    let wanted=url::Url::parse(requested).map_err(|_|"Invalid Google search URL")?;
+    let actual=url::Url::parse(&after.origin).map_err(|_|"Google search destination not loaded")?;
+    if wanted.scheme()!="https" || actual.scheme()!="https" ||
+        wanted.host_str()!=Some("www.google.com") ||
+        !matches!(actual.host_str(),Some("www.google.com"|"google.com")) ||
+        wanted.path()!="/search" || actual.path()!="/search" ||
+        !wanted.query_pairs().any(|(k,v)|k=="q"&&!v.trim().is_empty()) {
+        return Err("Navigation is not a public Google search".into());
+    }
+    let q=wanted.query_pairs().find(|(k,_)|k=="q").map(|(_,v)|v.into_owned());
+    let actual_q=actual.query_pairs().filter(|(k,_)|k=="q").map(|(_,v)|v.into_owned()).collect::<Vec<_>>();
+    if actual_q.len()!=1||q.as_deref()!=actual_q.first().map(String::as_str){
+        return Err("The observed Google results query differs from the user's request".into());
+    }
+    if super::search_discovery::human_verification(&after.origin,&after.title,&after.text_excerpt)
+        || super::deliberation::error_page(after){
+        return Err("Google results are blocked by a challenge or an error page".into());
+    }
+    if after.title.trim().chars().count()<4 && after.text_excerpt.trim().chars().count()<30 {
+        return Err("Google results are not yet readable".into());
+    }
+    Ok(())
+}
+
 pub fn check_navigation_result(requested: &str, after: &DomSnapshot) -> Result<(), String> {
     let target = web_url(requested).ok_or("Invalid navigation target")?;
     let actual = web_url(&after.origin).ok_or("Destination has not loaded")?;
@@ -1120,6 +1149,26 @@ mod tests {
     fn dom(url: &str, text: &str) -> DomSnapshot {
         DomSnapshot {structure: Default::default(), origin:url.into(), title:"Demo".into(),
             text_excerpt:text.into(),interactive_nodes:vec![]}
+    }
+    #[test]
+    fn google_search_accepts_same_query_with_extra_parameters_only(){
+        let target="https://www.google.com/search?q=free+notes+windows";
+        let ok=dom("https://www.google.com/search?source=hp&q=free%20notes%20windows&client=webview",
+            "Real observed search results for free notes windows.");
+        assert!(check_google_query_navigation(target,&ok).is_ok());
+        for different in [
+            "https://www.google.com/",
+            "https://www.google.com/search?q=different",
+            "https://www.google.com/search?q=free+notes+windows&q=different",
+            "https://evil.example/search?q=free+notes+windows",
+            "https://www.google.com/sorry/index?q=free+notes+windows",
+        ]{
+            let bad=dom(different,"Real observed search results for free notes windows.");
+            assert!(check_google_query_navigation(target,&bad).is_err(),"{different}");
+        }
+        let challenge=DomSnapshot{title:"Just a moment...".into(),
+            text_excerpt:"Verify you are human".into(),..ok};
+        assert!(check_google_query_navigation(target,&challenge).is_err());
     }
     #[test]
     fn accepts_exact_observed_quote_and_url() {
