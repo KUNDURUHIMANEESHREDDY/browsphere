@@ -728,9 +728,12 @@ fn parse_named_comparison_response(raw:&str)->Result<NamedComparisonSelection,St
 fn named_free_candidates(goal:&str,source:&SourceEvidence)->Vec<Passage>{
     candidate_passages(goal,source).into_iter().filter(|p|{
         let lower=p.text.to_ascii_lowercase();
-        !["everything in free, and","everything in free forever, plus",
-          "everything in free, plus","regular price","billed yearly",
-          "billed annually","per user per month"].iter().any(|x|lower.contains(x))
+        lower.contains("free")
+            && ["plan","member","user","collaborat","board","block","workspace","task","team"]
+                .iter().any(|term|lower.contains(term))
+            && !["everything in free, and","everything in free forever, plus",
+                "everything in free, plus","regular price","billed yearly",
+                "billed annually","per user per month"].iter().any(|x|lower.contains(x))
     }).take(7).collect()
 }
 pub fn named_comparison_catalog(goal:&str,sources:&[SourceEvidence])->Option<serde_json::Value>{
