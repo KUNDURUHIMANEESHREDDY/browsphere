@@ -513,10 +513,17 @@ fn trusted_youtube_watch_link_followup(
         || current.path() != "/results" || target.scheme() != "https"
         || target.host_str() != Some("www.youtube.com") || target.path() != "/watch"
         || !target.query_pairs().any(|(key, value)| key == "v" && !value.is_empty())
-        || !snapshot.interactive_nodes.iter().any(|node| {
-            node.tag == "a" && !node.is_sensitive && node.href.as_deref() == Some(clicked_url)
-        })
+        || (crate::agent::policy::requested_unspecified_music_search_url(goal).is_none()
+            && !snapshot.interactive_nodes.iter().any(|node| {
+                node.tag == "a" && !node.is_sensitive
+                    && node.href.as_deref() == Some(clicked_url)
+            }))
     { return None; }
+    // For a delegated song, clicked_url is already the *previously observed*
+    // public watch link from an acknowledged click. YouTube can replace the
+    // results DOM after that click, so requiring the exact link to remain in
+    // a second snapshot can prevent recovery. Never accept a model-invented
+    // destination: only a recorded prior first-result click creates this state.
     Some(BrowserAction::Navigate { url: clicked_url.to_string() })
 }
 
@@ -1445,6 +1452,7 @@ async fn run_browser_loop(
     // A user-delegated music choice is searched only once. A failed or
     // challenged results page cannot cause repeated submissions.
     let mut unspecified_music_search_attempted=false;
+    let mut delegated_music_video_attempted=false;
     // Never repeat the exact Google query navigation if the first attempt
     // fails or a human challenge blocks the target.
     let mut google_research_navigation_attempted = false;
@@ -2650,12 +2658,17 @@ async fn run_browser_loop(
                     "first_video_result:observed_href_fallback".to_string(),
                 )
             } else if freshly_observed
+                && !(delegated_music_video_attempted
+                    && crate::agent::policy::requested_unspecified_music_search_url(&goal).is_some())
                 && trusted_first_youtube_video_result(
                     &goal, &snapshot, orchestrator.specialist()).is_some()
             {
                 let action = trusted_first_youtube_video_result(
                     &goal, &snapshot, orchestrator.specialist())
                     .expect("checked live video-result target");
+                if crate::agent::policy::requested_unspecified_music_search_url(&goal).is_some(){
+                    delegated_music_video_attempted=true;
+                }
                 (
                     "Click the first verified YouTube watch link observed on the live results page".to_string(),
                     action,
@@ -4855,6 +4868,13 @@ mod first_youtube_result_tests {
             Some(BrowserAction::Click{node_id,..}) if node_id=="public-song"));
         let observed="https://www.youtube.com/watch?v=music123";
         assert!(trusted_youtube_watch_link_followup(goal,&page,Specialist::Browser,observed).is_some());
+        page.interactive_nodes.clear();
+        assert!(trusted_youtube_watch_link_followup(goal,&page,Specialist::Browser,observed).is_some(),
+            "Previously observed and successfully clicked public watch URL remains a bounded fallback");
+        assert!(trusted_youtube_watch_link_followup(
+            "Search YouTube for NASA and open the first video result",
+            &page,Specialist::Browser,observed).is_none(),
+            "Other video tasks still require a freshly observed link");
         page.origin="https://www.youtube.com/results?search_query=unrelated".into();
         assert!(trusted_first_youtube_video_result(goal,&page,Specialist::Browser).is_none());
         assert!(trusted_youtube_watch_link_followup(goal,&page,Specialist::Browser,observed).is_none(),
