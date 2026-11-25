@@ -264,6 +264,25 @@ fn is_named_search_submit_click(
     )
 }
 
+/// A Google homepage can present several ambiguous search inputs or UI
+/// overlays. For an explicitly requested public Google search, navigate once
+/// to the standard query URL constructed from the user's exact words. This
+/// does not certify results, skip policy, or bypass a human challenge.
+fn trusted_google_search_navigation(
+    goal:&str, snapshot:&DomSnapshot, specialist:Specialist,
+)->Option<BrowserAction>{
+    if !matches!(specialist,Specialist::Browser|Specialist::Research) ||
+        snapshot.text_excerpt.starts_with("Active dialog:") ||
+        crate::agent::search_discovery::human_verification(
+            &snapshot.origin,&snapshot.title,&snapshot.text_excerpt){return None;}
+    let here=url::Url::parse(&snapshot.origin).ok()?;
+    if !matches!(here.host_str(),Some("google.com"|"www.google.com")) ||
+        !matches!(here.scheme(),"http"|"https") ||
+        here.path()!="/" || here.query().is_some(){return None;}
+    let url=crate::agent::policy::requested_google_research_url(goal)?;
+    Some(BrowserAction::Navigate{url:url.to_string()})
+}
+
 /// Explicit, public Google research requests use the user's literal search
 /// phrase, not model-generated terms. The native search field is still required,
 /// and the normal DOM binding, action policy, and post-action checks apply.
@@ -1264,6 +1283,9 @@ async fn run_browser_loop(
     // Never force the same deterministic navigation after it fails. The
     // specialist model must inspect the fresh state and choose recovery.
     let mut direct_navigation_attempted = false;
+    // Never repeat the exact Google query navigation if the first attempt
+    // fails or a human challenge blocks the target.
+    let mut google_research_navigation_attempted = false;
     let mut objectives=crate::agent::semantic_core::ObjectiveLedger::new(&goal);
     // WebView2 may acknowledge navigation before a slow site yields a loaded DOM.
     // Only a later, fresh and exact native page observation may recover it.
@@ -2386,6 +2408,21 @@ async fn run_browser_loop(
                     "Click the first verified YouTube watch link observed on the live results page".to_string(),
                     action,
                     "first_video_result:observed_dom".to_string(),
+                )
+            } else if freshly_observed
+                && !google_research_navigation_attempted
+                && trusted_google_search_navigation(
+                    &goal,&snapshot,orchestrator.specialist()).is_some()
+            {
+                // Independent navigation and observed-page postconditions are
+                // still enforced before the research stage may advance.
+                google_research_navigation_attempted=true;
+                (
+                    "Open the exact public Google query explicitly requested by the user".into(),
+                    trusted_google_search_navigation(
+                        &goal,&snapshot,orchestrator.specialist())
+                        .expect("observed Google homepage and bounded user query"),
+                    "google_research:exact_user_query".into(),
                 )
             } else if freshly_observed
                 && !confirmed_named_search_query
@@ -3576,6 +3613,36 @@ mod production_safety_tests {
             goal, &before.origin, &before, &wrong, &observed).is_err());
     }
 
+    #[test]
+    fn exact_google_search_navigation_works_without_a_unique_searchbox(){
+        use crate::agent::dom_extractor::DomNodeSummary;
+        let goal="Search Google for the best free note-taking apps for Windows. Open the first three relevant results, visit the apps' official websites, compare their features, offline support, and limitations, then recommend the best option. Include the source links and explain your choice.";
+        let mut page=DomSnapshot{
+            structure:Default::default(),origin:"https://www.google.com/".into(),
+            title:"Google".into(),text_excerpt:"Google public search home.".into(),
+            interactive_nodes:(0..28).map(|i|DomNodeSummary{
+                node_id:format!("node_{i}"),tag:"input".into(),role:"searchbox".into(),
+                label:format!("Search {i}"),href:None,is_submit:false,is_sensitive:false,
+                checked:None,search_state:None,options:vec![],bbox:None
+            }).collect()
+        };
+        let action=trusted_google_search_navigation(goal,&page,Specialist::Research).unwrap();
+        let BrowserAction::Navigate{url}=action else{panic!("public search must navigate")};
+        let u=url::Url::parse(&url).unwrap();
+        assert_eq!(u.host_str(),Some("www.google.com"));
+        assert_eq!(u.path(),"/search");
+        assert_eq!(u.query_pairs().find(|(k,_)|k=="q").unwrap().1,
+            "the best free note-taking apps for Windows");
+        assert!(trusted_google_search_navigation(goal,&page,Specialist::Verification).is_none());
+        page.origin=url;
+        assert!(trusted_google_search_navigation(goal,&page,Specialist::Research).is_none(),
+            "search result navigation must not be repeated");
+        page.origin="https://www.google.com/sorry/index".into();
+        assert!(trusted_google_search_navigation(goal,&page,Specialist::Research).is_none());
+        page.origin="https://www.google.com/".into();
+        page.text_excerpt="Active dialog: Sign in to Google".into();
+        assert!(trusted_google_search_navigation(goal,&page,Specialist::Research).is_none());
+    }
     #[test]
     fn explicit_google_research_uses_the_observed_search_field_once(){
         use crate::agent::dom_extractor::DomNodeSummary;
