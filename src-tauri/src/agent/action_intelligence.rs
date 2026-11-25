@@ -150,6 +150,16 @@ pub fn effect_observed(
     if super::deliberation::error_page(after)||super::recovery::authentication_gate(after){
         return false;
     }
+    // A transition from relevant research to an unrelated landing page is
+    // not objective progress merely because the URL or UI changed.
+    let topicality=|page:&DomSnapshot|
+        semantic_core::navigation_relevance(goal,stage,page)
+            +semantic_core::relevance(goal,&page.text_excerpt);
+    if super::deliberation::read_only(goal)
+        && topicality(before)>0 && topicality(after)==0
+        && !matches!(action,BrowserAction::Complete{..}|BrowserAction::Download{..}){
+        return false;
+    }
     match action {
         BrowserAction::Complete{..}|BrowserAction::Download{..}=>true,
         BrowserAction::Navigate{..}=>{
@@ -253,5 +263,10 @@ mod tests{
             &BrowserAction::TypeText{node_id:"sql".into(),text:"SQL INSERT".into(),is_sensitive:false}));
         let login=DomSnapshot{title:"Sign in to your account".into(),..p.clone()};
         assert!(!effect_observed(GOAL,"Locate SQL INSERT",&p,&login,&click));
+        let unrelated=DomSnapshot{origin:"https://unfamiliar.docs.example/home".into(),
+            title:"Company home page".into(),text_excerpt:"Welcome to our company.".into(),
+            interactive_nodes:vec![],..p.clone()};
+        assert!(!effect_observed(GOAL,"Locate SQL INSERT",&p,&unrelated,&click),
+            "Changing the URL to an unrelated page is not objective progress");
     }
 }
