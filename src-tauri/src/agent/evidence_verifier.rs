@@ -803,10 +803,17 @@ pub fn check_youtube_music_search_navigation(requested:&str,after:&DomSnapshot)-
     if actual_terms!=vec![query]{
         return Err("YouTube displayed different results than the delegated query".into());
     }
+    let title=after.title.to_ascii_lowercase();
+    let excerpt=after.text_excerpt.to_ascii_lowercase();
+    let challenged=["verify you're human","verify you are human",
+        "are you a robot","unusual traffic","captcha","checking your browser",
+        "sign in to confirm"];
     if super::deliberation::error_page(after)||
         super::search_discovery::human_verification(
             &after.origin,&after.title,&after.text_excerpt) ||
-        (after.title.trim().chars().count()<4 && after.text_excerpt.trim().chars().count()<30){
+        challenged.iter().any(|s|title.contains(s) || excerpt.starts_with(s))
+        || excerpt.starts_with("please complete this verification challenge")
+        || (after.title.trim().chars().count()<4 && after.text_excerpt.trim().chars().count()<30){
         return Err("YouTube results are unavailable, blocked or unreadable".into());
     }
     Ok(())
