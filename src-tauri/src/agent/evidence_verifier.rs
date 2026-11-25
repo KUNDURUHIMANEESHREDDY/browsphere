@@ -689,6 +689,42 @@ struct NamedComparisonSelection {
 #[serde(deny_unknown_fields)]
 struct NamedComparisonPick { name:String, ids:Vec<String> }
 
+/// Normalize harmless model response wrappers and optional fields, but never
+/// create passage IDs, names or recommendation claims. The evidence gate
+/// below remains responsible for checking every selected original-source ID.
+fn parse_named_comparison_response(raw:&str)->Result<NamedComparisonSelection,String>{
+    let trimmed=raw.trim();
+    if trimmed.len()>12000{return Err("Invalid named comparison selection JSON".into());}
+    let begin=trimmed.find('{').ok_or("Invalid named comparison selection JSON")?;
+    let end=trimmed.rfind('}').ok_or("Invalid named comparison selection JSON")?;
+    if begin>=end{return Err("Invalid named comparison selection JSON".into());}
+    let parsed:serde_json::Value=serde_json::from_str(&trimmed[begin..=end])
+        .map_err(|_|"Invalid named comparison selection JSON".to_string())?;
+    let rows=parsed.get("picks").and_then(serde_json::Value::as_array)
+        .ok_or("Invalid named comparison selection JSON")?;
+    let mut picks=Vec::new();
+    for row in rows{
+        let name=row.get("name").and_then(serde_json::Value::as_str)
+            .ok_or("Invalid named comparison selection JSON")?.to_string();
+        let ids=match row.get("ids"){
+            Some(serde_json::Value::String(value))=>vec![value.clone()],
+            Some(serde_json::Value::Array(values))=>values.iter()
+                .map(|v|v.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .ok_or("Invalid named comparison selection JSON")?,
+            _=>return Err("Invalid named comparison selection JSON".into()),
+        };
+        picks.push(NamedComparisonPick{name,ids});
+    }
+    Ok(NamedComparisonSelection{
+        picks,
+        recommended:parsed.get("recommended").and_then(serde_json::Value::as_str)
+            .ok_or("Invalid named comparison selection JSON")?.to_string(),
+        rationale:parsed.get("rationale").and_then(serde_json::Value::as_str)
+            .ok_or("Invalid named comparison selection JSON")?.to_string(),
+    })
+}
+
 fn named_free_candidates(goal:&str,source:&SourceEvidence)->Vec<Passage>{
     candidate_passages(goal,source).into_iter().filter(|p|{
         let lower=p.text.to_ascii_lowercase();
@@ -717,8 +753,7 @@ pub fn named_comparison_catalog(goal:&str,sources:&[SourceEvidence])->Option<ser
 pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Result<VerificationReport,String>{
     let names=super::deliberation::named_research_entities(goal);
     if names.len()<2{return Err("No named-source research contract".into());}
-    let choice:NamedComparisonSelection=serde_json::from_str(raw.trim())
-        .map_err(|_|"Invalid named comparison selection JSON")?;
+    let choice=parse_named_comparison_response(raw)?;
     if choice.picks.len()!=names.len(){return Err("Not every named website has evidence picks".into());}
     let mut findings=Vec::new();
     let mut selected=HashSet::new();
@@ -2237,5 +2272,20 @@ mod named_comparison_relevance_tests {
         let j=javascript("The map() method creates a new array populated with the results. The map() method does not mutate the original array.");
         let findings=[(&p,"The sorted() function creates a new list containing the sorted elements."),(&p,"The remove method does not return a value."),(&j,"The map() method creates a new array populated with the results."),(&j,"The map() method does not mutate the original array.")].into_iter().map(|(s,q)|GroundedFinding{claim:q.into(),quote:q.into(),url:s.url.clone()}).collect();
         assert!(assemble_extractive_comparison(GOAL,&[p,j],findings).is_err());
+    }
+}
+
+#[cfg(test)]
+mod named_selection_format_tests {
+    use super::*;
+    #[test]
+    fn fenced_extra_fields_and_single_id_do_not_bypass_source_verification() {
+        let raw=r#"The requested selection:\n```json\n{"picks":[{"name":"Notion","ids":"p1","note":"not a fact"},{"name":"Trello","ids":["p2"]},{"name":"ClickUp","ids":["p3"]}],"recommended":"Trello","rationale":"Free collaborative boards for small teams","comment":"untrusted"}\n```"#;
+        let parsed=parse_named_comparison_response(raw).expect("normalize data-only wrapper");
+        assert_eq!(parsed.picks.len(),3);
+        assert_eq!(parsed.picks[0].ids,vec!["p1"]);
+        assert_eq!(parsed.recommended,"Trello");
+        assert!(parse_named_comparison_response("{\"picks\":[],\"recommended\":\"Trello\"}").is_err());
+        assert!(parse_named_comparison_response("{\"picks\":[]}{\"picks\":[]}").is_err());
     }
 }
