@@ -3116,6 +3116,7 @@ async fn run_browser_loop(
         // the same specialist, objective, route, and native policy gates.
         if catalog.is_none() && freshly_observed && action_binding_error.is_none()
             && orchestrator.specialist()!=Specialist::Verification
+            && !crate::agent::action_intelligence::protected_native_research_transition(&model_route)
             && !model_route.contains("research:observed_named_site_navigation")
             && !model_route.contains("named_research_waypoint:user_source")
             && !(orchestrator.specialist()==Specialist::Research

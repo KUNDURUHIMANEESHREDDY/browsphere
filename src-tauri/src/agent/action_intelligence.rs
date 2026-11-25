@@ -180,6 +180,15 @@ pub fn grounded_search_result(goal:&str,page:&DomSnapshot)->Option<BrowserAction
     }
 }
 
+/// Native requirement-driven navigations are already grounded in the
+/// current task and source ledger. An opportunistic link on the current page
+/// must never rewrite a deliberate next-platform research transition.
+pub fn protected_native_research_transition(route:&str)->bool{
+    ["course:next_platform","research:grounded_search_result",
+     "research_bootstrap:","prerequisite:explicit_research_source"]
+        .iter().any(|prefix|route.starts_with(prefix))
+}
+
 /// High-confidence suggestion to *replace an unrelated model proposal*, not
 /// a general-purpose shortcut to choose the first result. Only a unique
 /// topical HTTPS link in a fresh DOM snapshot qualifies, and the normal native
@@ -366,6 +375,15 @@ mod tests{
         assert!(!irrelevant_control("Find attractions on a map",&p,&action));
     }
     const GOAL:&str="Find the SQL INSERT command documentation and report its syntax";
+    #[test]
+    fn never_replace_grounded_native_course_research_with_current_page_link(){
+        for route in ["course:next_platform","research:grounded_search_result",
+                      "research_bootstrap:trusted_user_query",
+                      "prerequisite:explicit_research_source"]{
+            assert!(protected_native_research_transition(route));
+        }
+        assert!(!protected_native_research_transition("ollama:qwen2.5:3b-instruct"));
+    }
     #[test]
     fn selects_unique_objective_relevant_link_instead_of_off_topic_chrome(){
         let p=page(vec![
