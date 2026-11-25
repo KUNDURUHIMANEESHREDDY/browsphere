@@ -95,11 +95,26 @@ fn default_supervisor_model() -> String { "lfm3:1.7b".into() }
 
 fn default_writer_model() -> String { "qwen2.5:3b-instruct".into() }
 
+#[cfg(test)]
+mod local_action_default_tests {
+    use super::*;
+    #[test]
+    fn default_agent_model_is_a_supported_configured_role(){
+        let c=RouterConfig::default();
+        assert_eq!(c.ollama_model,"qwen2.5:3b-instruct");
+        assert_eq!(c.writer_model,c.ollama_model);
+        assert_ne!(c.ollama_model,"qwen3.5:4b");
+        assert!(c.prefer_local_for_simple);
+        assert!(!c.lucia_cloud_only);
+    }
+}
 impl Default for RouterConfig {
     fn default() -> Self {
         Self {
             ollama_url: "http://127.0.0.1:11434".to_string(),
-            ollama_model: "qwen3.5:4b".to_string(),
+            // Prefer a model with demonstrated structured-action capability.
+            // The 4B tag was not bundled and caused 404s on clean installs.
+            ollama_model: "qwen2.5:3b-instruct".to_string(),
             vision_model: String::new(),
             writer_model: default_writer_model(),
             supervisor_model: default_supervisor_model(),
