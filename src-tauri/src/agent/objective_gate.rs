@@ -19,6 +19,32 @@ fn control<'a>(page:&'a DomSnapshot,id:&str)->Option<&'a DomNodeSummary>{
 fn search_field(n:&DomNodeSummary)->bool{
     n.tag=="input"&&(n.role=="searchbox"||n.role=="combobox"||phrase(&n.label,"search"))
 }
+
+/// A first-result button may prepend a harmless action verb to the exact
+/// requested subject ("Open robotics video" versus "robotics video").
+/// Accept only a single fresh, non-sensitive result in visible search results.
+/// This is a label match, not an exemption from live binding or click policy.
+fn unique_first_result_label(goal:&str,page:&DomSnapshot,n:&DomNodeSummary,subject:&str)->bool{
+    let g=goal.to_ascii_lowercase();
+    if !g.contains("search for ")||!g.contains("first")||!g.contains("result")||
+        !page.text_excerpt.to_ascii_lowercase().contains("search results")||
+        n.is_submit||n.is_sensitive||
+        !(matches!(n.tag.as_str(),"a"|"button")||matches!(n.role.as_str(),"link"|"button")){
+        return false;
+    }
+    let target=words(subject);
+    let label=words(&n.label);
+    if target.is_empty()||label.len()!=target.len()+1||
+        !matches!(label[0].as_str(),"open"|"view"|"watch"|"read")||
+        label[1..]!=target[..]{
+        return false;
+    }
+    page.interactive_nodes.iter().filter(|other|
+        !other.is_sensitive&&!other.is_submit&&
+        (matches!(other.tag.as_str(),"a"|"button")||matches!(other.role.as_str(),"link"|"button"))&&
+        words(&other.label)==label
+    ).count()==1
+}
 fn route_guard(goal:&str,initial:&str,page:&DomSnapshot,action:&BrowserAction)->Result<(),&'static str>{
     let Some((from,to))=super::prerequisites::route_values(goal)else{return Ok(())};
     if matches!(action,BrowserAction::Complete{..}){
@@ -203,7 +229,7 @@ pub fn check(goal:&str,initial:&str,page:&DomSnapshot,ledger:&ObjectiveLedger,ac
                 return Err("Research cannot navigate to unrelated account, pricing or transaction controls");
             }
             if let Some(subject)=super::deliberation::lookup_subject(goal){
-                let exact=words(&n.label)==words(&subject)||n.href.as_ref().is_some_and(|u|lookup_link_matches(&subject,&n.label,u));
+                let exact=words(&n.label)==words(&subject)||n.href.as_ref().is_some_and(|u|lookup_link_matches(&subject,&n.label,u))||unique_first_result_label(goal,page,n,&subject);
                 let search_control=search_field(n)||phrase(&n.label,"search");
                 if !exact&&!search_control{return Err("Named lookup must use its search control or exact requested result");}
             }
@@ -229,6 +255,32 @@ pub fn check(goal:&str,initial:&str,page:&DomSnapshot,ledger:&ObjectiveLedger,ac
 mod tests{
  use super::*;
  use super::super::dom_extractor::DomNodeSummary;
+    #[test]fn named_first_result_opener_passes_without_relaxing_lookup_safety(){
+        let goal="On the current local test page, search for robotics video and open the first result.";
+        let mut p=page();
+        p.text_excerpt="Robotics video search results are now visible.".into();
+        p.interactive_nodes=vec![
+            node("result","Open robotics video",None),
+            node("wrong","Open robotics kit video",None),
+        ];
+        let ledger=ObjectiveLedger::new(goal);
+        let action=|id:&str|BrowserAction::Click{node_id:id.into(),element_label:"Untrusted model label".into(),is_submit:false};
+        assert!(unique_first_result_label(goal,&p,&p.interactive_nodes[0],"robotics video"));
+        assert!(check(goal,&p.origin,&p,&ledger,&action("result")).is_ok(),
+            "An exact-subject first-result opener must survive the objective gate");
+        assert!(check(goal,&p.origin,&p,&ledger,&action("wrong")).is_err());
+        p.interactive_nodes[0].is_sensitive=true;
+        assert!(check(goal,&p.origin,&p,&ledger,&action("result")).is_err());
+        p.interactive_nodes[0].is_sensitive=false;
+        p.interactive_nodes[0].is_submit=true;
+        assert!(check(goal,&p.origin,&p,&ledger,&action("result")).is_err());
+        p.interactive_nodes[0].is_submit=false;
+        p.interactive_nodes.push(node("duplicate","Open robotics video",None));
+        assert!(check(goal,&p.origin,&p,&ledger,&action("result")).is_err());
+        p.interactive_nodes.pop();
+        p.text_excerpt="The search form is awaiting a query.".into();
+        assert!(check(goal,&p.origin,&p,&ledger,&action("result")).is_err());
+    }
  fn node(id:&str,label:&str,href:Option<&str>)->DomNodeSummary{DomNodeSummary{node_id:id.into(),tag:"a".into(),role:"link".into(),label:label.into(),href:href.map(str::to_owned),options:vec![],checked:None,search_state:None,is_sensitive:false,is_submit:false,bbox:None}}
  fn page()->DomSnapshot{DomSnapshot{structure: Default::default(), origin:"https://example.org/search".into(),title:"Public search".into(),text_excerpt:"Public search form with a selection of navigation controls".into(),interactive_nodes:vec![node("wrong","Reservation Charts",Some("https://example.org/online-charts/")),node("login","Sign in",Some("https://example.org/login")),node("right","SQL INSERT",Some("https://example.org/sql-insert.html"))]}}
  #[test]fn journey_cannot_leave_form_or_click_unrelated_chart(){
