@@ -646,7 +646,10 @@ fn observed_google_first_result(
         if node.is_sensitive||node.is_submit
             || !(node.tag=="a"||node.role=="link")
             || node.label.trim().chars().count()<12
-            || node.bbox.as_ref().is_some_and(|b|!b.in_viewport)
+            // A scrollable result below the viewport is still a real DOM link.
+            // The native click executor scrolls it into view and rechecks
+            // visibility before dispatching any event.
+            || node.bbox.as_ref().is_some_and(|b|b.width<2.0||b.height<2.0)
         {continue;}
         let Some(raw)=node.href.as_deref()else{continue};
         let Ok(url)=url::Url::parse(raw)else{continue};
@@ -3761,6 +3764,14 @@ mod production_safety_tests {
         page.interactive_nodes.remove(3);
         let history=vec![BrowserAction::Navigate{url:search.clone()}];
         assert!(observed_google_first_result(goal,&page,Specialist::Research,&[]).is_none());
+        // Google can place the first organic result below an AI overview;
+        // it remains selectable because native execution scrolls it into view.
+        page.interactive_nodes[3].bbox=Some(crate::agent::dom_extractor::BoundingBox{
+            x:25.0,y:1550.0,width:310.0,height:40.0,in_viewport:false
+        });
+        assert!(matches!(observed_google_first_result(goal,&page,Specialist::Research,&history),
+            Some(BrowserAction::Click{node_id,..}) if node_id=="first"));
+        page.interactive_nodes[3].bbox=None;
         let action=observed_google_first_result(goal,&page,Specialist::Research,&history).unwrap();
         assert!(matches!(action,BrowserAction::Click{node_id,..} if node_id=="first"));
         assert!(observed_google_first_result(goal,&page,Specialist::Verification,&history).is_none());
