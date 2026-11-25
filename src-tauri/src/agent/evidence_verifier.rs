@@ -705,10 +705,10 @@ pub fn named_comparison_catalog(goal:&str,sources:&[SourceEvidence])->Option<ser
         let source=sources.iter().find(|s|web_url(&s.url).and_then(|u|u.host_str().map(str::to_owned))
             .is_some_and(|host|host.strip_prefix("www.").unwrap_or(&host)
                 .split('.').next()==Some(name.to_ascii_lowercase().replace([' ','-'],"").as_str())))?;
-        let candidates=candidate_passages(goal,source);
+        let candidates=named_free_candidates(goal,source);
         if candidates.is_empty(){return None}
         rows.push(serde_json::json!({"name":name,"title":source.title,
-            "candidates":candidates.into_iter().take(7).collect::<Vec<_>>()}));
+            "candidates":candidates}));
     }
     Some(serde_json::json!({"original_goal":goal,"sources":rows,
         "instruction":"Select 1-2 directly relevant passage IDs PER source. Compare free-plan constraints for the requested team size. Recommend only one of the names. If evidence does not establish suitability, leave recommended and rationale empty."}))
@@ -750,6 +750,7 @@ pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Re
             }
             findings.push(GroundedFinding{claim:passage.text.clone(),quote:passage.text.clone(),url:page.url.clone()});
         }
+        if !free_tier_quote{return Err(format!("No explicitly free-tier passage selected for {name}"));}
     }
     if choice.recommended.trim().is_empty()||!names.iter().any(|n|n.eq_ignore_ascii_case(choice.recommended.trim())){
         return Err("No verified recommendation from the named alternatives".into())
@@ -762,6 +763,19 @@ pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Re
     let quoted=findings.iter().map(|f|f.quote.as_str()).collect::<Vec<_>>().join(" ");
     if !numbers(&choice.rationale).is_subset(&numbers(&quoted)){
         return Err("Recommendation cites numerical limits missing from the selected evidence".into())
+    }
+    let chosen=choice.recommended.trim();
+    let winning_quotes=findings.iter().filter(|f|web_url(&f.url).and_then(|u|u.host_str().map(str::to_owned))
+        .is_some_and(|host|host.strip_prefix("www.").unwrap_or(&host)
+            .split('.').next()==Some(chosen.to_ascii_lowercase().replace([' ','-'],"").as_str())))
+        .map(|f|f.quote.to_ascii_lowercase()).collect::<Vec<_>>().join(" ");
+    let rationale=choice.rationale.to_ascii_lowercase();
+    let rationale_words=rationale.split(|c:char|!c.is_alphanumeric()).filter(|w|!w.is_empty())
+        .collect::<Vec<_>>();
+    for pair in rationale_words.windows(2){
+        if pair[0]=="unlimited" && !winning_quotes.contains(&format!("unlimited {}",pair[1])){
+            return Err("Recommendation asserts an unlimited feature absent from its cited source".into())
+        }
     }
     let draft=serde_json::json!({"status":"verified","findings":findings,
         "uncertainty":"Comparison uses captured official-site text. Webpage claims are not independently fact-checked."});
