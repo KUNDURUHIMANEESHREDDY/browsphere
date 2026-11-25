@@ -88,6 +88,18 @@ try {
         throw
     }
 
+    # Optional public-site diagnostic. Do not bypass Google challenges or
+    # misrepresent fixture tests as live Google acceptance.
+    if (-not $CloudCompat) {
+        Write-Host 'LUCIA_GOOGLE_NATIVE_DIAGNOSTIC_START'
+        & node (Join-Path $root 'tests\e2e\lucia-google-public-search.cjs')
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning 'LUCIA_GOOGLE_NATIVE_DIAGNOSTIC_UNVERIFIED'
+        } else {
+            Write-Host 'LUCIA_GOOGLE_NATIVE_DIAGNOSTIC_PASS'
+        }
+    }
+
     $cli = Join-Path $root 'tests\e2e\cli-browsphere.cjs'
     & node $cli --json doctor
     if ($LASTEXITCODE -ne 0) { throw 'Native Browsphere test dependencies failed CLI health checks' }
