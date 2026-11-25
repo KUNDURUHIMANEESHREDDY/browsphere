@@ -275,10 +275,7 @@ fn trusted_google_search_navigation(
         snapshot.text_excerpt.starts_with("Active dialog:") ||
         crate::agent::search_discovery::human_verification(
             &snapshot.origin,&snapshot.title,&snapshot.text_excerpt){return None;}
-    let here=url::Url::parse(&snapshot.origin).ok()?;
-    if !matches!(here.host_str(),Some("google.com"|"www.google.com")) ||
-        !matches!(here.scheme(),"http"|"https") ||
-        here.path()!="/" || here.query().is_some(){return None;}
+    if !crate::agent::policy::is_public_google_homepage(&snapshot.origin){return None;}
     let url=crate::agent::policy::requested_google_research_url(goal)?;
     Some(BrowserAction::Navigate{url:url.to_string()})
 }
