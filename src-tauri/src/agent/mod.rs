@@ -10,6 +10,7 @@ pub mod native_eval;
 pub mod vision;
 pub mod writer;
 pub mod semantic_core;
+pub mod action_intelligence;
 pub mod semantic_task;
 pub mod deliberation;
 pub mod recovery;
