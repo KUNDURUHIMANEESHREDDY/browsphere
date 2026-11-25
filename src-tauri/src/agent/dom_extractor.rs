@@ -210,6 +210,32 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   // Resolve only explicit, public retailer product URLs on known search
   // result pages. Opaque redirect tokens and all tracking parameters stay
   // private; never guess a destination or treat a snippet as evidence.
+  // A visible organic Google result heading is a narrowly scoped public
+  // outbound link. Ordinary cross-origin hrefs remain suppressed. Do not
+  // unwrap Google redirect URLs or read hidden/metadata-only destinations.
+  function publicGoogleResultLink(el) {{
+    if(el.tagName!=="A" || !isVisible(el) ||
+       !["google.com","www.google.com"].includes(location.hostname) ||
+       location.protocol!=="https:" || location.pathname!=="/search" ||
+       !new URL(location.href).searchParams.get("q") ||
+       el.closest('nav,header,footer,aside,form,[hidden],[aria-hidden="true"],#tads,#bottomads,[data-text-ad],.uEierd') ||
+       el.hasAttribute("download"))return null;
+    const headings=Array.from(el.querySelectorAll("h3")).filter(isVisible);
+    if(headings.length!==1 || (headings[0].innerText||"").trim().length<5)return null;
+    try{{
+      const u=new URL(el.href);
+      if(u.protocol!=="https:" || u.username || u.password || u.port ||
+         u.search || u.hash || u.pathname.length>200 ||
+         !u.hostname.includes(".") ||
+         /^(?:\d{{1,3}}\.){{3}}\d{{1,3}}$/.test(u.hostname) ||
+         /(?:^|\.)(?:localhost|local|test|internal|invalid|example|onion)$/.test(u.hostname) ||
+         ["www.google.com","google.com","googleadservices.com","www.googleadservices.com",
+          "googleads.g.doubleclick.net","www.google-analytics.com"].includes(u.hostname) ||
+         /(?:\/|^)(?:login|sign[-_]?in|auth|oauth|token|password|account|checkout|payment|consent|subscribe|download)(?:\/|$)/i.test(u.pathname))
+         return null;
+      return u.origin+u.pathname;
+    }}catch(_e){{return null;}}
+  }}
   function publicSearchProduct(el) {{
     if(!["https://www.google.com","https://search.brave.com"].includes(location.origin)||location.pathname!=="/search"||!isVisible(el)||el.closest('[aria-hidden="true"],[hidden]'))return null;
     try{{
@@ -441,7 +467,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
           href: current.tagName === "A"
             ? (() => {{
                 try {{
-                  const discovered=publicSearchProduct(current);
+                  const discovered=publicSearchProduct(current) || publicGoogleResultLink(current);
                   if(discovered)return discovered;
                   const address = new URL(current.href);
                   if(/^https?:$/.test(address.protocol)&&address.origin===location.origin&&/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(address.pathname))return sameOriginProduct(current);
