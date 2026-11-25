@@ -3435,6 +3435,8 @@ async fn run_browser_loop(
                                 crate::agent::evidence_verifier::check_google_query_navigation(url, &after)
                             } else if model_route.starts_with("music_discovery:delegated_public_song") {
                                 crate::agent::evidence_verifier::check_youtube_music_search_navigation(url,&after)
+                            } else if model_route.starts_with("first_video_result:observed_href_fallback") {
+                                crate::agent::evidence_verifier::check_youtube_observed_watch_navigation(url,&after)
                             } else if auth_recovery_attempts > 0 && crate::agent::recovery::navigation_confirmed(url, &after) {
                                 Ok(())
                             } else { check_navigation_result(url, &after) },
