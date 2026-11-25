@@ -655,23 +655,29 @@ fn observed_google_first_result(
         let Ok(url)=url::Url::parse(raw)else{continue};
         if url.scheme()!="https"||url.port().is_some()
             || !url.username().is_empty()||url.password().is_some()
+            || !matches!(url.host(),Some(url::Host::Domain(_)))
         {continue;}
         let Some(host)=url.host_str()else{continue};
         let host=host.to_ascii_lowercase();
         if !host.contains('.')
             || host.ends_with(".local")||host.ends_with(".test")
             || host.ends_with(".internal")||host.ends_with(".invalid")
-            || host.starts_with("google.")||host.contains(".google.")
+            || host.ends_with(".example")||host.ends_with(".onion")
+            || matches!(host.as_str(),"google.com"|"www.google.com"|
+                "accounts.google.com"|"support.google.com"|"policies.google.com")
+            || host.starts_with("google.")
+            || host=="googleadservices.com"||host.ends_with(".googleadservices.com")
+            || host=="doubleclick.net"||host.ends_with(".doubleclick.net")
             || host=="gstatic.com"||host.ends_with(".gstatic.com")
             || host=="youtube.com"||host.ends_with(".youtube.com")
-            || !seen.insert(url.to_string())
         {continue;}
         let label=node.label.to_ascii_lowercase();
         if ["sponsored","advertisement","sign in","log in","checkout",
             "purchase","subscribe","account","privacy policy","settings"]
             .iter().any(|term|label.contains(term)) {continue;}
         let combined=format!("{} {}",label,url.path().replace(['-','_','/']," ").to_ascii_lowercase());
-        if !topics.iter().any(|term|combined.contains(term)){continue;}
+        if !topics.iter().any(|term|combined.contains(term))
+            || !seen.insert(url.to_string()){continue;}
         return Some(BrowserAction::Click{
             node_id:node.node_id.clone(),
             element_label:node.label.clone(),
@@ -3729,17 +3735,33 @@ mod production_safety_tests {
         };
         page.interactive_nodes=vec![
             mk("chrome","Explore Google search settings","https://www.google.com/preferences"),
-            mk("ad","Sponsored note taking app advertisement","https://sponsor.example/notes"),
-            mk("unrelated","Weather forecast today","https://forecast.example/weather"),
-            mk("first","Best free note-taking apps for Windows — detailed review","https://public-notes.example/guide"),
-            mk("second","Windows note taking software comparison","https://another-notes.example/guide"),
+            mk("ad","Sponsored note taking app advertisement","https://sponsor.org/notes"),
+            mk("unrelated","Weather forecast today","https://forecast.org/weather"),
+            mk("first","Best free note-taking apps for Windows — detailed review","https://public-notes.org/guide"),
+            mk("second","Windows note taking software comparison","https://another-notes.org/guide"),
         ];
         let click=vec![BrowserAction::Click{node_id:"first".into(),
             element_label:"Best free note-taking apps for Windows — detailed review".into(),is_submit:false}];
         assert!(!result_opening_observed(goal,"https://www.google.com/",&page,&click));
         let mut opened=page.clone();
-        opened.origin="https://public-notes.example/guide".into();
+        opened.origin="https://public-notes.org/guide".into();
         assert!(result_opening_observed(goal,"https://www.google.com/",&opened,&click));
+        // Google products can be legitimate note-taking results, while
+        // Google search chrome and ad-click services remain excluded.
+        page.interactive_nodes.insert(3,mk(
+            "keep","Google Keep — Notes and lists across devices",
+            "https://keep.google.com/"));
+        let search_history=vec![BrowserAction::Navigate{url:search.clone()}];
+        assert!(matches!(observed_google_first_result(goal,&page,Specialist::Research,&search_history),
+            Some(BrowserAction::Click{node_id,..}) if node_id=="keep"));
+        page.interactive_nodes.remove(3);
+        // An earlier generic icon for the same URL must not hide its
+        // subsequently observed descriptive result title.
+        page.interactive_nodes.insert(3,mk("generic","Visit this website",
+            "https://public-notes.org/guide"));
+        assert!(matches!(observed_google_first_result(goal,&page,Specialist::Research,&search_history),
+            Some(BrowserAction::Click{node_id,..}) if node_id=="first"));
+        page.interactive_nodes.remove(3);
         let history=vec![BrowserAction::Navigate{url:search.clone()}];
         assert!(observed_google_first_result(goal,&page,Specialist::Research,&[]).is_none());
         let action=observed_google_first_result(goal,&page,Specialist::Research,&history).unwrap();
