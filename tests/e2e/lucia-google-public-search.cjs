@@ -73,6 +73,7 @@ async function main(){
      JSON.stringify(taskTab)+")");
    if(!/^[0-9a-f-]{36}$/i.test(String(runId||'')))throw Error('No native agent run ID');
    let queryVerified=false,resultClick=false,destination=null,actions=[],errors=[],runStatuses=[];
+   let loggedResultLinks=false;
    for(let i=0;i<110;i++){
      await sleep(1000);
      const events=await evaluate("window.__googleAcceptance.filter(e=>e.payload?.run_id==="+JSON.stringify(runId)+").slice(-160)");
@@ -86,6 +87,14 @@ async function main(){
        &&/verified|confirmed|success|ok/i.test(a.outcome||''));
      resultClick||=actions.some(a=>a.type==='click'&&a.route?.includes('google_research:first_observed_result')
        &&/verified|confirmed|success|ok/i.test(a.outcome||''));
+     if(queryVerified&&!loggedResultLinks){
+       loggedResultLinks=true;
+       try{
+         const resultLinks=await evaluate("(async()=>{const p=await window.__TAURI__.core.invoke('capture_tab_snapshot',{tabId:"+
+           JSON.stringify(taskTab)+"});return {origin:p?.origin||'',title:p?.title||'',nodes:(p?.interactive_nodes||[]).filter(n=>n.href).slice(0,60).map(n=>({label:(n.label||'').slice(0,110),tag:n.tag,role:n.role,host:(()=>{try{return new URL(n.href).hostname}catch{return ''}})(),path:(()=>{try{return new URL(n.href).pathname.slice(0,100)}catch{return ''}})(),sensitive:n.is_sensitive,submit:n.is_submit,viewport:n.bbox?.in_viewport,width:n.bbox?.width,height:n.bbox?.height}))}})()");
+         console.log('GOOGLE_OBSERVED_LINKS',JSON.stringify(resultLinks).slice(0,10500));
+       }catch(e){console.log('GOOGLE_OBSERVED_LINKS_ERROR',String(e).slice(0,150));}
+     }
      if(queryVerified){
        const snapshot=await evaluate("(async()=>{const p=await window.__TAURI__.core.invoke('capture_tab_snapshot',{tabId:"+
          JSON.stringify(taskTab)+"});return {origin:p?.origin||'',title:p?.title||'',chars:p?.text_excerpt?.length||0}})()");
