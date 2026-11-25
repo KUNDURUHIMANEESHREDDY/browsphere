@@ -151,9 +151,18 @@ impl Ledger{
     /// Mark verified only after the independent report returns actual supported
     /// findings. Each factual requirement needs its own distinct quote.
     pub fn validate_report(&mut self,goal:&str,sources:&[SourceEvidence],report:&ev::VerificationReport)->Result<(),String>{
-        self.refresh(goal,sources);self.can_review()?;
+        self.refresh(goal,sources);
         if !self.supported{return Ok(());}
         if report.status!="evidence_checked"{return Err("Independent report not verified".into());}
+        // A preliminary passage extractor may miss a valid, exact source quote
+        // later selected by the independent verifier. Fail closed for missing
+        // source/target/planning requirements, but adjudicate factual
+        // requirements against the actual report using the distinct-quote
+        // matching below, not against a preliminary candidate shortlist.
+        if self.requirements.iter().any(|r|r.state==State::Missing
+            && !matches!(&r.scope,Scope::Fact{..})){
+            self.can_review()?;
+        }
         if super::course_comparison::count(goal).is_some(){
             super::course_comparison::validate(goal,sources,report)?;
             for r in &mut self.requirements{r.state=State::Verified;}
