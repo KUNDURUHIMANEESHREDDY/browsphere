@@ -558,8 +558,13 @@ fn result_opening_observed(
     current: &DomSnapshot,
     successful_steps: &[BrowserAction],
 ) -> bool {
+    // Google's results page is not proof that a clicked result opened.
+    let on_google_results=crate::agent::policy::requested_google_research_url(goal).is_some()
+        && url::Url::parse(&current.origin).ok().is_some_and(|u|
+            matches!(u.host_str(),Some("google.com"|"www.google.com"))&&u.path()=="/search");
     !requested_open_result(goal) || (
-        current.origin != initial_origin
+        !on_google_results
+            && current.origin != initial_origin
             && current.origin.starts_with("http")
             && successful_steps.iter().any(|step| matches!(step,
                 BrowserAction::Click { is_submit: false, .. }))
@@ -3729,6 +3734,12 @@ mod production_safety_tests {
             mk("first","Best free note-taking apps for Windows — detailed review","https://public-notes.example/guide"),
             mk("second","Windows note taking software comparison","https://another-notes.example/guide"),
         ];
+        let click=vec![BrowserAction::Click{node_id:"first".into(),
+            element_label:"Best free note-taking apps for Windows — detailed review".into(),is_submit:false}];
+        assert!(!result_opening_observed(goal,"https://www.google.com/",&page,&click));
+        let mut opened=page.clone();
+        opened.origin="https://public-notes.example/guide".into();
+        assert!(result_opening_observed(goal,"https://www.google.com/",&opened,&click));
         let history=vec![BrowserAction::Navigate{url:search.clone()}];
         assert!(observed_google_first_result(goal,&page,Specialist::Research,&[]).is_none());
         let action=observed_google_first_result(goal,&page,Specialist::Research,&history).unwrap();
