@@ -1023,6 +1023,42 @@ pub fn check_named_search_transition(
 
 /// A deterministic verifier is more reliable than an LLM quote-generation pass
 /// for the narrow task of opening an explicitly named website.
+/// Validate the article requested by the user using a fresh, matching
+/// native WebView snapshot and the independent saved source observation.
+/// A successful navigation dispatch alone does not prove the article exists.
+pub fn verify_wikipedia_article(
+    goal:&str, after:&DomSnapshot, sources:&[SourceEvidence],
+)->Result<VerificationReport,String>{
+    let target=super::policy::requested_wikipedia_article_url(goal)
+        .ok_or("No explicit Wikipedia article request")?;
+    check_navigation_result(target.as_str(),after)?;
+    let subject=target.path_segments().and_then(|mut path|path.next_back())
+        .ok_or("Missing Wikipedia article slug")?.replace('_'," ");
+    let title=after.title.trim();
+    let title_lower=title.to_ascii_lowercase();
+    let expected=subject.to_ascii_lowercase();
+    if !title_lower.starts_with(&expected)
+        || !title_lower.contains("wikipedia")
+        || !title_lower.get(expected.len()..).is_some_and(|rest|
+            rest.starts_with(" - ")||rest.starts_with(" — ")||rest.starts_with(" – "))
+        || after.text_excerpt.trim().chars().count()<80
+    {return Err("Live Wikipedia page title and article content were not verified".into());}
+    if !sources.iter().any(|s|s.url==after.origin && s.title==after.title
+        && s.excerpt.trim().chars().count()>=80){
+        return Err("No independent saved live Wikipedia article observation".into());
+    }
+    Ok(VerificationReport{
+        status:"evidence_checked",
+        summary:format!("Wikipedia article title: {title}. Source URL: {}",after.origin),
+        findings:vec![GroundedFinding{
+            claim:format!("The requested {subject} article was opened on Wikipedia"),
+            url:after.origin.clone(),
+            quote:format!("Observed document title: {title}")
+        }],
+        limitations:"Confirmed the native article URL, document title and readable page; not an independent fact-check of article contents.".into()
+    })
+}
+
 pub fn verify_direct_navigation(
     requested: &str, after: &DomSnapshot,
 ) -> Result<VerificationReport, String> {
@@ -1299,6 +1335,28 @@ mod tests {
         assert!(check_navigation_result("https://wikipedia.org/", &empty).is_err());
     }
 
+    #[test]
+    fn wikipedia_article_report_requires_actual_page_and_saved_native_evidence(){
+        let goal="Open Wikipedia, find the Ada Lovelace article, and report its title and source URL. Verify the final webpage before finishing.";
+        let page=DomSnapshot{
+            structure:Default::default(),
+            origin:"https://en.wikipedia.org/wiki/Ada_Lovelace".into(),
+            title:"Ada Lovelace - Wikipedia".into(),
+            text_excerpt:"Augusta Ada King, Countess of Lovelace, was an English mathematician and writer known for her work on Charles Babbage's proposed Analytical Engine.".into(),
+            interactive_nodes:vec![],
+        };
+        let evidence=vec![SourceEvidence{url:page.origin.clone(),title:page.title.clone(),excerpt:page.text_excerpt.clone()}];
+        let report=verify_wikipedia_article(goal,&page,&evidence).unwrap();
+        assert!(report.summary.contains("Ada Lovelace - Wikipedia"));
+        assert!(report.summary.contains("https://en.wikipedia.org/wiki/Ada_Lovelace"));
+        assert!(verify_wikipedia_article(goal,&page,&[]).is_err());
+        let wrong=DomSnapshot{title:"Other Person - Wikipedia".into(),..page.clone()};
+        assert!(verify_wikipedia_article(goal,&wrong,&evidence).is_err());
+        let search=DomSnapshot{origin:"https://en.wikipedia.org/w/index.php?search=Ada+Lovelace".into(),..page.clone()};
+        assert!(verify_wikipedia_article(goal,&search,&evidence).is_err());
+        let empty=DomSnapshot{text_excerpt:"Loading".into(),..page};
+        assert!(verify_wikipedia_article(goal,&empty,&evidence).is_err());
+    }
     #[test]
     fn named_search_result_title_requires_new_matching_article_and_source() {
         let goal = "On this documentation site, search for Ada Lovelace and open the corresponding article. Then report its page title.";
