@@ -106,6 +106,31 @@ pub fn classify(p:&DomSnapshot)->PageProfile{
     let records=match kind{TransportResults=>records,ProductListing=>structure.priced_cards as usize,SearchResults=>usize::from(structure.result_links).max(links.min(120)),_=>0};
     PageProfile{kind,signals,records,readable}
 }
+/// Bounded recovery objectives selected from native page structure.
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize)]
+#[serde(rename_all="snake_case")]
+pub enum RecoveryStrategy{ChooseOption,OpenResult,RefineSearch,InspectSource,InspectControls}
+impl RecoveryStrategy{
+    pub fn objective(self)->&'static str{match self{
+        Self::ChooseOption=>"Resolve the observed option list using a relevant choice",
+        Self::OpenResult=>"Inspect and open a different relevant observed result",
+        Self::RefineSearch=>"Review observed search controls and refine only the requested query",
+        Self::InspectSource=>"Find missing relevant evidence in the current source or a grounded link",
+        Self::InspectControls=>"Inspect fresh controls and choose a distinct relevant action",
+    }}
+    pub fn from_page(page:&DomSnapshot)->Option<Self>{
+        use PageKind::*;
+        match classify(page).kind{
+            Blocked|Dialog|Loading=>None,
+            Autocomplete=>Some(Self::ChooseOption),
+            SearchResults|ProductListing|TransportResults=>Some(Self::OpenResult),
+            SearchForm|EmptyResults=>Some(Self::RefineSearch),
+            Documentation|Article|ProductDetail=>Some(Self::InspectSource),
+            Unknown=>Some(Self::InspectControls),
+        }
+    }
+}
+
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum Transition{Blocked,Loading,ResultsArrived,ContentArrived,DialogResolved,OptionResolved,ChangedPage,Unchanged}
 pub fn transition(before:&DomSnapshot,after:&DomSnapshot)->Transition{

@@ -13,7 +13,9 @@ pub fn read_only(goal:&str)->bool{
     let g=goal.split_whitespace().filter(|w|!w.starts_with("https://")&&!w.starts_with("http://"))
         .collect::<Vec<_>>().join(" ").to_lowercase();
     ["report","find ","search ","research","look up","read ","explain","compare","summarize"].iter().any(|s|g.contains(s))
-        && !super::browser_skills::phrase(&g,"book")
+        && (!super::browser_skills::phrase(&g,"book")||
+            (super::evidence_verifier::requested_named_link_title(goal).is_some()&&
+             !super::browser_skills::phrase(super::evidence_verifier::title_task_action_text(&g),"book")))
         && !["buy ","pay ","purchase","register","sign up","submit","send ","publish","write ","draft ","upload","download","delete","change ","update ","play ","log in","sign in","account","password","credential","consent","reserve","transfer","checkout","my ","private"].iter().any(|s|g.contains(s))
 }
 /// Track explicit public source addresses in a bounded read-only comparison.

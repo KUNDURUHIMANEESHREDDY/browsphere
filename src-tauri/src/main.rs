@@ -2045,6 +2045,12 @@ async fn route_lucia_intent(
     // A clear, explicit user navigation command is not ambiguous intent.
     // Do not turn "open youtube" into chat when the configured intent model
     // is unavailable, returns malformed JSON, or classifies it incorrectly.
+    if agent::structured_data::requested(&message).is_some(){
+        return Ok(agent::intent_router::LuciaIntent{
+            mode:agent::intent_router::LuciaMode::BrowserTask,
+            reason:"Explicit native structured data extraction".into(),
+        });
+    }
     if agent::checkpoint::requested(&message) {
         return Ok(agent::intent_router::LuciaIntent {
             mode:agent::intent_router::LuciaMode::BrowserTask,

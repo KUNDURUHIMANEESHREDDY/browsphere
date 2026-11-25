@@ -156,8 +156,9 @@ pub fn named_link(goal:&str,page:&DomSnapshot)->Option<(BrowserAction,String)> {
     let label=super::evidence_verifier::requested_named_link_title(goal)?;
     let g=normalized(goal);
     if !g.contains("report the page title") && !g.contains("report its page title"){return None;}
-    if ["buy ","purchase","checkout","pay ","book ","submit","register","sign up","send ","delete","download","upload","compare","extract","summarize","account","consent","subscribe"," and then "]
-        .iter().any(|s|g.contains(s)){return None;}
+    if ["buy ","purchase","checkout","pay ","submit","register","sign up","send ","delete","download","upload","compare","extract","summarize","account","consent","subscribe"," and then "]
+        .iter().any(|s|g.contains(s))||
+        super::browser_skills::phrase(super::evidence_verifier::title_task_action_text(&g),"book"){return None;}
     if page.text_excerpt.starts_with("Active dialog:"){return None;}
     let source=url::Url::parse(&page.origin).ok()?;
     let mut candidates=page.interactive_nodes.iter().filter_map(|n|{
@@ -193,10 +194,14 @@ pub fn named_result(goal:&str,page:&DomSnapshot)->Option<BrowserAction>{
         super::evidence_verifier::requested_named_result_title(goal)
     }else{super::deliberation::lookup_subject(goal)}?);
     let origin=url::Url::parse(&page.origin).ok()?;
-    unique(page.interactive_nodes.iter().filter(|n|{
-        safe(n)&&(n.tag=="a"||n.role=="link"||n.role=="option")&&normalized(&n.label)==wanted&&
-        n.href.as_ref().and_then(|s|url::Url::parse(s).ok()).is_some_and(|u|u.origin()==origin.origin()&&u!=origin&&u.username().is_empty()&&u.password().is_none())
-    })).map(click)
+    let mut matches=page.interactive_nodes.iter().filter_map(|n|{
+        if !safe(n)||!(n.tag=="a"||n.role=="link"||n.role=="option")||normalized(&n.label)!=wanted{return None;}
+        let u=url::Url::parse(n.href.as_deref()?).ok()?;
+        (u.origin()==origin.origin()&&u!=origin&&u.username().is_empty()&&u.password().is_none()).then_some((n,u))
+    });
+    let (first,target)=matches.next()?;
+    if matches.any(|(_,u)|u!=target){return None;}
+    Some(click(first))
 }
 pub fn route_field<'a>(page:&'a DomSnapshot,index:usize)->Option<&'a DomNodeSummary>{
     let directions=if index==0{["from","origin","departure"]}else{["to","destination","arrival"]};

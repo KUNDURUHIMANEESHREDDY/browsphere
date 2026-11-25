@@ -959,10 +959,22 @@ pub async fn run_react_loop(
     voice_mode: bool,
     private_mode: bool,
 ) -> anyhow::Result<String> {
-    use crate::agent::adaptive_graph::{WorkflowGraph,Kind as GraphKind,Receipt as GraphReceipt};
+    use crate::agent::adaptive_graph::{WorkflowGraph,Receipt as GraphReceipt};
     let checkpoint_path=crate::resolve_data_dir().join("workflow-checkpoints.sqlite3");
     let mut checkpoint_store=if private_mode{None}else{crate::agent::checkpoint::Store::open(&checkpoint_path).ok()};
-    let mut checkpoint_proof:Option<crate::agent::checkpoint::ResumeProof>=None;
+    let checkpoint_proof:Option<crate::agent::checkpoint::ResumeProof>=None;
+    if let Some(mode)=crate::agent::structured_data::requested(&goal){
+        anyhow::ensure!(!private_mode,"Structured public extraction is disabled in Private Browsing");
+        crate::agent::workflow::await_resume(&cancel,pause_rx).await?;
+        let live=request_live_dom_snapshot(&app,&webview_label,&pending_snapshots,2500).await.context("Fresh structured extraction source unavailable")?;
+        let config=router.lock().await.get_config();
+        let report=crate::agent::structured_data::run(&app,&webview_label,&live,mode,&config,cancel.clone()).await?;
+        if cancel.is_cancelled(){return Ok("cancelled".into());}
+        let _=app.emit("agent:verification_report",serde_json::json!({"run_id":run_id,"report":report}));
+        if report.status!="evidence_checked"{return Ok("unverified".into());}
+        let _=app.emit("agent:run_completed",report.summary);
+        return Ok("completed".into());
+    }
     if crate::agent::checkpoint::requested(&goal){
         anyhow::ensure!(!private_mode,"Checkpoint recovery is disabled in Private Browsing");
         let (id,original)=crate::agent::checkpoint::parse(&goal)?;
@@ -1014,22 +1026,73 @@ pub async fn run_react_loop(
         let plan=crate::agent::workflow::Plan::parse(&goal)?;
         let cfg=router.lock().await.get_config();
         let model=if cfg.supervisor_model.trim().is_empty(){&cfg.ollama_model}else{&cfg.supervisor_model};
-        let mut observe:Box<crate::agent::workflow::BrowserObserver<'_>>=Box::new(|url:String,title:String|{
+        let child_pause=pause_rx.clone();
+        let mut observe:Box<crate::agent::workflow::BrowserObserver<'_>>=Box::new(|url:String,title:String,excerpt:Option<String>,link:Option<crate::agent::workflow::LinkRequest>,task:Option<crate::agent::workflow::BrowserTaskRequest>|{
             let app=app.clone();let label=webview_label.clone();let current=active_url.clone();let snapshots=pending_snapshots.clone();
             let actions=pending_action_results.clone();let itp=itp.clone();let downloads=downloads.clone();let db=db.clone();
             let approvals=approval_tx.clone();let cancel=cancel.clone();let domains=allowed_domains.clone();
+            let router=router.clone();let creds=creds.clone();let trace=trace_tx.clone();let mut child_pause=child_pause.clone();
             Box::pin(async move{
-                let action=BrowserAction::Navigate{url:url.clone()};
-                let origin=current.lock().await.clone();
-                let (risk,decision)=evaluate_policy(&origin,&action,&domains);
-                let(ok,_)=execute_gated_action(&app,run_id,Uuid::new_v4(),&action,&risk,&decision,&label,&current,&actions,&itp,&downloads,&db,&approvals,&cancel).await;
-                anyhow::ensure!(ok,"Browser navigation denied or failed");
+                if let Some(task)=task.as_ref(){
+                    let mut live=request_live_dom_snapshot(&app,&label,&snapshots,1800).await.context("Fresh browser specialist source unavailable")?;
+                    anyhow::ensure!(super::multimodal_perception::independent_discovery_allowed(&live),"Intermediate browser specialist requires a public observed source");
+                    if let Some(entry)=task.entry_url.as_ref(){
+                        anyhow::ensure!(crate::agent::workflow::workflow_public_url(entry)?.origin()==crate::agent::workflow::workflow_public_url(&url)?.origin(),"Browser entry outside approved destination origin");
+                        if live.origin!=*entry{
+                            let action=BrowserAction::Navigate{url:entry.clone()};
+                            let (risk,decision)=evaluate_policy(&live.origin,&action,&domains);
+                            crate::agent::workflow::await_resume(&cancel,&mut child_pause).await?;
+                            let (ok,_)=execute_gated_action(&app,run_id,Uuid::new_v4(),&action,&risk,&decision,&label,&current,&actions,&itp,&downloads,&db,&approvals,&cancel).await;
+                            anyhow::ensure!(ok&&!cancel.is_cancelled(),"Browser specialist entry denied or failed; dependent actions blocked");
+                            let mut observed=None;
+                            for _ in 0..12{
+                                tokio::select!{_=cancel.cancelled()=>anyhow::bail!("Browser specialist entry cancelled"),_=tokio::time::sleep(std::time::Duration::from_millis(500))=>{}}
+                                if let Some(page)=request_live_dom_snapshot(&app,&label,&snapshots,1800).await{
+                                    if page.origin==*entry&&super::multimodal_perception::independent_discovery_allowed(&page){observed=Some(page);break;}
+                                }
+                            }
+                            live=observed.context("Exact public entry destination not verified")?;
+                            *current.lock().await=live.origin.clone();
+                            let _=app.emit("agent:workflow_browser_step",serde_json::json!({"run_id":run_id,"status":"entry_verified"}));
+                        }
+                    }
+                    let scope=crate::agent::workflow::BrowserScope::new(&live.origin,&url)?;
+                    anyhow::ensure!(task.dynamic_tools.iter().all(|t|scope.contains(&t.trigger_url)),"Dynamic MCP trigger outside approved browser scope");
+                    anyhow::ensure!(super::multimodal_perception::independent_discovery_allowed(&live),"Intermediate browser specialist requires a public observed source");
+                    let _=app.emit("agent:workflow_browser_step",serde_json::json!({"run_id":run_id,"status":"specialist_started"}));
+                    let status=run_browser_loop(app.clone(),run_id,task.task.clone(),live,domains.clone(),max_steps.min(20),cancel.clone(),&mut child_pause,router,creds,itp.clone(),downloads.clone(),db.clone(),label.clone(),current.clone(),snapshots.clone(),actions.clone(),approvals.clone(),trace,false,false,false,None,None,Some(scope),task.dynamic_tools.clone(),task.adaptive_lookup.clone()).await?;
+                    anyhow::ensure!(status=="completed"&&!cancel.is_cancelled(),"Intermediate browser specialist did not independently complete");
+                }else if let Some(link)=link.as_ref(){
+                    let page=request_live_dom_snapshot(&app,&label,&snapshots,1800).await.ok_or_else(||anyhow::anyhow!("Fresh workflow browser observation unavailable"))?;
+                    let action=crate::agent::workflow::bind_workflow_link(&page,link,&url)?;
+                    let (_,decision)=evaluate_policy(&page.origin,&action,&domains);
+                    let (_,destination_decision)=evaluate_policy(&page.origin,&BrowserAction::Navigate{url:url.clone()},&domains);
+                    anyhow::ensure!(matches!(decision,PolicyDecision::Allow)&&matches!(destination_decision,PolicyDecision::Allow)&&!cancel.is_cancelled(),"Intermediate browser link not authorized");
+                    let BrowserAction::Click{node_id,element_label,..}=action else{unreachable!()};
+                    let dispatched=crate::agent::action_executor::execute_workflow_link(&app,&label,&node_id,&link.source_url,&url,&element_label).await;
+                    anyhow::ensure!(dispatched.success,"Intermediate browser link dispatch not acknowledged; dependent actions blocked");
+                    let _=app.emit("agent:workflow_browser_step",serde_json::json!({"run_id":run_id,"status":"dispatched"}));
+                }else if !request_live_dom_snapshot(&app,&label,&snapshots,1800).await.is_some_and(|page|page.origin==url){
+                    let action=BrowserAction::Navigate{url:url.clone()};
+                    let origin=current.lock().await.clone();
+                    let (risk,decision)=evaluate_policy(&origin,&action,&domains);
+                    let(ok,_)=execute_gated_action(&app,run_id,Uuid::new_v4(),&action,&risk,&decision,&label,&current,&actions,&itp,&downloads,&db,&approvals,&cancel).await;
+                    anyhow::ensure!(ok,"Browser navigation denied or failed");
+                }
                 for _ in 0..12{
                     tokio::select!{_ = cancel.cancelled()=>anyhow::bail!("Browser observation cancelled"),_ = tokio::time::sleep(std::time::Duration::from_millis(500))=>{}}
                     if let Some(page)=request_live_dom_snapshot(&app,&label,&snapshots,1800).await{
-                        if check_navigation_result(&url,&page).is_ok()&&page.title.trim()==title.trim(){
+                        if check_navigation_result(&url,&page).is_ok()&&page.title.trim()==title.trim()
+                            &&((link.is_none()&&task.is_none())||page.origin==url&&super::multimodal_perception::independent_discovery_allowed(&page)){
+                            if let Some(expected)=excerpt.as_deref(){
+                                // Only explicitly requested public text is allowed to leave
+                                // this browser step; deny account, blocked and sensitive pages.
+                                if !super::multimodal_perception::independent_discovery_allowed(&page)||!page.text_excerpt.contains(expected){continue;}
+                            }
                             *current.lock().await=page.origin;
-                            return Ok(());
+                            if link.is_some(){let _=app.emit("agent:workflow_browser_step",serde_json::json!({"run_id":run_id,"status":"verified"}));}
+                            if task.is_some(){let _=app.emit("agent:workflow_browser_step",serde_json::json!({"run_id":run_id,"status":"specialist_verified"}));}
+                            return Ok(excerpt.clone());
                         }
                     }
                 }
@@ -1116,6 +1179,33 @@ pub async fn run_react_loop(
         let _ = app.emit("agent:run_completed", summary);
         return Ok("completed".into());
     }
+    run_browser_loop(app,run_id,goal,initial_snapshot,allowed_domains,max_steps,cancel,pause_rx,router,creds,itp,downloads,db,webview_label,active_url,pending_snapshots,pending_action_results,approval_tx,trace_tx,allow_learning,voice_mode,private_mode,inherited_graph,inherited_checks,None,vec![],None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_browser_loop(
+    app:tauri::AppHandle,run_id:Uuid,goal:String,initial_snapshot:DomSnapshot,allowed_domains:Vec<String>,
+    max_steps:u32,cancel:CancellationToken,pause_rx:&mut watch::Receiver<bool>,router:Arc<Mutex<ModelRouter>>,
+    creds:Arc<CredentialStore>,itp:Arc<ItpEngine>,downloads:Arc<DownloadManager>,db:Arc<Mutex<BrowserDatabase>>,
+    webview_label:String,active_url:Arc<Mutex<String>>,pending_snapshots:Arc<Mutex<HashMap<Uuid,oneshot::Sender<DomSnapshot>>>>,
+    pending_action_results:Arc<Mutex<HashMap<Uuid,oneshot::Sender<ActionResult>>>>,approval_tx:mpsc::Sender<ApprovalRequest>,
+    trace_tx:mpsc::Sender<TraceEntry>,allow_learning:bool,voice_mode:bool,private_mode:bool,
+    inherited_graph:Option<(crate::agent::adaptive_graph::WorkflowGraph,usize)>,inherited_checks:Option<String>,child_scope:Option<crate::agent::workflow::BrowserScope>,dynamic_tools:Vec<crate::agent::workflow::DynamicTool>,adaptive_lookup:Option<crate::agent::workflow::AdaptiveLookup>,
+)->anyhow::Result<String>{
+    use crate::agent::adaptive_graph::{WorkflowGraph,Kind as GraphKind,Receipt as GraphReceipt};
+    let is_child=child_scope.is_some();
+    let mut dynamic_completed=std::collections::BTreeSet::new();
+    let mut adaptive_completed=false;let mut adaptive_declined=std::collections::BTreeSet::new();
+    let mut checkpoint_store=if private_mode||is_child{None}else{crate::agent::checkpoint::Store::open(&crate::resolve_data_dir().join("workflow-checkpoints.sqlite3")).ok()};
+    let mut checkpoint_proof:Option<crate::agent::checkpoint::ResumeProof>=None;
+    macro_rules! publish_graph{($g:expr)=>{
+        {let current_graph=$g;
+         if !is_child{
+             let saved=checkpoint_store.as_mut().is_some_and(|store|store.save(run_id,current_graph,checkpoint_proof.as_ref()).is_ok());
+             let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":current_graph,"checkpoint_saved":saved,"checkpoint_resumable":saved&&checkpoint_proof.is_some()}));
+         }
+        }
+    }}
     let initial_origin = initial_snapshot.origin.clone();
     let mut snapshot = initial_snapshot;
     let mut seen_signatures: HashSet<String> = HashSet::new();
@@ -1181,6 +1271,7 @@ pub async fn run_react_loop(
         || is_simple_named_title_task(&goal)
         || intelligence.managed()
         || crate::agent::execution_intelligence::current_reference_subject(&goal).is_some()
+        || requested_named_link_title(&goal).is_some()
         || crate::agent::prerequisites::named_link(&goal,&snapshot).is_some()
         || crate::agent::prerequisites::route_values(&goal).is_some()
         || crate::agent::prerequisites::filter_constraints(&goal).is_some()
@@ -1200,7 +1291,8 @@ pub async fn run_react_loop(
         };
         match result{
             Ok(Ok(plan))=>plan,
-            _ if crate::agent::deliberation::read_only(&goal)=>{
+            _ if crate::agent::deliberation::read_only(&goal)&&
+                !crate::agent::semantic_task::ExplicitContract::extract(&goal).required()=>{
                 let _=app.emit("agent:orchestration",serde_json::json!({"run_id":run_id,"step_index":0,"page_changed":false,"stalled":true,"fallback":"read_only_plan"}));
                 plan_task(&goal)
             }
@@ -1209,6 +1301,7 @@ pub async fn run_react_loop(
         }
     };
     let mut orchestrator = Orchestrator::from_plan(model_plan);
+    orchestrator.set_starting_origin(&initial_origin);
     let kinds:Vec<_>=orchestrator.plan.stages.iter().map(|s|if s.specialist==Specialist::Verification{GraphKind::Verification}else{GraphKind::Browser}).collect();
     let (mut graph,mut stage_nodes)=if let Some((mut g,id))=inherited_graph{
         let ids=g.expand_handoff(id,&kinds)?;(g,ids)
@@ -1220,6 +1313,7 @@ pub async fn run_react_loop(
     let mut recovery_node:Option<usize>=None;
     let mut verification_recoveries=0u8;
     let mut recovery_observation:Option<usize>=None;
+    let mut recovery_strategy:Option<crate::agent::page_understanding::RecoveryStrategy>=None;
     publish_graph!(&graph);
     orchestrator.begin();
     let _ = app.emit("agent:plan", serde_json::json!({
@@ -1405,15 +1499,84 @@ pub async fn run_react_loop(
         };
         observation_failures = 0;
         snapshot = live;
+        if let Some(scope)=child_scope.as_ref(){
+            anyhow::ensure!(scope.contains(&snapshot.origin),"Browser specialist left its approved public origins");
+            if !super::multimodal_perception::independent_discovery_allowed(&snapshot){
+                if snapshot.structure.loading{
+                    tokio::select!{_=cancel.cancelled()=>return Ok("cancelled".into()),_=tokio::time::sleep(std::time::Duration::from_millis(400))=>{}}
+                    continue;
+                }
+                anyhow::bail!("Browser specialist encountered restricted or unobservable content");
+            }
+        }
         orchestrator.observe(&snapshot);
         if let Some(id)=recovery_observation.take(){
             graph.complete(id,GraphReceipt::NativeObservation)?;
             graph.start(recovery_node.context("Missing recovery action node")?)?;
             publish_graph!(&graph);
         }
+        // Explicitly authorized conditional lookups are inserted only upon
+        // fresh native observation, and never on page/model instructions.
+        if is_child{
+            let pending=dynamic_tools.iter().enumerate().find(|(i,t)|!dynamic_completed.contains(i)&&t.matches(&snapshot));
+            if let Some((index,tool))=pending{
+                let parent=stage_nodes[orchestrator.current];
+                let id=graph.insert_tool_prerequisite(parent)?;
+                let _=app.emit("agent:workflow_dynamic_tool",serde_json::json!({"run_id":run_id,"status":"inserted","index":index,"child_graph":&graph}));
+                let cfg=router.lock().await.get_config();
+                let model=if cfg.supervisor_model.trim().is_empty(){&cfg.ollama_model}else{&cfg.supervisor_model};
+                let result=tool.dispatch(&crate::resolve_data_dir().join("mcp-servers.json"),&cfg.ollama_url,model,cancel.clone(),pause_rx).await;
+                if let Err(e)=result{
+                    graph.fail(id);graph.stop(cancel.is_cancelled());
+                    let _=app.emit("agent:workflow_dynamic_tool",serde_json::json!({"run_id":run_id,"status":"failed","index":index,"child_graph":&graph}));
+                    return Err(e.context("Dynamic MCP verification failed; browser specialist stopped"));
+                }
+                graph.complete(id,GraphReceipt::ToolCheck)?;
+                graph.start(parent)?;
+                dynamic_completed.insert(index);
+                let _=app.emit("agent:workflow_dynamic_tool",serde_json::json!({"run_id":run_id,"status":"verified","index":index,"child_graph":&graph}));
+                // Reobserve rather than continuing with pre-tool page data.
+                continue;
+            }
+        }
+        // A local model may generate an authorized lookup objective from the
+        // explicit delegation envelope. Fresh public evidence gates proposal
+        // and dispatch, and no unchecked model claim can finish the graph.
+        if let Some(policy)=adaptive_lookup.as_ref().filter(|_|is_child&&!adaptive_completed&&adaptive_declined.len()<3){
+            if policy.eligible(&snapshot)&&!adaptive_declined.contains(&snapshot.origin){
+                let cfg=router.lock().await.get_config();
+                let model=if cfg.supervisor_model.trim().is_empty(){&cfg.ollama_model}else{&cfg.supervisor_model};
+                let proposal=match policy.propose(&snapshot,&cfg.ollama_url,model,cancel.clone()).await{
+                    Ok(p)=>p,
+                    Err(e)=>{
+                        let status=if cancel.is_cancelled(){"adaptive_cancelled"}else if e.to_string().contains("strict validation"){"adaptive_invalid_proposal"}else{"adaptive_inference_failed"};
+                        let _=app.emit("agent:workflow_dynamic_tool",serde_json::json!({"run_id":run_id,"status":status,"index":dynamic_tools.len()}));
+                        return Err(e.context("Adaptive proposal unavailable; no tool dispatched"));
+                    }
+                };
+                if let Some(task)=proposal{
+                    let live=request_live_dom_snapshot(&app,&webview_label,&pending_snapshots,1800).await.context("Adaptive lookup observation unavailable after inference")?;
+                    anyhow::ensure!(live.origin==snapshot.origin&&policy.proposal_still_grounded(&task,&live)&&!cancel.is_cancelled(),"Adaptive lookup evidence changed during proposal");
+                    let parent=stage_nodes[orchestrator.current];
+                    let id=graph.insert_tool_prerequisite(parent)?;
+                    let _=app.emit("agent:workflow_dynamic_tool",serde_json::json!({"run_id":run_id,"status":"adaptive_inserted","index":dynamic_tools.len(),"child_graph":&graph}));
+                    if let Err(e)=policy.dispatch(&task,&crate::resolve_data_dir().join("mcp-servers.json"),&cfg.ollama_url,model,cancel.clone(),pause_rx).await{
+                        graph.fail(id);graph.stop(cancel.is_cancelled());
+                        let _=app.emit("agent:workflow_dynamic_tool",serde_json::json!({"run_id":run_id,"status":"adaptive_failed","index":dynamic_tools.len(),"child_graph":&graph}));
+                        return Err(e.context("Adaptive MCP verification failed; browser specialist stopped"));
+                    }
+                    graph.complete(id,GraphReceipt::ToolCheck)?;graph.start(parent)?;
+                    adaptive_completed=true;
+                    let _=app.emit("agent:workflow_dynamic_tool",serde_json::json!({"run_id":run_id,"status":"adaptive_verified","index":dynamic_tools.len(),"child_graph":&graph}));
+                    continue;
+                }
+                adaptive_declined.insert(snapshot.origin.clone());
+                let _=app.emit("agent:workflow_dynamic_tool",serde_json::json!({"run_id":run_id,"status":"adaptive_declined","index":dynamic_tools.len()}));
+            }
+        }
         // A dedicated, local writer handles explicit drafting in the current
         // page. Native binding, policy, and readback remain mandatory.
-        if graph.completed()==0 && recovery_node.is_none() && graph.nodes.len()==stage_nodes.len() && crate::agent::writer::requested(&goal) {
+        if !is_child && graph.completed()==0 && recovery_node.is_none() && graph.nodes.len()==stage_nodes.len() && crate::agent::writer::requested(&goal) {
             let cfg = router.lock().await.get_config();
             let local_route = router.lock().await.select_backend(&snapshot.origin) == "ollama";
             if local_route && !cfg.writer_model.trim().is_empty() {
@@ -1636,7 +1799,7 @@ pub async fn run_react_loop(
         let current_reference_ready=current_reference&&snapshot.origin==initial_origin&&
             crate::agent::execution_intelligence::current_reference_observed(&goal,&snapshot,&orchestrator.evidence);
         let intelligence_next=if let Some(c)=catalog.as_mut().filter(|_|orchestrator.specialist()!=Specialist::Verification){
-            if freshly_observed&&!private_mode{
+            if freshly_observed&&!private_mode&&!is_child{
                 if let Some((site,host,query))=c.discovery_request(&snapshot){
                     let path=crate::resolve_data_dir().join("mcp-servers.json");
                     let _=app.emit("agent:activity",serde_json::json!({"run_id":run_id,"phase":"observing","step_index":step}));
@@ -1810,7 +1973,12 @@ pub async fn run_react_loop(
         }
         // Keep every preferred grounded visual control inside the compact
         // action model's native candidate list, not only in a prose hint.
-        let mut model_controls=controls_for_model(&snapshot,&goal);
+        let semantic_focus=orchestrator.semantic_focus();
+        let semantic_hint=orchestrator.semantic_hint();
+        let mut model_controls=if crate::agent::deliberation::read_only(&goal)&&!intelligence.managed()&&skill.is_none()&&catalog.is_none()&&
+            requested_named_result_title(&goal).is_none()&&orchestrator.plan.stages.len()>2{
+            crate::agent::semantic_core::rank_for_stage(&snapshot,&goal,&semantic_focus,36)
+        }else{controls_for_model(&snapshot,&goal)};
         for id in visual_ids.iter().rev(){
             if let Some(pos)=model_controls.iter().position(|n|&n.node_id==id){
                 let n=model_controls.remove(pos);model_controls.insert(0,n);
@@ -1849,6 +2017,7 @@ pub async fn run_react_loop(
             recovery_directive = crate::agent::recovery::RESULTS_HINT;
         }
         route_ledger.observe(orchestrator.current,&snapshot.origin);
+        replacement.set_stage(orchestrator.current);
         let changed=run_core.observe(&snapshot,orchestrator.current);
         if freshly_observed {objectives.observe(&orchestrator.evidence);}
         if changed {advisory=None;}
@@ -1860,7 +2029,8 @@ pub async fn run_react_loop(
             !(confirmed_named_search_query&&named_search_enter_attempted&&crate::agent::deliberation::lookup_landed(&goal,&initial_origin,&snapshot)) &&
             !objectives.active() &&
             review_budget>0 && (step as u32).saturating_sub(last_review_step)>=2 &&
-            (run_core.escalate() || (changed && !recorded_steps.is_empty() && crate::agent::deliberation::read_only(&goal))) &&
+            (run_core.escalate() || (changed && !recorded_steps.is_empty() && crate::agent::deliberation::read_only(&goal)
+                && crate::agent::semantic_core::navigation_relevance(&goal,&orchestrator.stage().objective,&snapshot)>0)) &&
             router.lock().await.select_backend(&snapshot.origin)=="ollama" &&
             !matches!(native_assessment.phase,crate::agent::deliberation::Phase::Blocked|crate::agent::deliberation::Phase::ResolveDialog) {
             review_budget-=1;last_review_step=step as u32;
@@ -1893,7 +2063,44 @@ pub async fn run_react_loop(
         let task_state=format!("{} {} {} {} {}",run_core.hint(&snapshot,orchestrator.current,orchestrator.plan.stages.len()),objectives.hint(),skill.as_ref().map(|s|s.hint()).unwrap_or_default(),if intelligence.managed(){intelligence.hint()}else{String::new()},requirements.hint());
         let failed_choices=run_core.blocked(&snapshot,orchestrator.current);
         let _=app.emit("agent:orchestration",serde_json::json!({"run_id":run_id,"step_index":step,"page_changed":changed,"stage":orchestrator.current,"stalled":run_core.stalled(),"excluded_choices":failed_choices.len()}));
-        let prompt_payload = format!("{}\nTask state: {task_state}\nProgress assessment: {}\nPreferred live IDs JSON: {}\nAllowed navigation JSON: {}\nFailed choices JSON: {}\n{recovery_directive}\n{prompt_payload}{vision_context}",requirements.hint(),assessment.hint(),serde_json::to_string(&preferred_ids).unwrap_or_default(),serde_json::to_string(&navigation).unwrap_or_default(),serde_json::to_string(&failed_choices).unwrap_or_default());
+        // Keep unsupported completion out of the action proposer's choices.
+        // This is advisory for the model; all native execution gates still apply.
+        let music_task=requested_music_entry_url(&goal).is_some();
+        let playback_ready=music_task&&freshly_observed&&crate::agent::orchestrator::observed_youtube_video_page(&snapshot.origin)&&
+            tokio::select!{
+                _=cancel.cancelled()=>return Ok("cancelled".into()),
+                result=crate::agent::media_verifier::verify_live_playback(&app,&webview_label,&snapshot.origin)=>result.is_ok()
+            };
+        let completion_gate = if !freshly_observed || last_action_failed {
+            "blocked - fresh successful observation required".to_string()
+        } else if let Err(reason) = orchestrator.can_complete(&snapshot) {
+            format!("blocked - {reason}")
+        } else if music_task && !playback_ready {
+            "blocked - advancing playback has not been observed".to_string()
+        } else {
+            "eligible for independent verification only; never proof of success".to_string()
+        };
+        // Replan only the unfinished objective after repeated lack of progress.
+        if native_objective_action.is_none()&&freshly_observed&&
+            run_core.can_replan(&snapshot,orchestrator.current,step_budget.max(orchestrator.plan.stages.len() as u32*4).saturating_sub(step))&&
+            recovery_node.is_none()&&orchestrator.specialist()!=Specialist::Verification&&
+            catalog.is_none()&&!authentication_blocked&&!private_mode&&
+            crate::agent::multimodal_perception::independent_discovery_allowed(&snapshot)&&
+            !recorded_steps.iter().any(|action|matches!(action,
+                BrowserAction::Click{is_submit:true,..}|BrowserAction::Download{..}|BrowserAction::TypeText{is_sensitive:true,..})) {
+            if let Some(strategy)=crate::agent::page_understanding::RecoveryStrategy::from_page(&snapshot){
+                if let Ok((observation,recovery))=graph.replan_observed(stage_nodes[orchestrator.current],strategy){
+                    run_core.mark_replanned(&snapshot,orchestrator.current);
+                    recovery_observation=Some(observation);recovery_node=Some(recovery);recovery_strategy=Some(strategy);
+                    let _=app.emit("agent:objective_replan",serde_json::json!({"run_id":run_id,"step_index":step,"stage":orchestrator.current,"strategy":strategy,"revision":graph.revision}));
+                    publish_graph!(&graph);
+                    continue;
+                }
+            }
+        }
+        let replan_hint=recovery_strategy.map(|s|s.objective()).unwrap_or("No adaptive recovery objective active");
+        let plan_progress=orchestrator.plan_progress();
+        let prompt_payload = format!("Native completion gate: {completion_gate}\nPlan progress: {plan_progress}\nSemantic task: {semantic_hint}\nAdaptive recovery objective: {replan_hint}\n{}\nTask state: {task_state}\nProgress assessment: {}\nPreferred live IDs JSON: {}\nAllowed navigation JSON: {}\nFailed choices JSON: {}\n{recovery_directive}\n{prompt_payload}{vision_context}",requirements.hint(),assessment.hint(),serde_json::to_string(&preferred_ids).unwrap_or_default(),serde_json::to_string(&navigation).unwrap_or_default(),serde_json::to_string(&failed_choices).unwrap_or_default());
         let _ = app.emit("agent:activity", serde_json::json!({
             "run_id": run_id,
             "phase": if orchestrator.specialist() == Specialist::Verification {
@@ -1925,7 +2132,7 @@ pub async fn run_react_loop(
             } else { prerequisites.next(&goal,&snapshot).or_else(||skill.as_mut().and_then(|s|s.next(&snapshot,&route_ledger)).map(|a|(a,"compiled_skill"))) };
             candidate.or_else(||{
                 if run_core.stalled()||last_action_failed{
-                    replacement.next(&goal,&snapshot,&objectives,&route_ledger).map(|a|(a,"ranked_recovery"))
+                    replacement.next_for_stage(&goal,&semantic_focus,&snapshot,&objectives,&route_ledger).map(|a|(a,"ranked_recovery"))
                 }else{None}
             }).filter(|(action,_)| orchestrator.specialist().allows_on_page(action,&snapshot)&&
                 skill.as_ref().map_or(true,|s|s.check(&snapshot,action).is_ok()))
@@ -1970,7 +2177,10 @@ pub async fn run_react_loop(
                 && matches!(orchestrator.specialist(),Specialist::Browser|Specialist::Research|Specialist::Comparison)
                 && orchestrator.can_complete(&snapshot).is_ok() {
                 ("All explicitly requested source pages have been observed; hand off for factual review".into(),BrowserAction::Complete{summary:"Review every requested comparison using the observed sources.".into()},"research:source_coverage_handoff".into())
-            } else if ready_for_review && orchestrator.specialist()!=Specialist::Verification {
+            } else if playback_ready && !last_action_failed && orchestrator.specialist()==Specialist::Browser && orchestrator.can_complete(&snapshot).is_ok() {
+                ("Native media clock confirms advancing playback; request independent verification".into(),
+                 BrowserAction::Complete{summary:"Verify current media playback".into()},"media:observed_playback_handoff".into())
+            } else if ready_for_review && (!music_task || playback_ready) && orchestrator.specialist()!=Specialist::Verification {
                 ("Read-only progress evaluator found supporting evidence; request independent final verification".into(),BrowserAction::Complete{summary:"Review the observed evidence against every requested objective".into()},"review:observed_stage_handoff".into())
             } else if orchestrator.specialist() == Specialist::Verification {
                 (
@@ -2190,7 +2400,7 @@ pub async fn run_react_loop(
                     || (crate::agent::recovery::search_results(&snapshot) && auth_recovery_attempts > 0)
                     || recent_outcomes.last().is_some_and(|s| s.contains("no observed progress"));
                 let supervisor = if supervisor_reviews < 4 {
-                    if run_core.escalate() {
+                    if run_core.escalate() || duplicate_retries > 0 {
                         r.local_reasoner(&snapshot.origin).or_else(||r.local_supervisor(&snapshot.origin))
                     } else { r.local_supervisor(&snapshot.origin) }
                 } else { None };
@@ -2386,7 +2596,7 @@ pub async fn run_react_loop(
         if catalog.is_none()&&freshly_observed&&orchestrator.specialist()!=Specialist::Verification&&
             (action_binding_error.is_some()||crate::agent::objective_gate::check(&goal,&initial_origin,&snapshot,&objectives,&action).is_err()||
             (run_core.stalled()&&model_route.contains("supervisor_recovery"))) {
-            if let Some(mut candidate)=replacement.next(&goal,&snapshot,&objectives,&route_ledger){
+            if let Some(mut candidate)=replacement.next_for_stage(&goal,&semantic_focus,&snapshot,&objectives,&route_ledger){
                 if orchestrator.specialist().allows_on_page(&candidate,&snapshot)&&
                     crate::agent::objective_gate::check(&goal,&initial_origin,&snapshot,&objectives,&candidate).is_ok()&&
                     bind_action_to_live_dom(&mut candidate,&snapshot,true).is_ok(){
@@ -2486,7 +2696,7 @@ pub async fn run_react_loop(
         }
 
         duplicate_retries = 0;
-        let (risk, mut decision) = if matches!(action, BrowserAction::Navigate { .. }) {
+        let (mut risk, mut decision) = if matches!(action, BrowserAction::Navigate { .. }) {
             evaluate_user_navigation_policy(&snapshot.origin, &action, &allowed_domains, &goal)
         } else {
             evaluate_live_action_policy(&snapshot.origin, &action, &allowed_domains, &snapshot)
@@ -2582,6 +2792,13 @@ pub async fn run_react_loop(
                         || !crate::agent::deliberation::explicit_research_sources(&goal).is_empty();
                     let result = if let Some(target) = requested_navigation_url(&goal) {
                         verify_direct_navigation(target.as_str(), &snapshot)
+                            .map_err(anyhow::Error::msg)
+                    } else if music_task {
+                        crate::agent::media_verifier::verify_live_playback(&app,&webview_label,&snapshot.origin).await
+                            .map(|_|VerificationReport{status:"evidence_checked".into(),
+                                summary:"YouTube media playback is active and its clock is advancing.".into(),
+                                findings:vec![crate::agent::evidence_verifier::GroundedFinding{claim:"Native media playback confirmed".into(),url:snapshot.origin.clone(),quote:"Two fresh native media readings confirmed advancing, unpaused playback.".into()}],
+                                limitations:"Media playback was verified; audio audibility and song identity were not independently confirmed.".into()})
                             .map_err(anyhow::Error::msg)
                     } else if let Some(c)=catalog.as_ref(){
                         c.report(&orchestrator.evidence).map_err(anyhow::Error::msg)
@@ -2717,6 +2934,28 @@ pub async fn run_react_loop(
                 continue;
             }
         }
+        // Child tasks may only browse public pages within the original approved
+        // origin. They cannot use forms, downloads, writers or implicit MCP.
+        if let Some(scope)=child_scope.as_ref(){
+            let permitted=scope.contains(&snapshot.origin)
+                && super::multimodal_perception::independent_discovery_allowed(&snapshot)
+                && match &action{
+                    BrowserAction::Navigate{url}=>scope.navigation_allowed(&snapshot.origin,url),
+                    BrowserAction::Click{node_id,is_submit:false,..}=>snapshot.interactive_nodes.iter().any(|n|n.node_id==*node_id&&n.tag.eq_ignore_ascii_case("a")&&super::browser_skills::public_control(n)&&crate::agent::workflow::public_link_label(&n.label)&&n.href.as_deref().is_some_and(|h|scope.same_origin_link(&snapshot.origin,h))),
+                    BrowserAction::Scroll{..}|BrowserAction::Complete{..}=>true,
+                    _=>false,
+                };
+            // Cross-origin entry uses the baseline navigation policy, not a
+            // model-derived exemption. All non-navigation actions must be Allow.
+            if permitted&&matches!(action,BrowserAction::Navigate{..})&&!matches!(decision,PolicyDecision::Deny{..}){
+                let (baseline_risk,baseline)=evaluate_policy(&snapshot.origin,&action,&allowed_domains);
+                if !matches!(baseline,PolicyDecision::Allow){
+                    risk=baseline_risk;decision=baseline;
+                }
+            }
+            let approval_allowed=matches!(action,BrowserAction::Navigate{..})&&matches!(decision,PolicyDecision::RequireApproval{..});
+            if !permitted||(!matches!(decision,PolicyDecision::Allow)&&!approval_allowed){anyhow::bail!("Intermediate browser specialist proposed an out-of-scope or consequential action");}
+        }
         let trace_id = Uuid::new_v4();
         let _ = app.emit("agent:activity", serde_json::json!({
             "run_id": run_id, "phase": "acting", "step_index": step
@@ -2746,7 +2985,17 @@ pub async fn run_react_loop(
             catalog.as_ref().and_then(|c|c.native_search_query(&snapshot,&action))
         }else{None};
         let mut coordinate_dispatched=false;
-        let (mut ok, mut outcome) = if let (Some(query),BrowserAction::PressKey{node_id,..})=(native_catalog_enter.as_ref(),&action){
+        let mut visual_before=None;
+        let (mut ok, mut outcome) = if is_child&&matches!(&action,BrowserAction::Click{..}){
+            let BrowserAction::Click{node_id,element_label,..}=&action else{unreachable!()};
+            let dest=snapshot.interactive_nodes.iter().find(|n|n.node_id==*node_id).and_then(|n|n.href.as_deref()).context("Missing scoped link destination")?;
+            let link=crate::agent::workflow::LinkRequest{source_url:snapshot.origin.clone(),label:element_label.clone()};
+            crate::agent::workflow::bind_workflow_link(&snapshot,&link,dest)?;
+            let (_,destination_policy)=evaluate_policy(&snapshot.origin,&BrowserAction::Navigate{url:dest.to_owned()},&allowed_domains);
+            anyhow::ensure!(matches!(destination_policy,PolicyDecision::Allow)&&!cancel.is_cancelled(),"Browser specialist link destination not authorized or task cancelled");
+            let result=crate::agent::action_executor::execute_workflow_link(&app,&webview_label,node_id,&snapshot.origin,dest,element_label).await;
+            (result.success,format!("{}: {}",if result.success{"OK"}else{"FAILED"},result.detail))
+        }else if let (Some(query),BrowserAction::PressKey{node_id,..})=(native_catalog_enter.as_ref(),&action){
             model_route.push_str(" / native_catalog_enter");
             let result=crate::agent::action_executor::execute_catalog_enter(&app,&webview_label,node_id,&snapshot.origin,query).await;
             (result.success,format!("{}: {}",if result.success{"OK"}else{"FAILED"},result.detail))
@@ -2758,6 +3007,10 @@ pub async fn run_react_loop(
             if cancel.is_cancelled() || !current.as_ref().zip(visual_snapshot.as_ref()).is_some_and(|(now,before)|crate::agent::multimodal_perception::target_still_current(before,now,id)){
                 (false,"FAILED: visual target stale or cancelled".into())
             }else{
+                if !private_mode&&current.as_ref().is_some_and(crate::agent::multimodal_perception::independent_discovery_allowed){
+                    visual_before=tokio::time::timeout(std::time::Duration::from_secs(3),crate::agent::vision::frame_signature(&app,&webview_label,&snapshot.origin)).await.ok().flatten();
+                }
+                if cancel.is_cancelled(){return Ok("cancelled".into());}
                 let result=crate::agent::action_executor::execute_visual_click(&app,&webview_label,id,point).await;
                 coordinate_dispatched=result.success;
                 (result.success,format!("{}: {}",if result.success{"OK"}else{"FAILED"},result.detail))
@@ -2779,6 +3032,9 @@ pub async fn run_react_loop(
             &cancel,
         )
         .await};
+        if is_child&&!ok&&!matches!(action,BrowserAction::Complete{..}){
+            anyhow::bail!("Browser specialist action was not acknowledged; no automatic replay");
+        }
         if coordinate_dispatched {
             let _=app.emit("agent:vision",serde_json::json!({"run_id":run_id,"step_index":step,"status":"coordinate_click"}));
             model_route.push_str(" / vision:coordinate_click");
@@ -2866,6 +3122,13 @@ pub async fn run_react_loop(
                 &app, &webview_label, &pending_snapshots, &before, &cancel
             ).await {
                 let origin_changed = before.origin != after.origin;
+                if coordinate_dispatched&&!origin_changed&&!private_mode&&crate::agent::multimodal_perception::independent_discovery_allowed(&after)&&!cancel.is_cancelled(){
+                    if let Some(first)=visual_before.take(){
+                        let second=tokio::time::timeout(std::time::Duration::from_secs(3),crate::agent::vision::frame_signature(&app,&webview_label,&after.origin)).await.ok().flatten();
+                        let changed=second.as_ref().and_then(|last|crate::agent::vision::frame_changed(&first,last));
+                        let _=app.emit("agent:vision",serde_json::json!({"run_id":run_id,"step_index":step,"status":"frame_comparison","encoded_frame_changed":changed}));
+                    }
+                }
                 prerequisites.observe_route_action(&goal,&before,&after,&action);
                 if let Some(s)=skill.as_mut(){s.receipt(&before,&after,&action);}
                 replacement.note(&goal,&before,&action,changed);
@@ -2980,8 +3243,15 @@ pub async fn run_react_loop(
             BrowserAction::Download { .. } => "download",
             BrowserAction::Complete { .. } => "complete",
         };
+        let unrelated_model_navigation=ok&&matches!(&action,BrowserAction::Navigate{..})&&
+            model_route.contains("ollama:")&&crate::agent::deliberation::read_only(&goal)&&
+            !intelligence.managed()&&skill.is_none()&&catalog.is_none()&&!objectives.active()&&
+            requested_navigation_url(&goal).is_none()&&
+            crate::agent::semantic_core::objective_words(&goal).len()>=2&&
+            crate::agent::semantic_core::navigation_relevance(&goal,&orchestrator.stage().objective,&snapshot)==0;
+        if unrelated_model_navigation{outcome.push_str(" | NAVIGATION OBSERVED BUT OBJECTIVE RELEVANCE NOT ESTABLISHED; reassess remaining goal");}
         let progress = if !ok { "failed or unverified" }
-            else if outcome.contains("NO MEANINGFUL PAGE CHANGE") || outcome.contains("PAGE CHANGE NOT OBSERVED") {
+            else if unrelated_model_navigation || outcome.contains("NO MEANINGFUL PAGE CHANGE") || outcome.contains("PAGE CHANGE NOT OBSERVED") {
                 "executed; no observed progress"
             } else { "executed" };
         if ok&&progress=="executed" {
@@ -3005,18 +3275,7 @@ pub async fn run_react_loop(
             if let Some(id)=recovery_node.take(){
                 graph.complete(id,GraphReceipt::ObservedProgress)?;
                 graph.start(stage_nodes[orchestrator.current])?;
-                let _=app.emit("agent:workflow_graph",serde_json::json!({"run_id":run_id,"graph":&graph}));
-            }
-        }
-        if !ok {
-            if let BrowserAction::Navigate{url}=&action{
-                route_ledger.failed_transition(&navigation_from,url);
-            }
-        }
-        if ok&&progress=="executed"&&(!matches!(action,BrowserAction::Complete{..})||is_complete){
-            if let Some(id)=recovery_node.take(){
-                graph.complete(id,GraphReceipt::ObservedProgress)?;
-                graph.start(stage_nodes[orchestrator.current])?;
+                recovery_strategy=None;
                 publish_graph!(&graph);
             }
         }
@@ -3114,7 +3373,7 @@ pub async fn run_react_loop(
             let all_complete = orchestrator.complete_stage(summary);
             if !all_complete{
                 graph.start(stage_nodes[orchestrator.current])?;
-                if !private_mode && orchestrator.specialist()==Specialist::Verification &&
+                if !private_mode && !is_child && orchestrator.specialist()==Specialist::Verification &&
                     crate::agent::checkpoint::resumable_goal(&goal) {
                     let verified_destination=if let Some(target)=requested_navigation_url(&goal){
                         verify_direct_navigation(target.as_str(),&snapshot).is_ok()
@@ -3138,17 +3397,18 @@ pub async fn run_react_loop(
                 "evidence_count": orchestrator.evidence.len()
             }));
             if all_complete {
+                anyhow::ensure!(dynamic_completed.len()==dynamic_tools.len(),"Required dynamic MCP trigger was not observed or verified");
+                anyhow::ensure!(adaptive_lookup.is_none()||adaptive_completed,"Authorized adaptive lookup was not independently verified");
                 anyhow::ensure!(graph.is_complete(),"Workflow has unresolved objectives");
                 if let Some(mut report) = verified_report {
                     if let Some(checks)=inherited_checks.as_ref(){
                         report.summary=format!("{}\nEarlier workflow: {}",report.summary,checks.chars().take(1500).collect::<String>());
                         report.limitations.push_str(" Earlier tool steps passed their user-defined checks; they are not external factual verification.");
                     }
-                    let _ = app.emit("agent:verification_report", serde_json::json!({
-                        "run_id": run_id,
-                        "report": report,
-                    }));
-                    let _ = app.emit("agent:run_completed", report.summary.clone());
+                    if !is_child{
+                        let _ = app.emit("agent:verification_report", serde_json::json!({"run_id": run_id,"report": report}));
+                        let _ = app.emit("agent:run_completed", report.summary.clone());
+                    }
                     final_status = "completed".to_string();
                 } else {
                     let _ = app.emit("agent:run_error", serde_json::json!({
@@ -3211,7 +3471,7 @@ pub async fn run_react_loop(
         }
     }
 
-    if matches!(final_status.as_str(),"unverified"|"max_steps"){
+    if !is_child&&matches!(final_status.as_str(),"unverified"|"max_steps"){
         if let Some(c)=catalog.as_ref(){
             let report=c.partial_report(&orchestrator.evidence);
             let _=app.emit("agent:verification_report",serde_json::json!({"run_id":run_id,"report":report}));

@@ -59,6 +59,41 @@ pub fn rank(page:&DomSnapshot,goal:&str,limit:usize)->Vec<DomNodeSummary>{
     if !form_intent&&!writing&&!super::deliberation::read_only(goal){scored.sort_by_key(|x|x.0);}
     scored.into_iter().map(|(_,_,n)|n.clone()).collect()
 }
+/// Preserve original-goal ranking, but prefer controls relevant to the
+/// currently assigned objective. This is advisory, not authorization.
+pub fn stage_focus(goal:&str,objective:&str)->HashSet<String>{
+    let wanted=objective_words(objective);
+    let original=objective_words(goal);
+    wanted.intersection(&original).cloned().collect()
+}
+pub fn stage_relevance(goal:&str,objective:&str,text:&str)->usize{
+    let focus=stage_focus(goal,objective);
+    focus.intersection(&tokens(text)).count()
+}
+pub fn rank_for_stage(page:&DomSnapshot,goal:&str,objective:&str,limit:usize)->Vec<DomNodeSummary>{
+    let focused=stage_focus(goal,objective);
+    let mut ranked=rank(page,goal,page.interactive_nodes.len());
+    if focused.is_empty(){ranked.truncate(limit);return ranked;}
+    let priority=|n:&DomNodeSummary|{
+        let label=tokens(&n.label);
+        let exact=label.intersection(&focused).count();
+        let path=n.href.as_deref().and_then(|v|url::Url::parse(v).ok()).map(|u|tokens(u.path())).unwrap_or_default();
+        let matching=path.intersection(&focused).count();
+        if n.is_sensitive||n.is_submit{0}else{exact*3+matching}
+    };
+    ranked.sort_by_key(|n|std::cmp::Reverse(priority(n)));
+    ranked.truncate(limit);ranked
+}
+/// An unrelated page change is not necessarily task progress. This advisory
+/// signal is scoped to read-only model navigation, never a policy decision.
+pub fn navigation_relevance(goal:&str,objective:&str,page:&DomSnapshot)->usize{
+    let original=objective_words(goal);
+    let focus=stage_focus(goal,objective);
+    let terms=if focus.is_empty(){&original}else{&focus};
+    let path=url::Url::parse(&page.origin).ok().map(|u|u.path().to_string()).unwrap_or_default();
+    let identity=tokens(&format!("{} {}",page.title,path));
+    terms.intersection(&identity).count()
+}
 pub fn visual_matches(page:&DomSnapshot,hint:&str)->Vec<String>{
     let text=norm(hint);
     let mut labels=HashSet::new();
@@ -184,6 +219,7 @@ impl RouteLedger{
 #[derive(Default)]
 pub struct RunCore{
     current:Option<u64>,revision:u32,stalls:u8,failed:VecDeque<Attempt>,
+    replanned:HashSet<u64>,
 }
 impl RunCore{
     pub fn observe(&mut self,page:&DomSnapshot,stage:usize)->bool{
@@ -205,6 +241,14 @@ impl RunCore{
     }
     pub fn stalled(&self)->bool{self.stalls>0}
     pub fn escalate(&self)->bool{self.stalls>=2}
+    // A different observed state or a different unfinished stage can recover
+    // again. An identical stalled state cannot consume another replan.
+    pub fn can_replan(&self,page:&DomSnapshot,stage:usize,remaining_steps:u32)->bool{
+        self.escalate()&&remaining_steps>=4&&!self.replanned.contains(&state(page,stage))
+    }
+    pub fn mark_replanned(&mut self,page:&DomSnapshot,stage:usize){
+        self.replanned.insert(state(page,stage));
+    }
     pub fn blocked(&self,page:&DomSnapshot,stage:usize)->Vec<Value>{
         let current=state(page,stage);
         self.failed.iter().filter(|a|a.state==current).flat_map(|a|
@@ -246,6 +290,17 @@ mod tests{
   assert_eq!(rank(&p,g,2)[0].node_id,"docs");
   assert!(relevant_link(g,&p,"https://example.org/sql-insert.html"));
   assert!(!relevant_link(g,&p,"https://example.org/pricing"));
+ }
+ #[test]fn active_stage_prioritizes_its_relevant_control_and_navigation(){
+  let mut first=n("first","a","link","First installation guide");first.href=Some("https://example.org/install".into());
+  let mut second=n("second","a","link","Second compatibility reference");second.href=Some("https://example.org/compatibility".into());
+  let p=page(vec![first,second]);
+  let goal="Compare installation and compatibility reference information";
+  assert_eq!(rank_for_stage(&p,goal,"Read compatibility reference",2)[0].node_id,"second");
+  let mut unrelated=p.clone();unrelated.title="Account help".into();
+  assert_eq!(navigation_relevance(goal,"Read compatibility reference",&unrelated),0);
+  unrelated.title="Compatibility reference".into();
+  assert!(navigation_relevance(goal,"Read compatibility reference",&unrelated)>0);
  }
  #[test]fn route_ledger_bounds_revisits_and_failed_transitions_without_blocking_new_pages(){
   let mut ledger=RouteLedger::default();
@@ -298,4 +353,25 @@ mod tests{
   assert!(c.blocked(&p,0).is_empty());c.record(None,true);assert!(!c.stalled());
   assert!(c.blocked(&p,1).is_empty());
  }
+}
+
+#[cfg(test)]
+mod adaptive_replan_budget_tests{
+    use super::*;
+    #[test]
+    fn adaptive_replans_are_state_scoped_not_fixed_per_run(){
+        let mut r=RunCore::default();
+        let mut p=DomSnapshot{origin:"https://example.org/".into(),title:"Search".into(),text_excerpt:"Public results".into(),interactive_nodes:vec![],structure:Default::default()};
+        r.record(None,false);r.record(None,false);
+        for i in 0..6{
+            p.origin=format!("https://example.org/result/{i}");
+            assert!(r.can_replan(&p,0,12));
+            r.mark_replanned(&p,0);
+            assert!(!r.can_replan(&p,0,12));
+        }
+        assert!(r.can_replan(&p,1,12));
+        assert!(!r.can_replan(&p,1,3));
+        r.record(None,true);
+        assert!(!r.can_replan(&p,1,12));
+    }
 }

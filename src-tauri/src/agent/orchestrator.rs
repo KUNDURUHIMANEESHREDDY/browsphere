@@ -93,6 +93,10 @@ pub struct SpecialistStage {
 pub struct TaskPlan {
     pub goal: String,
     pub stages: Vec<SpecialistStage>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub semantic: Option<super::semantic_task::SemanticTask>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub semantic_provenance: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -114,6 +118,8 @@ struct GeneratedStage {
 #[serde(deny_unknown_fields)]
 struct GeneratedPlan {
     stages: Vec<GeneratedStage>,
+    #[serde(default)]
+    semantic: Option<super::semantic_task::SemanticTask>,
 }
 
 /// Validate the model's proposed work before it can run. The model cannot
@@ -141,9 +147,12 @@ pub fn parse_generated_plan(goal: &str, raw: &str) -> anyhow::Result<TaskPlan> {
     );
     let mut seen = HashSet::new();
     let mut stages = Vec::new();
+    let semantic=generated.semantic;
+    if semantic.is_some(){
+        anyhow::ensure!(generated.stages.iter().all(|s|s.specialist!=Specialist::Verification),"Semantic stage mappings cannot include a model-generated verification stage");
+    }
     for stage in generated.stages {
         if stage.specialist == Specialist::Verification { continue; }
-        if !seen.insert(stage.specialist) { continue; }
         let objective = stage.objective.trim().chars()
             .filter(|c| !c.is_control() && *c != '<' && *c != '>')
             .take(200).collect::<String>();
@@ -152,10 +161,12 @@ pub fn parse_generated_plan(goal: &str, raw: &str) -> anyhow::Result<TaskPlan> {
             .take(200).collect::<String>();
         anyhow::ensure!(!objective.is_empty() && !success_criteria.is_empty(),
             "The model's plan is missing a stage objective or success criterion");
+        let identity=(stage.specialist,objective.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase());
+        anyhow::ensure!(seen.insert(identity),"Duplicate execution objective in specialist plan; provide distinct sequential objectives");
         stages.push(SpecialistStage {
             specialist: stage.specialist, objective, success_criteria, status:"pending"
         });
-        anyhow::ensure!(stages.len() <= 4, "Too many execution specialists requested");
+        anyhow::ensure!(stages.len() <= 4, "Too many execution stages requested");
     }
     anyhow::ensure!(!stages.is_empty(), "The model must assign at least one execution specialist");
     stages.push(SpecialistStage {
@@ -164,7 +175,9 @@ pub fn parse_generated_plan(goal: &str, raw: &str) -> anyhow::Result<TaskPlan> {
         success_criteria: "Confirm observed webpages and successfully executed actions; never invent success".into(),
         status: "pending",
     });
-    Ok(TaskPlan { goal: goal.to_string(), stages })
+    if let Some(task)=semantic.as_ref(){task.validate(goal,stages.len()-1)?;}
+    let semantic_provenance=semantic.as_ref().map(|_|"model_proposed");
+    Ok(TaskPlan { goal: goal.to_string(), stages, semantic, semantic_provenance })
 }
 
 pub struct Orchestrator {
@@ -178,6 +191,8 @@ pub struct Orchestrator {
     last_action_failed: bool,
     form_submitted: bool,
     confirmed_navigation: Option<String>,
+    stage_entry_evidence: Vec<SourceEvidence>,
+    starting_origin: Option<String>,
 }
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
@@ -273,6 +288,8 @@ pub fn plan_task(goal: &str) -> TaskPlan {
     roles.push(Specialist::Verification);
     TaskPlan {
         goal: goal.to_string(),
+        semantic: None,
+        semantic_provenance: None,
         stages: roles.into_iter().map(|specialist| {
             let (objective, criteria) = match specialist {
                 Specialist::Research => (
@@ -318,6 +335,8 @@ impl Orchestrator {
             last_action_failed: false,
             form_submitted: false,
             confirmed_navigation: None,
+            stage_entry_evidence: Vec::new(),
+            starting_origin: None,
         }
     }
 
@@ -329,7 +348,11 @@ impl Orchestrator {
         &self.plan.stages[self.current]
     }
 
+    pub fn set_starting_origin(&mut self,origin:&str){
+        if self.starting_origin.is_none(){self.starting_origin=Some(origin.to_owned());}
+    }
     pub fn observe(&mut self, snapshot: &DomSnapshot) {
+        self.set_starting_origin(&snapshot.origin);
         let Some(evidence)=super::browser_skills::extraction::capture(snapshot)else{return;};
         self.fresh_observations+=1;
         if let Some(old) = self.evidence.iter_mut().find(|e| e.url == evidence.url) {
@@ -391,6 +414,24 @@ impl Orchestrator {
         format!("{summaries}\n{sources}").chars().take(5000).collect()
     }
 
+    /// Bounded, host-generated plan state survives compact model context.
+    /// Objectives are advisory and never confer permissions.
+    pub fn semantic_focus(&self)->String{
+        let objective=&self.stage().objective;
+        let anchored=self.plan.semantic.as_ref().map(|s|s.focus(self.current+1)).unwrap_or_default();
+        format!("{objective} {anchored}")
+    }
+    pub fn semantic_hint(&self)->String{
+        self.plan.semantic.as_ref().map(|s|s.hint(self.current+1)).unwrap_or_else(||"No model semantic graph; use original goal and native evidence.".into())
+    }
+    pub fn plan_progress(&self)->String {
+        let stages=self.plan.stages.iter().enumerate().map(|(i,stage)|{
+            let status=if i<self.current{"completed"}else if i==self.current{"active"}else{"pending"};
+            format!("{} {} {}: {}",i+1,status,stage.specialist.label(),stage.objective.chars().take(100).collect::<String>())
+        }).collect::<Vec<_>>().join(" | ");
+        format!("Step {}/{}; {}. Advance only the active objective; do not replay completed stages.",self.current+1,self.plan.stages.len(),stages)
+    }
+
     /// Reject model-declared completion when there is no real page evidence.
     /// This is an evidence gate, not a factual truth oracle.
     pub fn can_complete(&self, snapshot: &DomSnapshot) -> Result<(), String> {
@@ -437,6 +478,14 @@ impl Orchestrator {
         {
             return Err("The requested video-result page has not been observed in the browser".into());
         }
+        // A search form or unrelated result cannot complete a named-title
+        // acquisition stage. The final verifier still requires action receipts.
+        if super::evidence_verifier::requested_named_result_title(&self.plan.goal).is_some(){
+            let initial=self.starting_origin.as_deref().unwrap_or(&snapshot.origin);
+            if super::evidence_verifier::verify_observed_named_result_title(&self.plan.goal,initial,snapshot,&self.evidence).is_err(){
+                return Err("Requested named result title and destination are not yet observed".into());
+            }
+        }
         if snapshot.text_excerpt.trim().len() < 40 {
             return Err("The current page has insufficient readable evidence".into());
         }
@@ -473,6 +522,28 @@ impl Orchestrator {
                 return Err("The requested form submission has not been acknowledged as successful".into());
             }
         }
+        // A repeated acquisition specialist represents a distinct objective.
+        // Do not let the previous stage's retained sources alone satisfy it.
+        if matches!(self.specialist(),Specialist::Research|Specialist::Data)
+            && self.plan.stages[..self.current].iter().any(|s|s.specialist==self.specialist()){
+            let mut distinct=super::semantic_core::stage_focus(&self.plan.goal,&self.stage().objective);
+            for prior in &self.plan.stages[..self.current]{
+                for term in super::semantic_core::stage_focus(&self.plan.goal,&prior.objective){distinct.remove(&term);}
+            }
+            let fresh=self.evidence.iter().filter(|now|!self.stage_entry_evidence.iter().any(|old|
+                old.url==now.url&&old.title==now.title&&old.excerpt==now.excerpt));
+            if !fresh.clone().any(|_|true){
+                return Err("Repeated acquisition stage needs new observed evidence, not earlier stage evidence alone".into());
+            }
+            // Only explicit user terms unique to this stage may narrow the
+            // evidence gate. Model-invented requirements do not become facts.
+            if !distinct.is_empty()&&!fresh.into_iter().any(|e|{
+                let found=super::semantic_core::objective_words(&format!("{} {} {}",e.title,e.url,e.excerpt));
+                !distinct.is_disjoint(&found)
+            }){
+                return Err("Fresh evidence does not address the distinct unfinished acquisition objective".into());
+            }
+        }
         if self.specialist() == Specialist::Comparison {
             let distinct_hosts: HashSet<String> = self.evidence.iter()
                 .filter_map(|e| url::Url::parse(&e.url).ok()
@@ -491,6 +562,7 @@ impl Orchestrator {
         current.status = "completed";
         self.completed_summaries.push(summary.chars().take(320).collect());
         self.current += 1;
+        self.stage_entry_evidence=self.evidence.clone();
         self.actions_in_stage = 0;
         self.last_action_failed = false;
         if self.current < self.plan.stages.len() {
@@ -511,6 +583,7 @@ impl Orchestrator {
         self.plan.stages[self.current].status="pending";
         self.current-=1;self.plan.stages[self.current].status="active";
         self.completed_summaries.pop();self.actions_in_stage=0;self.last_action_failed=false;
+        self.stage_entry_evidence=self.evidence.clone();
         true
     }
     pub fn begin(&mut self) {
@@ -552,6 +625,54 @@ mod tests {
         assert!(parse_generated_plan("Demo", r#"{"stages":[]}"#).is_err());
     }
 
+    #[test]
+    fn repeated_specialists_preserve_distinct_ordered_objectives_and_require_fresh_evidence() {
+        let raw=r#"{"stages":[{"specialist":"research","objective":"Read first laptop source","success_criteria":"First source observed"},{"specialist":"research","objective":"Read second laptop source","success_criteria":"Second source observed"},{"specialist":"data","objective":"Extract laptop facts","success_criteria":"Sourced facts"}]}"#;
+        let plan=parse_generated_plan("Research laptop facts",raw).unwrap();
+        assert_eq!(plan.stages.len(),4);
+        assert_eq!(plan.stages[1].objective,"Read second laptop source");
+        let mut flow=Orchestrator::from_plan(plan);
+        flow.begin();
+        let a=snapshot("https://one.example/","Laptop facts and information from the first independent source.");
+        flow.observe(&a);
+        flow.action_outcome(&BrowserAction::Scroll{delta_y:100},true);
+        assert!(flow.can_complete(&a).is_ok());
+        assert!(!flow.complete_stage("First source acquired"));
+        assert!(flow.plan_progress().contains("1 completed Research Agent"));
+        assert!(flow.plan_progress().contains("2 active Research Agent"));
+        assert!(flow.plan_progress().contains("3 pending Data Agent"));
+        flow.observe(&a);
+        assert!(flow.can_complete(&a).is_err());
+        let b=snapshot("https://two.example/","Laptop facts and information from the second independent source.");
+        flow.observe(&b);
+        assert!(flow.can_complete(&b).is_ok());
+        assert!(!flow.complete_stage("Second source acquired"));
+        assert_eq!(flow.specialist(),Specialist::Data);
+        assert!(parse_generated_plan("Research laptop facts",&raw.replace("Read second laptop source","Read first laptop source")).is_err());
+    }
+
+    #[test]
+    fn repeated_acquisition_rejects_fresh_but_irrelevant_evidence(){
+        let plan=parse_generated_plan("Research installation and compatibility details",
+            r#"{"stages":[{"specialist":"research","objective":"Read installation details","success_criteria":"Installation observed"},{"specialist":"research","objective":"Read compatibility details","success_criteria":"Compatibility observed"}]}"#).unwrap();
+        let mut flow=Orchestrator::from_plan(plan);flow.begin();
+        let first=snapshot("https://example.org/install","Installation details and documented installation instructions for this public library.");
+        flow.observe(&first);flow.action_outcome(&BrowserAction::Scroll{delta_y:120},true);
+        assert!(flow.can_complete(&first).is_ok());flow.complete_stage("Installation observed");
+        let wrong=snapshot("https://example.org/help","Installation details and a newly observed public help page with unrelated information.");
+        flow.observe(&wrong);
+        assert!(flow.can_complete(&wrong).unwrap_err().contains("distinct unfinished"));
+        let right=snapshot("https://example.org/compat","Compatibility details and supported runtime information for the current public library.");
+        flow.observe(&right);assert!(flow.can_complete(&right).is_ok());
+    }
+    #[test]
+    fn semantic_plan_accepts_only_user_anchored_interpretation(){
+        let goal="Find the guide, then compare versions; do not submit.";
+        let raw=r#"{"stages":[{"specialist":"research","objective":"Locate guide","success_criteria":"Observed guide"},{"specialist":"comparison","objective":"Compare versions","success_criteria":"Sourced versions"}],"semantic":{"concepts":[{"kind":"objective","span":"Find the guide","stages":[1]},{"kind":"objective","span":"compare versions","stages":[2]},{"kind":"constraint","span":"do not submit","stages":[]}],"relations":[{"from":2,"to":1,"kind":"depends_on"}]}}"#;
+        let plan=parse_generated_plan(goal,raw).unwrap();let flow=Orchestrator::from_plan(plan);
+        assert!(flow.semantic_focus().contains("Find the guide"));assert!(flow.semantic_hint().contains("do not submit"));
+        assert!(parse_generated_plan(goal,&raw.replace("do not submit","submit automatically")).is_err());
+    }
     #[test]
     fn planner_accepts_complete_fences_but_rejects_extra_json_and_unknown_fields() {
         let valid = r#"{"stages":[{"specialist":"browser","objective":"Open the requested page","success_criteria":"Page observed"}]}"#;

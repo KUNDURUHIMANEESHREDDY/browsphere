@@ -477,6 +477,43 @@ pub async fn execute_visual_click(app:&tauri::AppHandle,label:&str,node_id:&str,
     }
 }
 
+/// The workflow graph supplies a freshly bound, explicitly approved same-origin
+/// anchor. Revalidate href, label, visibility and hit testing atomically at
+/// dispatch. No page-supplied URL can replace the approved destination.
+pub(super) fn workflow_link_script(node_id:&str,source:&str,dest:&str,label:&str)->String{
+    let data=serde_json::json!({"id":node_id,"source":source,"dest":dest,"label":label});
+    format!(r#"(function(){{
+      const expected={data};
+      const stop=()=>({{success:false,detail:"Workflow link no longer matches approved visible anchor"}});
+      if(location.href!==expected.source)return stop();
+      const nodes=document.querySelectorAll('[data-aether-id="'+CSS.escape(expected.id)+'"]');
+      if(nodes.length!==1)return stop();
+      const el=nodes[0];
+      const normal=s=>String(s||"").replace(/\s+/g," ").trim();
+      if(el.tagName!=="A"||!el.isConnected||el.href!==expected.dest||
+        el.hasAttribute("download")||el.hasAttribute("onclick")||
+        (el.target&&el.target.toLowerCase()!=="_self")||
+        el.closest('form,[contenteditable=true],[hidden],[aria-hidden=true]')||
+        el.matches(':disabled,[aria-disabled=true]')||
+        ![normal(el.innerText),normal(el.getAttribute("aria-label")),normal(el.title)].includes(expected.label))return stop();
+      const r=el.getBoundingClientRect(),style=getComputedStyle(el);
+      if(style.visibility!=="visible"||style.display==="none"||style.pointerEvents==="none"||r.width<2||r.height<2)return stop();
+      const x=Math.max(0,r.left)+(Math.min(innerWidth,r.right)-Math.max(0,r.left))/2;
+      const y=Math.max(0,r.top)+(Math.min(innerHeight,r.bottom)-Math.max(0,r.top))/2;
+      if(!(x>=0&&x<innerWidth&&y>=0&&y<innerHeight&&x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom))return stop();
+      const hit=document.elementFromPoint(x,y);
+      if(!hit||!(hit===el||el.contains(hit))||(hit!==el&&hit.closest('a,button,input,select,textarea,[role],[tabindex]')!==el))return stop();
+      el.click();
+      return {{success:true,detail:"Approved native workflow link dispatched; destination not yet verified"}};
+    }})()"#)
+}
+pub async fn execute_workflow_link(app:&tauri::AppHandle,tab:&str,node_id:&str,source:&str,dest:&str,label:&str)->ActionResult{
+    match crate::agent::native_eval::eval_json(app,tab,workflow_link_script(node_id,source,dest,label),1800).await{
+        Ok(value)=>serde_json::from_value(value).unwrap_or(ActionResult{success:false,detail:"Workflow link acknowledgement unavailable".into()}),
+        Err(_)=>ActionResult{success:false,detail:"Workflow link result unavailable; do not retry uncertain dispatch".into()},
+    }
+}
+
 /// Native keyboard events, only after policy-bound input and exact public
 /// catalog query have been revalidated. A dispatch is not a search receipt.
 #[cfg(windows)]

@@ -159,8 +159,15 @@ fn safe_page(p:&DomSnapshot)->bool{
     !["account","checkout","payment","login","signin","oauth","inbox","messages"].iter().any(|s|
       url::Url::parse(&p.origin).ok().is_some_and(|u|u.path().split('/').any(|x|x.eq_ignore_ascii_case(s))))
 }
+// Geometry-only fingerprint: independent of transient DOM IDs and text changes.
+fn layout_fingerprint(p:&DomSnapshot)->u64{
+    let mut h=std::collections::hash_map::DefaultHasher::new();
+    let mut rows=p.interactive_nodes.iter().filter(|n|eligible(n)).filter_map(|n|n.bbox.as_ref().map(|b|
+        (n.label.clone(),n.role.clone(),n.href.clone(),(b.x/4.).round() as i64,(b.y/4.).round() as i64,(b.width/4.).round() as i64,(b.height/4.).round() as i64,b.in_viewport))).collect::<Vec<_>>();
+    rows.sort();rows.hash(&mut h);h.finish()
+}
 #[derive(Debug,Default)]
-pub struct VisionBudget{seen:HashSet<(usize,u64)>,last_step:Option<u32>,calls:u8}
+pub struct VisionBudget{seen:HashSet<(usize,u64)>,seen_layouts:HashSet<(usize,u64,u64)>,last_step:Option<u32>,calls:u8}
 impl VisionBudget{
     pub fn reserve(&mut self,p:&DomSnapshot,goal:&str,stage:usize,step:u32,failed:bool,stalled:bool,private:bool)->Option<&'static str>{
         if private||self.calls>=3||self.last_step.is_some_and(|s|step.saturating_sub(s)<3)||
@@ -175,8 +182,15 @@ impl VisionBudget{
         else if candidates.len()<=2&&!matches!(k,PageKind::Documentation|PageKind::Article|PageKind::TransportResults){"sparse_controls"}
         else if matches!(k,PageKind::SearchResults|PageKind::ProductListing)&&candidates.iter().filter(|n|semantic_core::relevance(goal,&n.label)>0).count()>1{"ambiguous_results"}
         else{return None;};
-        if !self.seen.insert((stage,fingerprint(p,false))){return None;}
-        self.calls+=1;self.last_step=Some(step);Some(reason)
+        let state=fingerprint(p,false);
+        let fresh_state=self.seen.insert((stage,state));
+        if !fresh_state&&!(failed||stalled){return None;}
+        let fresh_layout=self.seen_layouts.insert((stage,state,layout_fingerprint(p)));
+        // Allow bounded re-grounding after actual layout movement, not repeated
+        // calls on an unchanged page or irrelevant text/ID churn.
+        if !fresh_state&&(!(failed||stalled)||!fresh_layout){return None;}
+        self.calls+=1;self.last_step=Some(step);
+        Some(if fresh_state{reason}else{"layout_recovery"})
     }
 }
 #[derive(Debug,Serialize)]
@@ -338,6 +352,20 @@ mod tests{
   let mut blocked=p.clone();blocked.text_excerpt="Verify you are human".into();
   assert!(independently_grounded("Find the field guide",&blocked,&o.controls[0],"a",&v).is_none());
   o.controls[0].point=None;assert!(parse(&serde_json::to_string(&o).unwrap(),0).is_err());
+ }
+ #[test]fn dynamic_layout_recovery_is_bounded_and_ignores_text_churn(){
+  let p=page();let g="Find the field guide";let mut b=VisionBudget::default();
+  assert!(b.reserve(&p,g,0,0,false,false,false).is_some());
+  let mut changed=p.clone();changed.text_excerpt.push_str(" refreshed");changed.interactive_nodes[0].node_id="new-id".into();
+  assert!(b.reserve(&changed,g,0,3,true,true,false).is_none());
+  changed.interactive_nodes[0].bbox.as_mut().unwrap().x+=40.;
+  assert!(b.reserve(&changed,g,0,4,false,false,false).is_none());
+  assert_eq!(b.reserve(&changed,g,0,4,true,true,false),Some("layout_recovery"));
+  assert!(b.reserve(&changed,g,0,7,true,true,false).is_none());
+  changed.interactive_nodes[0].bbox.as_mut().unwrap().x+=40.;
+  assert_eq!(b.reserve(&changed,g,0,8,true,true,false),Some("layout_recovery"));
+  changed.interactive_nodes[0].bbox.as_mut().unwrap().x+=40.;
+  assert!(b.reserve(&changed,g,0,12,true,true,false).is_none());
  }
  #[test]fn scheduler_skips_private_sensitive_clear_and_repeated_states(){
   let p=page();let mut b=VisionBudget::default();let g="Find the field guide";

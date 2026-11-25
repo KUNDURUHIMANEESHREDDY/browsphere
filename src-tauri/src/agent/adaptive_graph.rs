@@ -81,8 +81,11 @@ impl WorkflowGraph{
  /// other new nodes; old completed nodes and all original edges survive.
  /// The caller still uses the native observation and action policy.
  pub fn amend_recovery(&mut self,parent:usize,steps:&[(Kind,Vec<usize>)])->Result<Vec<usize>>{
+  self.amend_recovery_inner(parent,steps,false)
+ }
+ fn amend_recovery_inner(&mut self,parent:usize,steps:&[(Kind,Vec<usize>)],state_scoped:bool)->Result<Vec<usize>>{
   let n=self.nodes.get(parent).context("Unknown recovery parent")?;
-  ensure!(n.kind==Kind::Browser&&n.state==State::Active&&n.attempts<=3,"Recovery is not eligible");
+  ensure!(n.kind==Kind::Browser&&n.state==State::Active&&(state_scoped||n.attempts<=3),"Recovery is not eligible");
   ensure!(!steps.is_empty()&&steps.len()<=4&&self.nodes.len()+steps.len()<=MAX_NODES,"Recovery graph budget exhausted");
   ensure!(steps.iter().all(|(k,_)|matches!(k,Kind::Observation|Kind::Recovery)),"Recovery cannot add tool permissions or skip verification");
   let local=Self::new(steps.to_vec())?;
@@ -106,6 +109,37 @@ impl WorkflowGraph{
   candidate.validate()?;
   *self=candidate;
   Ok((base..base+steps.len()).collect())
+ }
+ /// Insert a bounded, observation-driven recovery objective without replacing
+ /// the user's original objective or weakening its completion criteria.
+ pub fn replan_observed(&mut self,parent:usize,strategy:super::page_understanding::RecoveryStrategy)->Result<(usize,usize)>{
+  let mut candidate=self.clone();
+  let ids=candidate.amend_recovery_inner(parent,&[(Kind::Observation,vec![]),(Kind::Recovery,vec![0])],true)?;
+  candidate.describe(ids[1],strategy.objective(),"Fresh native evidence of meaningful progress; original goal and policy unchanged")?;
+  candidate.start(ids[0])?;
+  candidate.validate()?;
+  *self=candidate;
+  Ok((ids[0],ids[1]))
+ }
+ /// Insert an authorized tool prerequisite while a browser specialist is active.
+ /// The caller is responsible for authorization and evidence verification.
+ pub fn insert_tool_prerequisite(&mut self,parent:usize)->Result<usize>{
+  self.validate()?;
+  let n=self.nodes.get(parent).context("Unknown tool insertion parent")?;
+  ensure!(matches!(n.kind,Kind::Browser|Kind::Verification)&&n.state==State::Active&&n.attempts<=4,"Tool insertion requires an active browser stage");
+  ensure!(self.nodes.len()<MAX_NODES,"Dynamic graph budget exhausted");
+  let mut candidate=self.clone();
+  let id=candidate.nodes.len();
+  let deps=n.depends_on.clone();
+  candidate.nodes.push(Node{id,kind:Kind::Tool,depends_on:deps,state:State::Pending,receipt:None,attempts:0,objective:String::new(),criterion:String::new()});
+  candidate.nodes[parent].depends_on.push(id);
+  candidate.nodes[parent].state=State::Pending;
+  candidate.describe(id,"Authorized dynamic MCP lookup","Fresh public trigger and expected tool result match")?;
+  candidate.revision+=1;
+  candidate.validate()?;
+  candidate.start(id)?;
+  *self=candidate;
+  Ok(id)
  }
  pub fn renew_verification(&mut self)->Result<usize>{
   self.validate()?;
@@ -220,6 +254,25 @@ mod tests{
   g.complete(1,Receipt::ToolCheck).unwrap();g.start(2).unwrap();
   g.complete(2,Receipt::ComparisonCheck).unwrap();assert!(g.is_complete());
  }
+ #[test]fn dynamic_tool_insertion_preserves_receipts_and_blocks_parent_until_verified(){
+  let mut g=WorkflowGraph::chain(&[Kind::Tool,Kind::Browser,Kind::Verification]).unwrap();
+  g.start(0).unwrap();g.complete(0,Receipt::ToolCheck).unwrap();g.start(1).unwrap();
+  let t=g.insert_tool_prerequisite(1).unwrap();
+  assert_eq!(g.nodes[0].receipt,Some(Receipt::ToolCheck));
+  assert_eq!(g.nodes[1].state,State::Pending);assert!(g.start(1).is_err());
+  assert!(g.complete(t,Receipt::StageGate).is_err());
+  g.complete(t,Receipt::ToolCheck).unwrap();g.start(1).unwrap();
+  let t2=g.insert_tool_prerequisite(1).unwrap();g.fail(t2);
+  assert_eq!(g.nodes[1].state,State::Blocked);assert_eq!(g.nodes[2].state,State::Blocked);
+  assert!(g.ready().is_empty());g.validate().unwrap();
+ }
+ #[test]fn dynamic_insertion_rejects_wrong_parent_and_exhausted_budget(){
+  let mut g=WorkflowGraph::chain(&[Kind::Tool,Kind::Browser]).unwrap();
+  g.start(0).unwrap();assert!(g.insert_tool_prerequisite(0).is_err());assert!(g.insert_tool_prerequisite(1).is_err());
+  let mut full=WorkflowGraph::chain(&vec![Kind::Browser;MAX_NODES]).unwrap();
+  full.start(0).unwrap();assert!(full.insert_tool_prerequisite(0).is_err());
+  assert_eq!(full.nodes.len(),MAX_NODES);assert_eq!(full.nodes[0].state,State::Active);
+ }
  #[test]fn failed_prerequisite_blocks_transitive_dependents(){
   let mut g=WorkflowGraph::chain(&[Kind::Tool,Kind::Browser,Kind::Verification]).unwrap();
   g.start(0).unwrap();g.fail(0);
@@ -251,6 +304,26 @@ mod tests{
   g.start(ids[0]).unwrap();g.complete(ids[0],Receipt::NativeObservation).unwrap();
   g.start(ids[1]).unwrap();g.complete(ids[1],Receipt::ObservedProgress).unwrap();
   g.start(1).unwrap();assert_eq!(g.nodes[0].receipt,Some(Receipt::ToolCheck));g.validate().unwrap();
+ }
+ #[test]fn observed_replan_preserves_completed_stages_and_original_criterion(){
+  use super::super::page_understanding::RecoveryStrategy;
+  let mut g=WorkflowGraph::chain(&[Kind::Browser,Kind::Browser,Kind::Verification]).unwrap();
+  g.describe(0,"First source","Read first source").unwrap();
+  g.describe(1,"Second source","Read second source").unwrap();
+  g.start(0).unwrap();g.complete(0,Receipt::StageGate).unwrap();g.start(1).unwrap();
+  let (observation,recovery)=g.replan_observed(1,RecoveryStrategy::OpenResult).unwrap();
+  assert_eq!(g.nodes[0].receipt,Some(Receipt::StageGate));
+  assert_eq!(g.nodes[0].attempts,1);
+  assert_eq!(g.nodes[1].criterion,"Read second source");
+  assert_eq!(g.nodes[1].objective,"Second source");
+  assert_eq!(g.nodes[recovery].objective,RecoveryStrategy::OpenResult.objective());
+  assert!(g.start(1).is_err());
+  assert!(g.complete(recovery,Receipt::ObservedProgress).is_err());
+  g.complete(observation,Receipt::NativeObservation).unwrap();g.start(recovery).unwrap();
+  assert!(g.complete(recovery,Receipt::FinalReport).is_err());
+  g.complete(recovery,Receipt::ObservedProgress).unwrap();g.start(1).unwrap();
+  g.complete(1,Receipt::StageGate).unwrap();g.start(2).unwrap();
+  g.complete(2,Receipt::FinalReport).unwrap();assert!(g.is_complete());
  }
  #[test]fn pending_graph_revision_preserves_transitive_dependencies(){
   let mut g=WorkflowGraph::new(vec![(Kind::Observation,vec![]),(Kind::Recovery,vec![0]),(Kind::Browser,vec![0,1]),(Kind::Verification,vec![2])]).unwrap();

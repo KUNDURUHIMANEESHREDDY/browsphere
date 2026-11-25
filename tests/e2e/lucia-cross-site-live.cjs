@@ -79,26 +79,35 @@ async function main(){
       ollama_url:testOllama,ollama_model:localModel,vision_model:visionModel,planner_model:process.env.LUCIA_TEST_PLANNER_MODEL||'qwen2.5:3b-instruct',supervisor_model:process.env.LUCIA_TEST_SUPERVISOR_MODEL||'lfm3:1.7b',domain_overrides:{}
     };
     await evalJs("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');Object.assign(c,"+
-      JSON.stringify(overrides)+");await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__crossSiteEvents=[];for(const name of ['agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required','agent:stage','agent:vision','agent:prerequisite','agent:supervisor','agent:workflow_graph','agent:objective_state','agent:skill_state','agent:model_role','agent:execution_state','agent:requirement_state','agent:evidence_acquisition','agent:catalog_state'])await window.__TAURI__.event.listen(name,e=>window.__crossSiteEvents.push({kind:name,payload:e.payload}));return true})()");
+      JSON.stringify(overrides)+");await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__crossSiteEvents=[];for(const name of ['agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required','agent:plan','agent:stage','agent:vision','agent:prerequisite','agent:supervisor','agent:workflow_graph','agent:objective_replan','agent:workflow_browser_step','agent:workflow_dynamic_tool','agent:objective_state','agent:skill_state','agent:model_role','agent:execution_state','agent:requirement_state','agent:evidence_acquisition','agent:catalog_state'])await window.__TAURI__.event.listen(name,e=>window.__crossSiteEvents.push({kind:name,payload:e.payload}));return true})()");
     async function nativeState(){
       // A newly created WebView2 may not have a loaded native snapshot yet.
       // Treat absence as pending, never as a verified page or a JS exception.
       return evalJs("(async()=>{const s=await window.__TAURI__.core.invoke('capture_live_snapshot');return {observed:s?.origin||null,title:(s?.title||'').slice(0,110),controls:s?.interactive_nodes?.length||0,visible:window.browsphereApp.activeTab()?.url,omnibar:document.getElementById('omnibarInput')?.value}})()");
     }
-    async function runTask(goal,initial='browsphere://start',timeoutSeconds=60){
+    async function runTask(goal,initial='browsphere://start',timeoutSeconds=60,testApproval=null){
       const config=await evalJs("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');return {local:c.prefer_local_for_simple,cloudOnly:c.lucia_cloud_only,localModel:c.ollama_model,cloudModel:c.litellm_model}})()");
       console.log('ROUTER_BEFORE_TASK',JSON.stringify({goal:goal.slice(0,80),config}));
       const id=await evalJs('window.aetherBridge.startLuciaSpecialistTask('+JSON.stringify(goal)+','+JSON.stringify(initial)+",'Cross-site test')");
       if(!/^[a-f0-9-]{36}$/i.test(String(id||''))) throw Error('No task ID');
-      let events=[], end=null, approvalRequired=false;
+      let events=[], end=null, approvalRequired=false,approvalReceipts=[];
+      const handledApprovals=new Set();
       for(let i=0;i<timeoutSeconds;i++){
         await sleep(1000);
         events=(await evalJs('window.__crossSiteEvents.slice(-400)'))||[];
         const mine=events.filter(e=>e.payload?.run_id===id);
-        if(mine.some(e=>e.kind==='agent:approval_required')){
-          approvalRequired=true;
-          await evalJs("window.__TAURI__.core.invoke('cancel_agent_run')");
-          break;
+        const approvals=mine.filter(e=>e.kind==='agent:approval_required'&&!handledApprovals.has(e.payload?.approval_id));
+        if(approvals.length){
+          for(const e of approvals){
+            const a=e.payload,expected=testApproval&&approvalReceipts.length===0&&
+              process.env.LOCALAPPDATA.includes('browsphere-cross-site-')&&a?.action?.type==='navigate'&&a.action.url===testApproval.url&&
+              /^Cross-origin navigation to /.test(a.reason||'');
+            if(!expected){approvalRequired=true;await evalJs("window.__TAURI__.core.invoke('cancel_agent_run')");break;}
+            handledApprovals.add(a.approval_id);
+            await evalJs("window.__TAURI__.core.invoke('resolve_approval',{approvalId:"+JSON.stringify(a.approval_id)+",approved:"+JSON.stringify(testApproval.approved)+"})");
+            approvalReceipts.push({url:a.action.url,approved:testApproval.approved});
+          }
+          if(approvalRequired)break;
         }
         end=mine.find(e=>e.kind==='agent:run_status');
         if(end)break;
@@ -106,7 +115,7 @@ async function main(){
       if(!end && !approvalRequired)await evalJs("window.__TAURI__.core.invoke('cancel_agent_run')");
       const mine=events.filter(e=>e.payload?.run_id===id);
       return {status:approvalRequired?'approval':(end?.payload?.status||'timeout'),
-        approvalRequired, actions:mine.filter(e=>e.kind==='agent:trace')
+        approvalRequired,approvalReceipts, actions:mine.filter(e=>e.kind==='agent:trace')
         .map(e=>({type:e.payload?.action?.type,
           nodeId:e.payload?.action?.node_id,
           outcome:e.payload?.outcome,
@@ -122,7 +131,13 @@ async function main(){
         visionDetails:mine.filter(e=>e.kind==='agent:vision').map(e=>({status:e.payload?.status,reason:e.payload?.reason,failure:e.payload?.failure,failureDetail:e.payload?.failure_detail,inferenceTrace:e.payload?.inference_trace,fusion:e.payload?.fusion,groundedPoints:e.payload?.grounded_points,independentGrounded:e.payload?.independent_grounded,independentProposed:e.payload?.independent_proposed,matchedControl:e.payload?.matched_control})),prerequisites:mine.filter(e=>e.kind==='agent:prerequisite').map(e=>({phase:e.payload?.phase,specialist:e.payload?.specialist,dialog:e.payload?.active_dialog})),
         skills:mine.filter(e=>e.kind==='agent:skill_state').map(e=>({phase:e.payload?.phase,diagnosis:e.payload?.diagnosis,strategy:e.payload?.recovery_strategy})),
         objectives:mine.filter(e=>e.kind==='agent:objective_state').map(e=>({revision:e.payload?.revision,required:e.payload?.required_sources,observed:e.payload?.observed_sources})),
+        plan:mine.filter(e=>e.kind==='agent:plan').at(-1)?.payload?.plan||null,
+        stageEvents:mine.filter(e=>e.kind==='agent:stage').map(e=>({index:e.payload?.index,status:e.payload?.status,objective:e.payload?.objective})),
         graph:mine.filter(e=>e.kind==='agent:workflow_graph').at(-1)?.payload?.graph||null,
+        replans:mine.filter(e=>e.kind==='agent:objective_replan').map(e=>({stage:e.payload?.stage,strategy:e.payload?.strategy,revision:e.payload?.revision})),
+        workflowBrowser:mine.filter(e=>e.kind==='agent:workflow_browser_step').map(e=>e.payload?.status),
+        dynamicTools:mine.filter(e=>e.kind==='agent:workflow_dynamic_tool').map(e=>({status:e.payload?.status,index:e.payload?.index,graph:e.payload?.child_graph})),
+        verificationReports:mine.filter(e=>e.kind==='agent:verification_report').length,
         report:mine.filter(e=>e.kind==='agent:verification_report').at(-1)?.payload?.report||null,
         verified:mine.some(e=>e.kind==='agent:verification_report' && e.payload?.report?.status==='evidence_checked')};
     }
@@ -130,6 +145,69 @@ async function main(){
     if(process.env.LUCIA_PHASE3_CASE){
       if(useCloud||!hasQwen)throw Error('Phase 3 requires installed local models');
       const key=process.env.LUCIA_PHASE3_CASE;
+      if(['structured-chart-fixture','pixel-canvas-fixture','pixel-image-fixture'].includes(key)){
+        const pixel=key!=='structured-chart-fixture',imageOnly=key==='pixel-image-fixture';
+        // Isolated synthetic DOM in an actual native WebView2 child. This
+        // does not modify a remote page/server or assert public chart coverage.
+        if(!process.env.LOCALAPPDATA.includes('browsphere-cross-site-'))throw Error('Non-isolated fixture refused');
+        const url='https://example.com/';
+        await evalJs('window.browsphereApp.newTab('+JSON.stringify(url)+')');
+        let child;
+        for(let i=0;i<40;i++){
+          const matches=(await targets()).filter(t=>t.type==='page'&&t.url===url);
+          if(matches.length===1){child=matches[0];break;}await sleep(500);
+        }
+        if(!child)throw Error('Missing isolated native child WebView2');
+        const ws=new WebSocket(child.webSocketDebuggerUrl);
+        await new Promise((yes,no)=>{ws.onopen=yes;ws.onerror=no;});
+        try{
+          let seq=0;
+          const call=(method,params={})=>new Promise((yes,no)=>{
+            const id=++seq;const timer=setTimeout(()=>no(Error('Fixture CDP timeout')),5000);
+            ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.id!==id)return;clearTimeout(timer);m.error?no(Error(JSON.stringify(m.error))):yes(m.result);};
+            ws.send(JSON.stringify({id,method,params}));
+          });
+          const fixture='<main><h1>Rainfall data</h1><p>Public synthetic rainfall example. These values are only for local browser testing.</p><figure><figcaption>Rainfall chart</figcaption><svg role="img" width="360" height="150" viewBox="0 0 360 150"><g><rect x="20" y="30" width="60" height="80"/><text x="20" y="125">Jan</text><text x="20" y="20">12 mm</text></g><g><rect x="120" y="55" width="60" height="55"/><text x="120" y="125">Feb</text><text x="120" y="45">9 mm</text></g></svg></figure><a href="/">Example source</a></main>';
+          const pixels='<main><h1>Rainfall example</h1><p>Public synthetic chart for local testing.</p><figure><figcaption>Rainfall chart</figcaption><canvas width="480" height="240" style="display:block;width:480px;height:240px"></canvas></figure><a href="/">Example source</a></main>';
+          const draw=()=>{const c=document.querySelector('canvas'),x=c.getContext('2d');x.fillStyle='#ffffff';x.fillRect(0,0,480,240);x.fillStyle='#182f50';x.fillRect(65,66,100,125);x.fillRect(295,98,100,93);x.fillStyle='#111111';x.font='bold 27px Arial';x.textAlign='center';x.fillText('12 mm',115,45);x.fillText('9 mm',345,78);x.fillText('Jan',115,223);x.fillText('Feb',345,223);};
+          const rasterScript=pixel?';('+draw.toString()+')();'+(imageOnly?'const c=document.querySelector("canvas");const img=new Image();img.width=480;img.height=240;img.style.display="block";img.src=c.toDataURL("image/png");c.replaceWith(img);':''):'';
+          const set=await call('Runtime.evaluate',{expression:'document.body.innerHTML='+JSON.stringify(pixel?pixels:fixture)+';document.title="Synthetic rainfall fixture"'+rasterScript+';true',returnByValue:true});
+          if(set?.result?.value!==true)throw Error('Synthetic chart fixture injection failed');
+          let ready=false;
+          for(let i=0;i<20;i++){const page=await nativeState();if(page?.observed===url&&page.title==='Synthetic rainfall fixture'){ready=true;break;}await sleep(300);}
+          if(!ready)throw Error('Synthetic chart not natively observed');
+          const task=await runTask('Extract charts from this page',url,pixel?150:60);
+          const findings=task.report?.findings||[];
+          const checks=pixel?{terminal:task.status==='unverified',verified:task.verified===false,noApproval:!task.approvalRequired,
+            provisional:task.report?.status==='partial_evidence'&&task.report?.summary.includes('Provisional visual chart readings')&&findings.length===0,
+            exactChartPairs:task.report?.summary.includes('Jan: 12 mm')&&task.report?.summary.includes('Feb: 9 mm')&&task.report?.summary.includes(imageOnly?'(img):':'(canvas):'),
+            noExternalActions:task.actions.length===0,fixtureOnly:true}:{terminal:task.status==='completed',verified:task.verified===true,noApproval:!task.approvalRequired,
+            exactChartPairs:findings.length===2&&findings[0]?.quote==='Jan: 12 mm'&&findings[1]?.quote==='Feb: 9 mm'&&findings.every(f=>f.url===url),
+            noExternalActions:task.actions.length===0,fixtureOnly:true};
+          const pass=Object.values(checks).every(Boolean);
+          console.log(pixel?'PIXEL_CHART_RESULT':'STRUCTURED_CHART_RESULT',JSON.stringify({pass,checks,task}));
+          if(!pass)process.exitCode=1;
+          return;
+        }finally{ws.close();}
+      }
+      if(key==='structured-table'){
+        const url='https://www.w3schools.com/html/html_tables.asp';
+        await evalJs('window.browsphereApp.newTab('+JSON.stringify(url)+')');
+        let ready=false;
+        for(let i=0;i<40;i++){const page=await nativeState();if(page?.observed===url&&page.controls>0){ready=true;break;}await sleep(500);}
+        if(!ready)throw Error('Public table fixture unavailable');
+        const task=await runTask('Extract tables from this page',url,60);
+        const findings=task.report?.findings||[];
+        const checks={terminal:task.status==='completed',verified:task.verified===true,noApproval:!task.approvalRequired,
+          exactObservedRow:findings.some(f=>f.url===url&&f.claim.includes('Company = Alfreds Futterkiste')&&f.claim.includes('Contact = Maria Anders')&&f.claim.includes('Country = Germany')),
+          noExternalActions:task.actions.length===0};
+        const pass=Object.values(checks).every(Boolean);
+        console.log('STRUCTURED_TABLE_RESULT',JSON.stringify({pass,checks,task}));
+        record('Native public table extraction',pass,{checks});
+        if(!pass)process.exitCode=1;
+        return;
+      }
+
       const cases={
         'search-wikipedia':{tier:'skill',skill:'search',start:'https://en.wikipedia.org/wiki/Main_Page',
           goal:'On this Wikipedia page, search for Grace Hopper and open the corresponding article. Then report its page title.',
@@ -425,7 +503,155 @@ async function main(){
           record('Cross-site technical comparison with two sourced distinctions',pass,{status:task.status,python,javascript,distinct,verified:task.verified});
         }catch(e){record('Cross-site technical comparison',false,{error:String(e)});}
       }
-      if(wanted('graph')||wanted('negative')||wanted('outage')){
+      if(mode==='interleave'||mode==='specialist'||mode==='specialist-dynamic'||mode==='specialist-adaptive'||mode==='specialist-link-adaptive'||mode==='entry-approved'||mode==='entry-rejected'){
+        const root=path.join(process.env.LOCALAPPDATA,'BrowsphereAI');
+        if(!process.env.LOCALAPPDATA.includes('browsphere-cross-site-'))throw Error('Refusing non-isolated MCP configuration');
+        fs.mkdirSync(root,{recursive:true});
+        const configPath=path.join(root,'mcp-servers.json');
+        const audit=[];
+        const entry=mode==='entry-approved'||mode==='entry-rejected',rejected=mode==='entry-rejected';
+        const linkAdaptive=mode==='specialist-link-adaptive',adaptive=mode==='specialist-adaptive'||linkAdaptive,dynamic=mode==='specialist-dynamic',specialist=mode==='specialist'||dynamic||adaptive||entry;
+        const excerpt=specialist?'Python is an easy to learn, powerful programming language':'This domain is for use in documentation examples';
+        const lookupUrl='https://docs.python.org/3/tutorial/index.html';
+        const server=http.createServer(async(req,res)=>{
+          try{
+            if(req.method==='DELETE'){res.writeHead(204);res.end();return;}
+            if(req.method!=='POST'||req.url!=='/mcp'){res.writeHead(404);res.end();return;}
+            let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>32768)throw Error('oversized request');}
+            const r=JSON.parse(raw);
+            audit.push({method:r.method,name:r.params?.name,args:r.method==='tools/call'?r.params?.arguments:undefined});
+            let result;
+            if(r.method==='initialize')result={protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'observed-excerpt-fixture',version:'1'}};
+            else if(r.method==='notifications/initialized'){res.writeHead(202);res.end();return;}
+            else if(r.method==='tools/list')result={tools:[{name:'verify_excerpt',annotations:{readOnlyHint:true,destructiveHint:false},inputSchema:{type:'object',properties:{text:{type:'string',enum:linkAdaptive?[excerpt,lookupUrl]:[excerpt]}},required:['text'],additionalProperties:false}}]};
+            else if(r.method==='tools/call'&&r.params?.name==='verify_excerpt'&&(r.params?.arguments?.text===excerpt||(linkAdaptive&&r.params?.arguments?.text===lookupUrl)))result={structuredContent:{value:'confirmed'},content:[{type:'text',text:'confirmed'}],isError:false};
+            else throw Error('unexpected tool invocation');
+            res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));
+          }catch(e){res.writeHead(500);res.end('fixture rejected request');}
+        });
+        try{
+          await new Promise((ok,no)=>{server.once('error',no);server.listen(0,'127.0.0.1',ok)});
+          fs.writeFileSync(configPath,JSON.stringify({observed:{url:'http://127.0.0.1:'+server.address().port+'/mcp',read_only_tools:['verify_excerpt']}}));
+          const source=specialist?'https://docs.python.org/3/':'https://example.com/',start=source;
+          const before=await startAt(start);
+          const dest='https://docs.python.org/3/tutorial/index.html';
+          const expectedTitle='The Python Tutorial \u2014 '+before.title;
+          const initial=entry?'https://example.com/':start;
+          if(entry)await startAt(initial);
+          const steps=[
+            {id:'observe',action:specialist?{type:'browser_task',task:'On this Python documentation page, click the Tutorial link. Then report the page title.',url:dest,title:expectedTitle,excerpt,...(entry?{entry_url:start}:{}),...(dynamic?{dynamic_tools:[{trigger_url:dest,trigger_excerpt:excerpt,servers:['observed'],task:'Use verify_excerpt with text exactly '+JSON.stringify(excerpt),expect:{pointer:'/structuredContent/value',equals:'confirmed'}}]}:{}),...(adaptive?{adaptive_lookup:{servers:['observed'],objective:linkAdaptive?'Find the Python Tutorial link and verify its public URL using verify_excerpt text. Report the result.':'Verify the exact public Python tutorial reference using the approved verify_excerpt lookup and report the result',...(linkAdaptive?{source_url:start}:{public_context:excerpt}),expect:{pointer:'/structuredContent/value',equals:'confirmed'}}}:{})}:{type:'observe',url:source,title:'Example Domain',excerpt}},
+            {id:'tool',depends_on:['observe'],action:{type:'call',server:'observed',tool:'verify_excerpt',arguments:{text:{step:'observe',pointer:'/structuredContent/excerpt'}},expect:{pointer:'/structuredContent/value',equals:'confirmed'}}},
+            ...(!specialist?[{id:'browse',depends_on:['observe','tool'],action:{type:'browser',task:'Find more information about example domains using the link on this page. Report the title of the page you reach.'}}]:[])
+          ];
+          const task=await runTask('mcp workflow '+JSON.stringify({steps}),initial,150,entry?{url:start,approved:!rejected}:null);
+          const after=await nativeState();
+          const calls=audit.filter(a=>a.method==='tools/call');
+          const graph=task.graph?.nodes||[];
+          const receipts=graph.filter(n=>n.state==='completed').map(n=>n.receipt);
+          const checks=rejected?{terminal:task.status==='failed',verified:!task.verified,noApproval:!task.approvalRequired,
+            exactApproval:JSON.stringify(task.approvalReceipts)===JSON.stringify([{url:start,approved:false}]),
+            noChildDispatch:task.workflowBrowser.length===0&&calls.length===0&&task.actions.length===0,
+            blockedGraph:graph.length===2&&graph[0].state==='failed'&&graph[1].state==='blocked',
+            unchangedSource:after?.observed===initial
+          }:specialist?{terminal:task.status==='completed',verified:task.verified===true,noApproval:!task.approvalRequired,
+            nativeSpecialistReceipt:JSON.stringify(task.workflowBrowser)===JSON.stringify(entry?['entry_verified','specialist_started','specialist_verified']:['specialist_started','specialist_verified']),
+            ...(entry?{exactApproval:JSON.stringify(task.approvalReceipts)===JSON.stringify([{url:start,approved:true}])}:{}),
+            exactExcerptTransferred:calls.length===((dynamic||adaptive)?2:1)&&calls.every((c,i)=>c.name==='verify_excerpt'&&c.args?.text===(linkAdaptive&&i===0?lookupUrl:excerpt)),
+            ...((dynamic||adaptive)?{dynamicInsertion:task.dynamicTools.length===2&&task.dynamicTools[0].status===(adaptive?'adaptive_inserted':'inserted')&&task.dynamicTools[1].status===(adaptive?'adaptive_verified':'verified')&&task.dynamicTools[0].graph?.nodes?.some(n=>n.kind==='tool'&&n.state==='active')&&task.dynamicTools[1].graph?.nodes?.some(n=>n.kind==='tool'&&n.state==='completed'&&n.receipt==='tool_check')}:{ }),
+            completeGraph:graph.length===2&&graph.every(n=>n.state==='completed'&&n.attempts===1)&&graph[0].receipt==='stage_gate'&&graph[1].receipt==='tool_check',
+            exactDestination:after?.observed===dest&&after?.title===expectedTitle.slice(0,110),
+            actionObserved:task.actions.some(a=>a.type==='click'&&['ok','confirmed'].includes(a.outcome)),
+            finalReportOnce:task.verificationReports===1
+          }:{terminal:task.status==='completed',verified:task.verified===true,noApproval:!task.approvalRequired,
+            exactExcerptTransferred:calls.length===1&&calls[0].name==='verify_excerpt'&&calls[0].args?.text===excerpt,
+            observedDependency:graph.some(n=>n.kind==='observation'&&n.state==='completed'&&n.receipt==='native_observation'),
+            completeGraph:graph.length>=4&&graph.every(n=>n.state==='completed')&&['native_observation','tool_check','stage_gate','final_report'].every(r=>receipts.includes(r)),
+            exactDestination:hostname(after?.observed)==='www.iana.org'&&new URL(after.observed).pathname.replace(/\/$/,'')==='/help/example-domains',
+            coordinateDispatch:task.vision.includes('coordinate_click'),
+            visualAction:task.actions.some(a=>a.type==='click'&&a.modelRoute?.includes('vision:coordinate_click')&&['ok','confirmed'].includes(a.outcome))};
+          const pass=Object.values(checks).every(Boolean);
+          console.log(entry?'CROSS_ORIGIN_BROWSER_MCP':linkAdaptive?'ADAPTIVE_LINK_MCP':adaptive?'ADAPTIVE_BROWSER_MCP':dynamic?'DYNAMIC_BROWSER_MCP':specialist?'RESUMABLE_BROWSER_SPECIALIST':'INTERLEAVED_VISION_MCP',JSON.stringify({pass,checks,task,after,audit}));
+          record(specialist?'Verified browser specialist returns to MCP scheduler':'Native browser observation, exact evidence MCP transfer and visually grounded browser handoff',pass,{checks});
+        }finally{await new Promise(r=>server.close(r));fs.rmSync(configPath,{force:true});}
+      }
+      if(mode==='alternating'){
+        const root=path.join(process.env.LOCALAPPDATA,'BrowsphereAI');
+        if(!process.env.LOCALAPPDATA.includes('browsphere-cross-site-'))throw Error('Refusing non-isolated MCP configuration');
+        fs.mkdirSync(root,{recursive:true});
+        const configPath=path.join(root,'mcp-servers.json');
+        const start='https://doc.rust-lang.org/stable/book/index.html';
+        const mid='https://doc.rust-lang.org/stable/book/ch01-00-getting-started.html';
+        const dest='https://doc.rust-lang.org/stable/book/ch01-01-installation.html';
+        const audit=[];
+        async function oracle(url){
+          await startAt(url);
+          for(let attempt=0;attempt<3;attempt++){
+            const s=await evalJs("Promise.race([window.__TAURI__.core.invoke('capture_live_snapshot'),new Promise(r=>setTimeout(()=>r(null),3500))])").catch(()=>null);
+            if(s?.origin===url&&s.title&&s.interactive_nodes?.length)return s;
+            await sleep(500);
+          }
+          throw Error('Independent page preflight failed');
+        }
+        function visibleLink(s,url){
+          const matches=(s.interactive_nodes||[]).filter(n=>n.tag==='a'&&n.href===url&&n.bbox?.in_viewport&&!n.is_submit&&!n.is_sensitive);
+          const n=matches.find(n=>n.label.trim()&&matches.filter(m=>m.label===n.label).length===1);
+          if(!n)throw Error('Required unique visible link unavailable');
+          return n.label.trim();
+        }
+        const destSnapshot=await oracle(dest);
+        const midSnapshot=await oracle(mid);
+        const startSnapshot=await oracle(start);
+        const label1=visibleLink(startSnapshot,mid),label2=visibleLink(midSnapshot,dest);
+        // Text sent by the tool is independently checked against the user's
+        // approved destination and the native page; it is not a URL authority.
+        const excerpt1='Getting Started',excerpt2='Installation';
+        if(!midSnapshot.text_excerpt?.includes(excerpt1)||!destSnapshot.text_excerpt?.includes(excerpt2))throw Error('Expected public excerpts unavailable');
+        const pairs=[['start',label1],[excerpt1,label2],[excerpt2,'done']];
+        const server=http.createServer(async(req,res)=>{
+          try{
+            if(req.method==='DELETE'){res.writeHead(204);res.end();return;}
+            if(req.method!=='POST'||req.url!=='/mcp'){res.writeHead(404);res.end();return;}
+            let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>32768)throw Error('oversized request');}
+            const r=JSON.parse(raw);let result;
+            if(r.method==='initialize')result={protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'alternating-fixture',version:'1'}};
+            else if(r.method==='notifications/initialized'){res.writeHead(202);res.end();return;}
+            else if(r.method==='tools/list')result={tools:[{name:'lookup',annotations:{readOnlyHint:true,destructiveHint:false},inputSchema:{type:'object',properties:{key:{type:'string',enum:pairs.map(p=>p[0])}},required:['key'],additionalProperties:false}}]};
+            else if(r.method==='tools/call'&&r.params?.name==='lookup'){
+              const pair=pairs.find(p=>p[0]===r.params?.arguments?.key);
+              if(!pair)throw Error('unexpected tool argument');
+              audit.push(pair[0]);
+              result={structuredContent:{value:pair[1]},content:[{type:'text',text:pair[1]}],isError:false};
+            }else throw Error('unexpected MCP method');
+            res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));
+          }catch(e){res.writeHead(500);res.end('fixture rejected request');}
+        });
+        try{
+          await new Promise((ok,no)=>{server.once('error',no);server.listen(0,'127.0.0.1',ok)});
+          fs.writeFileSync(configPath,JSON.stringify({fixture:{url:'http://127.0.0.1:'+server.address().port+'/mcp',read_only_tools:['lookup']}}));
+          const ptr='/structuredContent/value',excerpt='/structuredContent/excerpt';
+          const ref=(step,pointer)=>({step,pointer});
+          const tool=(id,deps,key,equals)=>({id,depends_on:deps,action:{type:'call',server:'fixture',tool:'lookup',arguments:{key},expect:{pointer:ptr,equals}}});
+          const steps=[
+            tool('a',[],'start',label1),
+            {id:'web1',depends_on:['a'],action:{type:'follow_link',source_url:start,label:ref('a',ptr),url:mid,title:midSnapshot.title,excerpt:excerpt1}},
+            tool('b',['web1'],ref('web1',excerpt),label2),
+            {id:'web2',depends_on:['b'],action:{type:'follow_link',source_url:mid,label:ref('b',ptr),url:dest,title:destSnapshot.title,excerpt:excerpt2}},
+            tool('c',['web2'],ref('web2',excerpt),'done')
+          ];
+          const task=await runTask('mcp workflow '+JSON.stringify({steps}),start,100);
+          const after=await nativeState();
+          const nodes=task.graph?.nodes||[];
+          const checks={terminal:task.status==='completed',verified:task.verified===true,noApproval:!task.approvalRequired,
+            exactMcpOrder:JSON.stringify(audit)===JSON.stringify(pairs.map(p=>p[0])),
+            alternatingGraph:nodes.length===5&&nodes.every((n,i)=>n.state==='completed'&&n.attempts===1&&n.kind===(i%2?'browser':'tool')&&n.receipt===(i%2?'stage_gate':'tool_check')),
+            nativeLinkReceipts:JSON.stringify(task.workflowBrowser)===JSON.stringify(['dispatched','verified','dispatched','verified']),
+            exactDestination:after?.observed===dest&&after?.title===destSnapshot.title.slice(0,110)};
+          const pass=Object.values(checks).every(Boolean);
+          console.log('ALTERNATING_BROWSER_MCP',JSON.stringify({pass,checks,task,after,audit}));
+          record('MCP to native link to MCP to native link to MCP',pass,{checks});
+        }finally{await new Promise(r=>server.close(r));fs.rmSync(configPath,{force:true});}
+      }
+      if(wanted('graph')||wanted('negative')||wanted('outage')||mode==='joint'){
         const root=path.join(process.env.LOCALAPPDATA,'BrowsphereAI');
         if(!process.env.LOCALAPPDATA.includes('browsphere-cross-site-'))throw Error('Refusing non-isolated MCP configuration');
         fs.mkdirSync(root,{recursive:true});
@@ -471,13 +697,13 @@ async function main(){
           const ptr='/structuredContent/value';
           const ref=step=>({step,pointer:ptr});
           const steps=wrong=>[
-            {id:'repository',action:{type:'auto',servers:['empty','github'],task:'Use repository_metadata for repository psf/requests to retrieve its package name.',expect:{pointer:ptr,equals:wrong?'deliberately-incorrect':'requests'}}},
+            {id:'repository',action:{type:'auto',servers:mode==='joint'?['pypi','github']:['empty','github'],...(mode==='joint'?{joint_selection:true}:{}),task:'Use repository_metadata for repository psf/requests to retrieve its package name.',expect:{pointer:ptr,equals:wrong?'deliberately-incorrect':'requests'}}},
             {id:'registry',depends_on:['repository'],action:{type:'call',server:'pypi',tool:'package_metadata',arguments:{package:ref('repository')},expect:{pointer:ptr,equals:'requests'}}},
             {id:'crosscheck',depends_on:['repository','registry'],action:{type:'compare',left:ref('repository'),right:ref('registry')}},
             {id:'web',depends_on:['repository','registry','crosscheck'],action:{type:'browser',task:'Open '+target}}
           ];
           for(const negative of [false,true]){
-            if(negative?!wanted('negative'):!(wanted('graph')||wanted('outage')))continue;
+            if(negative?!wanted('negative'):!(wanted('graph')||wanted('outage')||mode==='joint'))continue;
             const offset=audit.length;
             try{
               await startAt(start);
@@ -489,13 +715,17 @@ async function main(){
               const transferred=calls.some(a=>a.lane==='pypi'&&a.method==='tools/call'&&a.args?.package==='requests');
               const emptyNoDispatch=!calls.some(a=>a.lane==='empty'&&a.method==='tools/call');
               const emptyDiscovered=calls.some(a=>a.lane==='empty'&&a.method==='tools/list');
+              const firstDispatch=calls.findIndex(a=>a.method==='tools/call');
+              const bothDiscoveredBeforeDispatch=firstDispatch>0&&['github','pypi'].every(l=>calls.slice(0,firstDispatch).some(a=>a.lane===l&&a.method==='tools/list'));
+              const dispatched=calls.filter(a=>a.method==='tools/call').map(a=>a.lane);
+              const jointSelectionVerified=bothDiscoveredBeforeDispatch&&JSON.stringify(dispatched)===JSON.stringify(['github','pypi']);
               const graph=task.graph?.nodes||[];
               const receipts=graph.filter(n=>n.state==='completed').map(n=>n.receipt);
               const fullGraph=graph.length>=5&&graph.every(n=>n.state==='completed')&&receipts.includes('comparison_check')&&receipts.includes('final_report');
               const blocked=graph.some(n=>n.state==='failed')&&graph.some(n=>n.state==='blocked');
               const pass=negative?github&&emptyNoDispatch&&!pypi&&!calls.some(a=>a.lane==='pypi'&&a.method==='tools/call')&&!task.verified&&task.status!=='completed'&&blocked&&after.observed===start&&!task.approvalRequired:
-                github&&pypi&&transferred&&emptyNoDispatch&&(mode==='outage'?calls.some(a=>a.lane==='empty'&&a.method==='initialize'):emptyDiscovered)&&fullGraph&&after.observed===target&&task.status==='completed'&&task.verified&&!task.approvalRequired;
-              console.log('COMPLEX_GRAPH',JSON.stringify({negative,pass,github,pypi,transferred,emptyNoDispatch,emptyDiscovered,fullGraph,blocked,after,task,audit:calls}));
+                github&&pypi&&transferred&&emptyNoDispatch&&(mode==='joint'?jointSelectionVerified:mode==='outage'?calls.some(a=>a.lane==='empty'&&a.method==='initialize'):emptyDiscovered)&&fullGraph&&after.observed===target&&task.status==='completed'&&task.verified&&!task.approvalRequired;
+              console.log('COMPLEX_GRAPH',JSON.stringify({negative,pass,github,pypi,transferred,emptyNoDispatch,emptyDiscovered,fullGraph,blocked,after,task,audit:calls,...(mode==='joint'?{checks:{jointSelectionVerified,bothDiscoveredBeforeDispatch}}:{})}));
               record(negative?'Failed evidence blocks dependent external call':'Four-step MCP dependency chain and native browser verification',pass,{status:task.status,github,pypi,transferred,fullGraph,blocked,verified:task.verified});
             }catch(e){record(negative?'Dependency stop':'Hybrid DAG',false,{error:String(e),audit:audit.slice(offset)});}
           }
@@ -577,6 +807,46 @@ async function main(){
       }finally{await new Promise(r=>server.close(r));}
       return;
     }
+    if (process.env.LUCIA_SEMANTIC_BROWSER_TEST === '1') {
+      if(useCloud||!hasQwen)throw Error('Semantic browser validation requires local models');
+      const cases=[
+        {name:'Ordered Rust documentation navigation',url:'https://doc.rust-lang.org/stable/book/index.html',goal:'First open the Getting Started chapter, then locate the Installation section. Use public pages only.',path:'/stable/book/ch01-01-installation.html',constraint:'Use public pages only'},
+        {name:'Ordered Python documentation navigation',url:'https://docs.python.org/3/',goal:'First open the Python tutorial, then locate its chapter on data structures. Do not download any files.',path:'/3/tutorial/datastructures.html',constraint:'Do not download any files'}
+      ];
+      for(const t of cases){
+        try{
+          await evalJs('window.browsphereApp.newTab('+JSON.stringify(t.url)+')');
+          let before;
+          for(let i=0;i<45;i++){
+            before=await nativeState();
+            if(hostname(before?.observed)===hostname(t.url)&&before.controls>0)break;
+            await sleep(400);
+          }
+          if(hostname(before?.observed)!==hostname(t.url)||!before.controls||/access denied|not found|privacy error/i.test(before.title))throw Error('Starting public page unavailable');
+          const task=await runTask(t.goal,t.url,200);
+          const after=await nativeState();
+          const concepts=task.plan?.semantic?.concepts||[],relations=task.plan?.semantic?.relations||[];
+          const objectiveNodes=concepts.filter(c=>c.kind==='objective');
+          const checks={
+            semanticGraph:objectiveNodes.length>=2&&relations.some(r=>r.kind==='depends_on'),
+            constraint:concepts.some(c=>c.kind==='constraint'&&c.span.includes(t.constraint)),
+            grounded:concepts.every(c=>t.goal.includes(c.span)),
+            exactDestination:hostname(after.observed)===hostname(t.url)&&new URL(after.observed).pathname===t.path,
+            terminal:task.status==='completed'&&task.verified,
+            noApproval:!task.approvalRequired,
+            noDownload:!task.actions.some(a=>a.type==='download'),
+            realActions:task.actions.filter(a=>a.type!=='complete'&&['ok','confirmed'].includes(a.outcome)).length>=2,
+            graphComplete:!!task.graph?.nodes?.length&&task.graph.nodes.every(n=>n.state==='completed')
+          };
+          const passed=Object.values(checks).every(Boolean);
+          console.log('SEMANTIC_BROWSER_DETAIL',JSON.stringify({name:t.name,passed,checks,after,task}));
+          record(t.name,passed,checks);
+        }catch(e){record(t.name,false,{error:String(e)});}
+      }
+      console.log('SEMANTIC_BROWSER_SUMMARY',JSON.stringify({passed:result.filter(r=>r.success).length,total:result.length,results:result}));
+      if(result.some(r=>!r.success))process.exitCode=1;
+      return;
+    }
     if (process.env.LUCIA_GENERALIZATION_TEST === '1') {
       if (useCloud || !hasQwen) throw Error('Generalization tests require a local model');
       // New targets, not the URLs from the three-task MCP benchmark.
@@ -597,7 +867,7 @@ async function main(){
             await sleep(400);
           }
           if(hostname(before?.observed)!==hostname(t.url)||!before.controls||/access denied|not found|privacy error/i.test(before.title))throw Error('Public starting page unavailable');
-          const task=await runTask(t.goal,t.url,100);
+          const started=Date.now();const task=await runTask(t.goal,t.url,140);const elapsedMs=Date.now()-started;
           const after=await nativeState();
           const exact=hostname(after.observed)===hostname(t.url)&&new URL(after.observed).pathname===t.expected;
           const acts=task.actions.filter(a=>a.type!=='complete'&&['ok','confirmed'].includes(a.outcome));
@@ -605,7 +875,7 @@ async function main(){
           const nativeActed=acts.some(a=>/prerequisite:|search_input:|search_enter:/.test(a.modelRoute||''));
           const passed=exact&&acts.length>0&&task.status==='completed'&&task.verified&&!task.approvalRequired;
           console.log('GENERALIZATION_DETAIL',JSON.stringify({label:t.label,passed,exact,modelActed,nativeActed,task,before,after}));
-          record(t.label,passed,{exact,modelActed,nativeActed,status:task.status,verified:task.verified});
+          record(t.label,passed,{exact,modelActed,nativeActed,status:task.status,verified:task.verified,elapsedMs,replans:task.replans,graph:task.graph});
         }catch(e){record(t.label,false,{error:String(e)});}
       }
       console.log('GENERALIZATION_RESULT',JSON.stringify({passed:result.filter(x=>x.success).length,total:result.length,results:result}));

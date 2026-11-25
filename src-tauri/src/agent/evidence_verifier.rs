@@ -201,6 +201,11 @@ pub fn research_facets(goal:&str)->Vec<&'static str>{
         }
         if !facets.is_empty(){return facets;}
     }
+    if (g.contains("compare")||g.contains("comparison"))&&
+        ["what each produces","what each returns","output of each","what each generates","what each creates","result of each"].iter().any(|m|g.contains(m))&&
+        ["limitation","distinction","caveat","constraint","drawback"].iter().any(|m|g.contains(m)){
+        return vec!["output_behavior","operational_distinction"];
+    }
     if (g.contains("feature")||g.contains("capabilit")||g.contains("advantage"))&&
         (g.contains("limitation")||g.contains("caveat")||g.contains("drawback")){
         vec!["feature","caveat"]
@@ -258,6 +263,14 @@ fn facet_score(goal:&str,facet:&str,text:&str)->i32{
         let compatibility=["support","requires","require ","version","compatible","works with","or later","or newer","minimum","and above","+","requires-python"];
         return compatibility.iter().filter(|v|t.contains(**v)).count() as i32;
     }
+    if matches!(facet,"output_behavior"|"operational_distinction"){
+        let result=["creates a new","create a new","create lists","create arrays","creates lists","creates arrays","creates an","produces a","produces an","returns a","returns an","returns the","return value","generates a","generates an","constructs a","builds a","resulting list","resulting array","yields a","yields an"];
+        let distinction=["only if","only when","only for","not invoked","does not","cannot","must not","should not","do not","not recommended","unless","except","if clause","if clauses","for clause","for clauses","conditional","condition","filtering","filter out","sparse","side effect","side-effect","optional","required","at least","at most","raises","restriction","limitation","not mutate","in place"];
+        let markers=if facet=="output_behavior"{&result[..]}else{&distinction[..]};
+        let count=markers.iter().filter(|m|t.contains(**m)).count() as i32;
+        if t.starts_with(">>>")||t.starts_with("js const")||t.starts_with("console.log")||t.contains("last modified"){return 0;}
+        return count;
+    }
     let markers:&[&str]=match facet{
         "feature"=>&["supports","allows","provides","can use","you can","lets you","request methods","offers","available","enables","use the","use a","returns"],
         "caveat"=>&["do not","don't","must not","should not","avoid","cannot","not recommended","be careful","warning","make sure","must ","need to","should ","remember to","not support","not possible","by default","no timeout","otherwise","unless"],
@@ -294,6 +307,14 @@ fn quality_tier(goal:&str,facet:&str,text:&str)->u8{
     if facet_score(goal,facet,text)==0{return 0;}
     if matches!(facet,"contrast_left"|"contrast_right"){
         return if facet_score(goal,facet,text)>=5{3}else{1};
+    }
+    if facet=="output_behavior"{
+        let direct=["creates a new","create a new","create lists","create arrays","creates lists","creates arrays","produces a","produces an","returns a","returns an","generates a","constructs a","builds a"];
+        return if direct.iter().any(|m|t.contains(m)){3}else{1};
+    }
+    if facet=="operational_distinction"{
+        let direct=["only if","only when","only for","not invoked","does not","cannot","must not","do not","unless","if clause","for clause","filter out","sparse","side effect","side-effect"];
+        return if direct.iter().any(|m|t.contains(m)){3}else{1};
     }
     if normalized(goal).contains("http client librar"){
         if facet=="caveat"{
@@ -374,6 +395,10 @@ pub fn facet_candidates(goal:&str,source:&SourceEvidence)->Vec<FacetCandidates>{
         // Prevent a weaker incidental example/default from being selected
         // when a directly supporting operational passage is available.
         if normalized(goal).contains("http client librar")&&matches!(facet,"feature"|"caveat"){
+            let best=ranked.iter().map(|(_,_,p)|quality_tier(goal,facet,p)).max().unwrap_or(0);
+            ranked.retain(|(_,_,p)|quality_tier(goal,facet,p)==best);
+        }
+        if matches!(facet,"output_behavior"|"operational_distinction"){
             let best=ranked.iter().map(|(_,_,p)|quality_tier(goal,facet,p)).max().unwrap_or(0);
             ranked.retain(|(_,_,p)|quality_tier(goal,facet,p)==best);
         }
@@ -535,6 +560,10 @@ pub fn assemble_extractive_comparison(goal:&str,sources:&[SourceEvidence],findin
                 }
             }
         }
+    }
+    if !super::deliberation::explicit_research_sources(goal).is_empty()&&!facets.is_empty(){
+        let mut ledger=super::requirements::Ledger::compile(goal);
+        ledger.validate_report(goal,sources,&report)?;
     }
     Ok(report)
 }
@@ -721,15 +750,39 @@ pub fn verify_observed_named_result_title(
 /// A narrowly scoped, read-only link-and-title task such as
 /// "click the Tutorial link ... report the page title". Do not use this for
 /// forms, purchases, arbitrary navigation, or tasks without a named link.
+// A leading site description is context, not an action verb. Keep all
+// other restrictions on the original goal, including consequential actions.
+pub(crate) fn title_task_action_text(g:&str)->&str{
+    g.strip_prefix("on this ").and_then(|v|v.split_once(" page, "))
+        .filter(|(site,task)|!site.is_empty()&&site.chars().all(|c|c.is_alphanumeric()||matches!(c,' '|'_'|'-'))&&
+            (task.starts_with("click ")||task.starts_with("search for ")||task.starts_with("open ")))
+        .map(|(_,task)|task).unwrap_or(g)
+}
 fn title_only_goal(lower:&str)->bool{
     let g=lower.trim().trim_end_matches(['.','!','?']).trim();
     let g=g.strip_suffix(". do not navigate to unrelated pages").unwrap_or(g);
     ["report its page title","report the page title","report page title","report its title","report the title"].iter().any(|s|g.ends_with(s))
-        && !["meaning","explain","summarize","compare","extract","purchase","buy ","book ","submit","pay ","download","publish","register","send "].iter().any(|s|g.contains(s))
+        && !["meaning","explain","summarize","compare","extract","purchase","buy ","submit","pay ","download","publish","register","send "].iter().any(|s|g.contains(s))
+        && !super::browser_skills::phrase(title_task_action_text(g),"book")
 }
 pub fn requested_named_link_title(goal: &str) -> Option<String> {
     let lower = goal.to_ascii_lowercase();
     if !title_only_goal(&lower) { return None; }
+    // Narrow generic reference discovery: the requested document category
+    // must occur in the user goal, and a unique live link must still match.
+    if let Some(rest)=lower.strip_prefix("find the "){
+        if let Some((description,tail))=rest.split_once(" on this "){
+            let ending=tail.trim_end_matches(['.','!','?']).trim();
+            if ["open it and report its page title","open it and report the page title","open it and report its title","open it and report the title"].iter().any(|phrase|ending.ends_with(phrase)){
+                let kind=description.split(" for ").next()?.trim();
+                let kind=kind.strip_prefix("introductory ").or_else(||kind.strip_prefix("beginner ")).unwrap_or(kind);
+                if matches!(kind,"tutorial"|"guide"|"manual"|"reference"|"documentation")&&
+                    tail.split('.').next().is_some_and(|v|v.ends_with("website")||v.ends_with("page")){
+                    return Some(kind.to_string());
+                }
+            }
+        }
+    }
     let (start,via_visible) = if let Some(i)=lower.find("click the "){(i+"click the ".len(),false)}
         else if let Some(i)=lower.find("click "){(i+"click ".len(),false)}
         else if let Some(i)=lower.find("open the "){(i+"open the ".len(),true)}
@@ -1082,6 +1135,18 @@ mod tests {
     }
 
     #[test]
+    fn generic_reference_discovery_preserves_narrow_title_goal(){
+        assert_eq!(requested_named_link_title("Find the introductory guide for learning Example on this documentation website. Open it and report its page title.").as_deref(),Some("guide"));
+        assert_eq!(requested_named_link_title("Find the introductory tutorial for learning a language on this documentation website. Open it and report the page title.").as_deref(),Some("tutorial"));
+        assert_eq!(requested_named_link_title("Find the beginner manual on this website. Open it and report the title.").as_deref(),Some("manual"));
+        assert!(requested_named_link_title("Find the introductory guide for learning Example on this website. Open it and report its page title. Then buy it.").is_none());
+        assert!(super::super::deliberation::read_only("On this Reference Book page, click the Introduction link. Then report the page title."));
+        assert!(!super::super::deliberation::read_only("Book a ticket and report the page title."));
+        assert!(requested_named_link_title("On this Reference Book page, click the Introduction link. Then book a ticket and report the page title.").is_none());
+        assert!(requested_named_link_title("On this Reference Book page, click the Introduction link. Then report the page title.").is_some());
+    }
+
+    #[test]
     fn named_link_title_requires_matching_destination_and_real_evidence() {
         let goal = "On this Python documentation homepage, click the Tutorial link to open the Python Tutorial page. Then report the page title.";
         assert_eq!(requested_named_link_title(goal).as_deref(), Some("Tutorial"));
@@ -1362,6 +1427,24 @@ mod extractive_comparison_tests{
         assert!(facet_findings(goal,&source,&sets,r#"{"feature":"feature_1","caveat":"caveat_1"}"#).is_ok());
         let only=SourceEvidence{excerpt:"The library supports asynchronous HTTP requests with a reusable client.".into(),..source};
         assert!(facet_candidates(goal,&only).iter().find(|s|s.facet=="caveat").unwrap().candidates.is_empty());
+    }
+    #[test]
+    fn per_source_output_and_distinction_requires_distinct_support(){
+        let goal="Compare the two transformation functions using https://one.example/guide and https://two.example/guide . Explain what each produces and one limitation or distinction of each. Cite both sources.";
+        let a=SourceEvidence{url:"https://one.example/guide".into(),title:"Transformation A".into(),excerpt:"The transformation creates a new list containing the processed items. A conditional expression filters out elements that fail the predicate. General information about the transformation is available in the guide.".into()};
+        let b=SourceEvidence{url:"https://two.example/guide".into(),title:"Transformation B".into(),excerpt:"The operation creates a new array populated with transformed values. The callback is invoked only for positions containing assigned values. The examples are listed in the guide.".into()};
+        assert_eq!(research_facets(goal),vec!["output_behavior","operational_distinction"]);
+        let choose=|source:&SourceEvidence|{
+            let sets=facet_candidates(goal,source);
+            assert!(sets.iter().all(|set|!set.candidates.is_empty()));
+            let choices=sets.iter().map(|set|(set.facet.clone(),set.candidates[0].id.clone())).collect::<std::collections::BTreeMap<_,_>>();
+            facet_findings(goal,source,&sets,&serde_json::to_string(&choices).unwrap()).unwrap()
+        };
+        let mut findings=choose(&a);findings.extend(choose(&b));
+        assert!(assemble_extractive_comparison(goal,&[a.clone(),b.clone()],findings.clone()).is_ok());
+        findings.retain(|f|!f.quote.contains("callback"));
+        assert!(assemble_extractive_comparison(goal,&[a,b],findings).is_err());
+        assert_eq!(facet_score(goal,"output_behavior","General information about the transformation is available."),0);
     }
     #[test]
     fn selects_only_observed_ids_and_requires_every_requested_source(){

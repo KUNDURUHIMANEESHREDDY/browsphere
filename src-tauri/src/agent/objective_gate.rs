@@ -111,8 +111,14 @@ fn relevant_navigation(goal:&str,page:&DomSnapshot,url:&str)->bool{
 pub struct ReplacementPlanner{
     attempted:std::collections::HashSet<(String,String)>,
     typed:Option<(String,String)>,
+    stage:Option<usize>,
 }
 impl ReplacementPlanner{
+    pub fn set_stage(&mut self,stage:usize){
+        if self.stage!=Some(stage){
+            self.stage=Some(stage);self.attempted.clear();self.typed=None;
+        }
+    }
     pub fn note(&mut self,goal:&str,before:&DomSnapshot,action:&BrowserAction,ok:bool){
         if !ok{return;}
         if let BrowserAction::TypeText{node_id,text,is_sensitive:false}=action{
@@ -125,6 +131,9 @@ impl ReplacementPlanner{
     /// Choose a distinct, directly grounded public action. Normal policy and
     /// live binding must still run after this decision.
     pub fn next(&mut self,goal:&str,page:&DomSnapshot,ledger:&ObjectiveLedger,routes:&super::semantic_core::RouteLedger)->Option<BrowserAction>{
+        self.next_for_stage(goal,goal,page,ledger,routes)
+    }
+    pub fn next_for_stage(&mut self,goal:&str,objective:&str,page:&DomSnapshot,ledger:&ObjectiveLedger,routes:&super::semantic_core::RouteLedger)->Option<BrowserAction>{
         if !super::deliberation::read_only(goal)||ledger.active()||
             super::prerequisites::route_values(goal).is_some()||super::prerequisites::filter_constraints(goal).is_some()||
             super::deliberation::error_page(page)||super::recovery::authentication_gate(page)||page.text_excerpt.starts_with("Active dialog:"){return None;}
@@ -150,7 +159,8 @@ impl ReplacementPlanner{
                 let path=url::Url::parse(url).ok().map(|u|u.path().replace(['-','_','/']," ")).unwrap_or_default();
                 let path_score=super::semantic_core::relevance(goal,&path) as i32;
                 let exact=query.as_ref().is_some_and(|q|phrase(&format!("{} {path}",n.label),q));
-                let score=if exact{110}else{label_score*20+path_score*10+if docs_waypoint(goal,&n.label,url){35}else{0}};
+                let stage_score=super::semantic_core::stage_relevance(goal,objective,&format!("{} {path}",n.label)) as i32;
+                let score=if exact{110}else{label_score*20+path_score*10+stage_score*35+if docs_waypoint(goal,&n.label,url){35}else{0}};
                 if score>=20{proposals.push((score,format!("link:{url}"),BrowserAction::Navigate{url:url.clone()}));}
             }
         }
@@ -240,6 +250,18 @@ mod tests{
   assert!(matches!(planner.next(g,&p,&l,&routes),Some(BrowserAction::Navigate{url}) if url=="https://example.org/sql-insert.html"));
   assert!(planner.next(g,&p,&l,&routes).is_none());
   assert!(check(g,&p.origin,&p,&l,&BrowserAction::Navigate{url:"https://example.org/televisions".into()}).is_err());
+ }
+ #[test]fn recovery_prefers_current_objective_and_keeps_attempts_stage_scoped(){
+  let mut p=page();
+  p.interactive_nodes=vec![node("first","Installation",Some("https://example.org/installation")),node("second","Compatibility",Some("https://example.org/compatibility"))];
+  let goal="Research installation and compatibility details";let l=ObjectiveLedger::new(goal);
+  let mut planner=ReplacementPlanner::default();let mut routes=super::super::semantic_core::RouteLedger::default();routes.observe(0,&p.origin);
+  planner.set_stage(0);
+  assert!(matches!(planner.next_for_stage(goal,"Read compatibility",&p,&l,&routes),Some(BrowserAction::Navigate{url}) if url.ends_with("/compatibility")));
+  assert!(matches!(planner.next_for_stage(goal,"Read compatibility",&p,&l,&routes),Some(BrowserAction::Navigate{url}) if url.ends_with("/installation")));
+  assert!(planner.next_for_stage(goal,"Read compatibility",&p,&l,&routes).is_none());
+  planner.set_stage(1);routes.observe(1,&p.origin);
+  assert!(matches!(planner.next_for_stage(goal,"Read installation",&p,&l,&routes),Some(BrowserAction::Navigate{url}) if url.ends_with("/installation")));
  }
  #[test]fn named_lookup_rejects_irrelevant_but_observed_navigation(){
   let mut p=page();
