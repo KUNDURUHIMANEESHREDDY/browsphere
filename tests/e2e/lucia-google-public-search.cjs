@@ -54,7 +54,7 @@ async function main(){
      "c.planner_model='lucia-local-e2e';c.supervisor_model='lucia-local-e2e';c.vision_model='';"+
      "await window.__TAURI__.core.invoke('update_router_config',{config:c});"+
      "window.__googleAcceptance=[];"+
-     "for(const kind of ['agent:trace','agent:run_status','agent:run_error'])"+
+     "for(const kind of ['agent:trace','agent:run_status','agent:run_error','agent:google_search_diagnostic'])"+
      "await window.__TAURI__.event.listen(kind,e=>window.__googleAcceptance.push({kind,payload:e.payload}));return true})()";
    await evaluate(config);
    await evaluate("window.browsphereApp.newTab('https://www.google.com/')");
@@ -72,7 +72,7 @@ async function main(){
      JSON.stringify(goal)+","+JSON.stringify(home.origin)+","+JSON.stringify(home.title)+","+
      JSON.stringify(taskTab)+")");
    if(!/^[0-9a-f-]{36}$/i.test(String(runId||'')))throw Error('No native agent run ID');
-   let queryVerified=false,resultClick=false,destination=null,actions=[],errors=[],runStatuses=[];
+   let queryVerified=false,resultClick=false,destination=null,actions=[],errors=[],runStatuses=[],diagnostics=[];
    let loggedResultLinks=false;
    for(let i=0;i<110;i++){
      await sleep(1000);
@@ -83,6 +83,8 @@ async function main(){
      }));
      errors=events.filter(e=>e.kind==='agent:run_error').map(e=>String(e.payload?.message||'').slice(0,200));
      runStatuses=events.filter(e=>e.kind==='agent:run_status').map(e=>e.payload?.status);
+     diagnostics=events.filter(e=>e.kind==='agent:google_search_diagnostic')
+       .map(e=>e.payload).slice(-18);
      queryVerified||=actions.some(a=>a.type==='navigate'&&a.route?.includes('google_research:exact_user_query')
        &&/verified|confirmed|success|ok/i.test(a.outcome||''));
      resultClick||=actions.some(a=>a.type==='click'&&a.route?.includes('google_research:first_observed_result')
@@ -112,7 +114,7 @@ async function main(){
      if(runStatuses.length)break;
    }
    console.log('GOOGLE_NATIVE_ACCEPTANCE',JSON.stringify({
-     queryVerified,resultClick,destination,actions,errors,runStatuses
+     queryVerified,resultClick,destination,actions,errors,runStatuses,diagnostics
    }).slice(0,11000));
    if(!queryVerified)throw Error('Exact Google query was not verified');
    if(!resultClick)throw Error('First relevant result click was not confirmed');
