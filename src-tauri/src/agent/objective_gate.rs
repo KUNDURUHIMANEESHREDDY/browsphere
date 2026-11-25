@@ -125,9 +125,7 @@ fn relevant_navigation(goal:&str,page:&DomSnapshot,url:&str)->bool{
     // observed links or explicitly named sources.
     if super::policy::requested_google_research_url(goal)
         .as_ref().is_some_and(|target|target.as_str()==url)
-        && url::Url::parse(&page.origin).ok().is_some_and(|here|
-            matches!(here.host_str(),Some("google.com"|"www.google.com"))
-            && here.path()=="/" && here.query().is_none()){
+        && super::policy::is_public_google_homepage(&page.origin){
         return true;
     }
     if super::catalog_research::entry_allowed(goal,url){return true;}
@@ -274,6 +272,8 @@ mod tests{
         let ledger=ObjectiveLedger::new(goal);
         assert!(check(goal,&p.origin,&p,&ledger,&BrowserAction::Navigate{url:target.clone()}).is_ok());
         assert!(check(goal,&p.origin,&p,&ledger,&BrowserAction::Navigate{url:"https://www.google.com/search?q=unrelated".into()}).is_err());
+        p.origin="https://www.google.com/?zx=1795622658721".into();
+        assert!(check(goal,&p.origin,&p,&ledger,&BrowserAction::Navigate{url:target.clone()}).is_ok());
         p.origin=target.clone();
         assert!(check(goal,&p.origin,&p,&ledger,&BrowserAction::Navigate{url:target}).is_err());
     }
