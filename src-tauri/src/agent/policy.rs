@@ -229,6 +229,21 @@ pub fn requested_music_entry_url(goal: &str) -> Option<Url> {
     Url::parse("https://www.youtube.com/").ok()
 }
 
+/// A request to play *any* song delegates the choice of music. Use a
+/// fixed public-domain classical composition as a bounded discovery query.
+/// This never supplies a fabricated video ID or certifies playback; selecting
+/// a video still requires an actual YouTube results page and observed link.
+pub fn requested_unspecified_music_search_url(goal:&str)->Option<Url>{
+    let g=goal.trim().trim_end_matches(['.','!','?']).trim().to_ascii_lowercase();
+    if !matches!(g.as_str(),"play any song"|"play a song"|"play music"|
+        "play any music"|"play some music"|"play a music video"|"play some songs"){
+        return None;
+    }
+    let mut url=Url::parse("https://www.youtube.com/results").ok()?;
+    url.query_pairs_mut().append_pair("search_query","Beethoven Fur Elise piano performance");
+    Some(url)
+}
+
 /// A user who asks to search a named public website has already authorized
 /// ordinary navigation to that website. Recognize only explicit request shapes,
 /// never suggestions found in page content or generated model thoughts.
@@ -595,6 +610,13 @@ mod tests {
                 &navigate("https://www.youtube.com/"), &[], music).1,
                 PolicyDecision::Allow),"Expected trusted entry only: {music}");
         }
+        let chosen=requested_unspecified_music_search_url("play any song").unwrap();
+        assert_eq!(chosen.host_str(),Some("www.youtube.com"));
+        assert_eq!(chosen.path(),"/results");
+        assert_eq!(chosen.query_pairs().find(|(k,_)|k=="search_query").unwrap().1,
+            "Beethoven Fur Elise piano performance");
+        assert!(requested_unspecified_music_search_url("open youtube and play any music").is_none());
+        assert!(requested_unspecified_music_search_url("how to play music").is_none());
         for unrelated in ["how to play any song", "play any song and download it",
             "play any song and buy an album", "play a random song then log in",
             "play any song https://example.org", "play any song; delete files"] {
