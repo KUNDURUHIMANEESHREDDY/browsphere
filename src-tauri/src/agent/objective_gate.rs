@@ -120,6 +120,16 @@ fn lookup_link_matches(subject:&str,label:&str,url:&str)->bool{
 }
 fn relevant_navigation(goal:&str,page:&DomSnapshot,url:&str)->bool{
     if off_topic(goal,url){return false}
+    // Only the exact user-requested Google research query may be opened
+    // from its public homepage. All other navigation remains grounded in
+    // observed links or explicitly named sources.
+    if super::policy::requested_google_research_url(goal)
+        .as_ref().is_some_and(|target|target.as_str()==url)
+        && url::Url::parse(&page.origin).ok().is_some_and(|here|
+            matches!(here.host_str(),Some("google.com"|"www.google.com"))
+            && here.path()=="/" && here.query().is_none()){
+        return true;
+    }
     if super::catalog_research::entry_allowed(goal,url){return true;}
     if goal.split_whitespace().any(|s|s.trim_matches(['(',')','[',']','"', '\'',',','.',';'])==url){return true;}
     if super::policy::requested_navigation_url(goal).is_some_and(|u|u.as_str()==url){return true;}
@@ -255,6 +265,18 @@ pub fn check(goal:&str,initial:&str,page:&DomSnapshot,ledger:&ObjectiveLedger,ac
 mod tests{
  use super::*;
  use super::super::dom_extractor::DomNodeSummary;
+    #[test]fn exact_google_query_can_navigate_without_unobserved_links(){
+        let goal="Search Google for the best free note-taking apps for Windows. Open the first three relevant results and compare their features and limitations.";
+        let mut p=page();
+        p.origin="https://www.google.com/".into();
+        p.interactive_nodes.clear();
+        let target=super::super::policy::requested_google_research_url(goal).unwrap().to_string();
+        let ledger=ObjectiveLedger::new(goal);
+        assert!(check(goal,&p.origin,&p,&ledger,&BrowserAction::Navigate{url:target.clone()}).is_ok());
+        assert!(check(goal,&p.origin,&p,&ledger,&BrowserAction::Navigate{url:"https://www.google.com/search?q=unrelated".into()}).is_err());
+        p.origin=target.clone();
+        assert!(check(goal,&p.origin,&p,&ledger,&BrowserAction::Navigate{url:target}).is_err());
+    }
     #[test]fn named_first_result_opener_passes_without_relaxing_lookup_safety(){
         let goal="On the current local test page, search for robotics video and open the first result.";
         let mut p=page();
