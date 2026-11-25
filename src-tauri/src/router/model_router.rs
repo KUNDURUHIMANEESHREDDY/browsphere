@@ -774,6 +774,44 @@ User text: <text>{}</text>"#,
                     "uncertainty":{"type":"string","maxLength":400}}});
             }
         }
+        // Native named-source comparisons previously fell through to generic
+        // JSON mode, which gives small local models no output-shape guidance.
+        // The schema comes only from the immutable source/ID catalog that the
+        // native evidence verifier constructed, never from model claims.
+        let catalog:serde_json::Value=serde_json::from_str(user).unwrap_or_default();
+        if catalog["instruction"].as_str().is_some_and(|instruction|
+            instruction.starts_with("Select 1-2 directly relevant passage IDs PER source")){
+            if let Some(sources)=catalog["sources"].as_array(){
+                let mut names=Vec::<String>::new();
+                let mut ids=Vec::<String>::new();
+                for source in sources.iter().take(8){
+                    let Some(name)=source["name"].as_str()else{break};
+                    let Some(candidates)=source["candidates"].as_array()else{break};
+                    if candidates.is_empty(){break;}
+                    names.push(name.to_string());
+                    for candidate in candidates.iter().take(12){
+                        if let Some(id)=candidate["id"].as_str(){
+                            if !ids.iter().any(|known|known==id){ids.push(id.to_string());}
+                        }
+                    }
+                }
+                if (2..=8).contains(&names.len()) && names.len()==sources.len()&&!ids.is_empty(){
+                    let mut options=names.clone();
+                    options.push(String::new());
+                    return json!({"type":"object","additionalProperties":false,
+                        "required":["picks","recommended","rationale"],
+                        "properties":{
+                            "picks":{"type":"array","minItems":names.len(),"maxItems":names.len(),
+                                "items":{"type":"object","additionalProperties":false,
+                                    "required":["name","ids"],"properties":{
+                                        "name":{"type":"string","enum":names},
+                                        "ids":{"type":"array","minItems":1,"maxItems":2,
+                                            "items":{"type":"string","enum":ids}}}}},
+                            "recommended":{"type":"string","enum":options},
+                            "rationale":{"type":"string","maxLength":500}}});
+                }
+            }
+        }
         json!("json")
     }
 
@@ -3034,5 +3072,22 @@ Interactive nodes JSON: {}"#,serde_json::to_string(&nodes).unwrap());
     #[test]
     fn endpoint_without_host_cannot_have_key_account() {
         assert!(ModelRouter::api_key_account("file:///tmp/secret").is_err());
+    }
+}
+
+#[cfg(test)]
+mod named_comparison_schema_tests {
+    use super::ModelRouter;
+    #[test]
+    fn named_catalog_enforces_fixed_sources_and_real_ids() {
+        let payload=serde_json::json!({"instruction":"Select 1-2 directly relevant passage IDs PER source.",
+            "sources":[{"name":"One","candidates":[{"id":"p1","text":"Free team access"}]},
+                        {"name":"Two","candidates":[{"id":"p2","text":"Free plan"}]}]});
+        let schema=ModelRouter::structured_schema("format named-source comparison",&payload.to_string());
+        assert_eq!(schema["properties"]["picks"]["minItems"],2);
+        assert_eq!(schema["properties"]["picks"]["maxItems"],2);
+        assert_eq!(schema["properties"]["recommended"]["enum"][0],"One");
+        assert_eq!(schema["properties"]["picks"]["items"]["properties"]["ids"]["items"]["enum"][1],"p2");
+        assert_eq!(ModelRouter::structured_schema("unrelated","{}"),"json");
     }
 }
