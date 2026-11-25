@@ -222,6 +222,24 @@ pub fn requested_search_entry_url(goal: &str) -> Option<Url> {
     Url::parse(&format!("https://{}/", requested_search_host(goal)?)).ok()
 }
 
+/// The user explicitly requested Google research. Preserve only the exact
+/// bounded query before the next sentence, and construct a standard public
+/// search URL. Never use a model suggestion or untrusted website content.
+pub fn requested_google_research_url(goal:&str)->Option<Url>{
+    const PREFIX:&str="search google for ";
+    if !super::deliberation::read_only(goal) ||
+       !goal.to_ascii_lowercase().starts_with(PREFIX){return None;}
+    let phrase=goal.get(PREFIX.len()..)?
+        .split(['.','?','!','\n']).next()?.trim();
+    if !(4..=150).contains(&phrase.chars().count()) ||
+       phrase.split_whitespace().count()>24 ||
+       phrase.chars().any(char::is_control) ||
+       phrase.contains("://"){return None;}
+    let mut url=Url::parse("https://www.google.com/search").ok()?;
+    url.query_pairs_mut().append_pair("q",phrase);
+    Some(url)
+}
+
 /// Preserve existing approval/deny policy for any target not explicitly
 /// authorized by the user's own goal. Do not override run allowlists.
 pub fn evaluate_user_navigation_policy(
@@ -718,5 +736,23 @@ mod autonomous_form_tests {
             let (_, result) = evaluate_policy("https://example.org", &submission(label), &[]);
             assert!(matches!(result, PolicyDecision::RequireApproval { .. }), "{label}");
         }
+    }
+}
+
+#[cfg(test)]
+mod explicit_google_research_tests{
+    use super::*;
+    const TASK:&str="Search Google for the best free note-taking apps for Windows. Open the first three relevant results, visit the apps' official websites, compare their features, offline support, and limitations, then recommend the best option. Include the source links and explain your choice.";
+    #[test]
+    fn derives_only_exact_user_query_not_follow_on_instructions(){
+        let u=requested_google_research_url(TASK).expect("public explicit query");
+        assert_eq!(u.host_str(),Some("www.google.com"));
+        assert_eq!(u.path(),"/search");
+        assert_eq!(u.query_pairs().find(|(k,_)|k=="q").unwrap().1,
+            "the best free note-taking apps for Windows");
+        assert!(!u.to_string().contains("visit"));
+        assert!(requested_google_research_url("Research a search engine for ideas").is_none());
+        assert!(requested_google_research_url("Search Google for an item and buy it.").is_none());
+        assert!(requested_google_research_url("Search Google for https://private.example/secret").is_none());
     }
 }
