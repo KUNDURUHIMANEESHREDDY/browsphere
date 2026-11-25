@@ -312,6 +312,12 @@ fn trusted_named_search_query_input(
     if !matches!(specialist, Specialist::Browser | Specialist::Research)
         || snapshot.text_excerpt.starts_with("Active dialog:")
     { return None; }
+    // Google results already show the exact query. Never type it again into
+    // the results-page search box; select an observed result link instead.
+    if crate::agent::policy::requested_google_research_url(goal)
+        .as_ref().is_some_and(|u|
+            crate::agent::evidence_verifier::check_google_query_navigation(u.as_str(),snapshot).is_ok())
+    {return None;}
     let subject = if is_simple_named_title_task(goal) {requested_named_result_title(goal)}
         else {crate::agent::deliberation::lookup_subject(goal)
             .or_else(||trusted_google_research_query(goal,snapshot))}?;
@@ -601,6 +607,73 @@ fn observed_first_result_followup(
     Some(BrowserAction::Click {
         node_id: node.node_id.clone(), element_label: node.label.clone(), is_submit: false,
     })
+}
+
+/// After an independently confirmed, user-specified Google search, choose
+/// the first relevant, directly linked PUBLIC result from the actual native
+/// DOM reading order. Skip Google chrome, ads, account controls and unobserved
+/// destinations. This only dispatches a click; the normal policy, DOM binding,
+/// navigation observation and independent verifier remain mandatory.
+fn observed_google_first_result(
+    goal:&str, snapshot:&DomSnapshot, specialist:Specialist,
+    executed:&[BrowserAction],
+)->Option<BrowserAction>{
+    if !matches!(specialist,Specialist::Browser|Specialist::Research)
+        || !requested_open_result(goal)
+        || !goal.to_ascii_lowercase().contains("first")
+        || !crate::agent::deliberation::read_only(goal)
+    {return None;}
+    let requested=crate::agent::policy::requested_google_research_url(goal)?;
+    if crate::agent::evidence_verifier::check_google_query_navigation(
+        requested.as_str(),snapshot).is_err()
+        || !executed.iter().any(|a|matches!(a,
+            BrowserAction::Navigate{url} if url==requested.as_str()))
+    {return None;}
+    let query=requested.query_pairs().find(|(k,_)|k=="q")?.1.into_owned();
+    let topics:Vec<_>=query.split(|c:char|!c.is_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|t|t.len()>=4 && ![
+            "best","free","apps","application","applications","windows",
+            "with","from","about","which","what","where","their","this",
+            "that","the","official","review","reviews","2026","2025"
+        ].contains(&t.as_str()))
+        .collect();
+    if topics.is_empty(){return None;}
+    let mut seen=HashSet::new();
+    for node in &snapshot.interactive_nodes {
+        if node.is_sensitive||node.is_submit
+            || !(node.tag=="a"||node.role=="link")
+            || node.label.trim().chars().count()<12
+            || node.bbox.as_ref().is_some_and(|b|!b.in_viewport)
+        {continue;}
+        let Some(raw)=node.href.as_deref()else{continue};
+        let Ok(url)=url::Url::parse(raw)else{continue};
+        if url.scheme()!="https"||url.port().is_some()
+            || !url.username().is_empty()||url.password().is_some()
+        {continue;}
+        let Some(host)=url.host_str()else{continue};
+        let host=host.to_ascii_lowercase();
+        if !host.contains('.')
+            || host.ends_with(".local")||host.ends_with(".test")
+            || host.ends_with(".internal")||host.ends_with(".invalid")
+            || host.starts_with("google.")||host.contains(".google.")
+            || host=="gstatic.com"||host.ends_with(".gstatic.com")
+            || host=="youtube.com"||host.ends_with(".youtube.com")
+            || !seen.insert(url.to_string())
+        {continue;}
+        let label=node.label.to_ascii_lowercase();
+        if ["sponsored","advertisement","sign in","log in","checkout",
+            "purchase","subscribe","account","privacy policy","settings"]
+            .iter().any(|term|label.contains(term)) {continue;}
+        let combined=format!("{} {}",label,url.path().replace(['-','_','/']," ").to_ascii_lowercase());
+        if !topics.iter().any(|term|combined.contains(term)){continue;}
+        return Some(BrowserAction::Click{
+            node_id:node.node_id.clone(),
+            element_label:node.label.clone(),
+            is_submit:false
+        });
+    }
+    None
 }
 
 /// Independent native verification for the narrow read-only request to open
@@ -1286,6 +1359,7 @@ async fn run_browser_loop(
     // Never repeat the exact Google query navigation if the first attempt
     // fails or a human challenge blocks the target.
     let mut google_research_navigation_attempted = false;
+    let mut google_first_result_attempted = false;
     let mut objectives=crate::agent::semantic_core::ObjectiveLedger::new(&goal);
     // WebView2 may acknowledge navigation before a slow site yields a loaded DOM.
     // Only a later, fresh and exact native page observation may recover it.
@@ -2222,6 +2296,22 @@ async fn run_browser_loop(
                 ("Execute the next native objective contract".into(),action,route.into())
             } else if freshly_observed&&!last_action_failed&&orchestrator.stage_navigation_label().is_some()&&orchestrator.can_complete(&snapshot).is_ok(){
                 ("Active semantic destination independently observed".into(),BrowserAction::Complete{summary:format!("Observed requested destination: {}",snapshot.title)},"semantic:stage_destination_receipt".into())
+            } else if freshly_observed
+                && !google_first_result_attempted
+                && observed_google_first_result(
+                    &goal,&snapshot,orchestrator.specialist(),&recorded_steps).is_some()
+            {
+                // A user-requested first result takes precedence over generic
+                // recovery/planner actions, but only after the exact query
+                // and public DOM link have been independently observed.
+                google_first_result_attempted=true;
+                (
+                    "Select the first topic-relevant public result observed on Google".into(),
+                    observed_google_first_result(
+                        &goal,&snapshot,orchestrator.specialist(),&recorded_steps)
+                        .expect("verified query and observed public result"),
+                    "google_research:first_observed_result".into()
+                )
             } else if let Some((action,phase)) = prerequisite {
                 ("Resolve the next explicitly grounded prerequisite".to_string(),action,format!("prerequisite:{phase}"))
             } else if let Some(action)=crate::agent::multimodal_perception::unique_coordinate_link(&goal,&snapshot,&visual_points,&route_ledger).filter(|a|orchestrator.specialist().allows_on_page(a,&snapshot)&&crate::agent::objective_gate::check(&goal,&initial_origin,&snapshot,&objectives,a).is_ok()){
@@ -3615,6 +3705,44 @@ mod production_safety_tests {
             goal, &before.origin, &before, &wrong, &observed).is_err());
     }
 
+    #[test]
+    fn first_google_result_is_selected_from_verified_live_links_only(){
+        use crate::agent::dom_extractor::DomNodeSummary;
+        let goal="Search Google for the best free note-taking apps for Windows. Open the first relevant result and report its title.";
+        let search=crate::agent::policy::requested_google_research_url(goal).unwrap().to_string();
+        let mut page=DomSnapshot{
+            structure:Default::default(),
+            origin:"https://www.google.com/search?q=the+best+free+note-taking+apps+for+Windows&sei=token".into(),
+            title:"the best free note-taking apps for Windows - Google Search".into(),
+            text_excerpt:"Free note-taking apps and official websites for Windows. Search results are available.".into(),
+            interactive_nodes:vec![]
+        };
+        let mk=|id:&str,label:&str,href:&str|DomNodeSummary{
+            node_id:id.into(),tag:"a".into(),role:"link".into(),label:label.into(),
+            href:Some(href.into()),is_submit:false,is_sensitive:false,
+            checked:None,search_state:None,options:vec![],bbox:None
+        };
+        page.interactive_nodes=vec![
+            mk("chrome","Explore Google search settings","https://www.google.com/preferences"),
+            mk("ad","Sponsored note taking app advertisement","https://sponsor.example/notes"),
+            mk("unrelated","Weather forecast today","https://forecast.example/weather"),
+            mk("first","Best free note-taking apps for Windows — detailed review","https://public-notes.example/guide"),
+            mk("second","Windows note taking software comparison","https://another-notes.example/guide"),
+        ];
+        let history=vec![BrowserAction::Navigate{url:search.clone()}];
+        assert!(observed_google_first_result(goal,&page,Specialist::Research,&[]).is_none());
+        let action=observed_google_first_result(goal,&page,Specialist::Research,&history).unwrap();
+        assert!(matches!(action,BrowserAction::Click{node_id,..} if node_id=="first"));
+        assert!(observed_google_first_result(goal,&page,Specialist::Verification,&history).is_none());
+        page.origin="https://www.google.com/search?q=unrelated&sei=token".into();
+        assert!(observed_google_first_result(goal,&page,Specialist::Research,&history).is_none());
+        page.origin="https://www.google.com/search?q=the+best+free+note-taking+apps+for+Windows&sei=token".into();
+        page.interactive_nodes[3].is_sensitive=true;
+        assert!(matches!(observed_google_first_result(goal,&page,Specialist::Research,&history),
+            Some(BrowserAction::Click{node_id,..}) if node_id=="second"));
+        page.title="Just a moment...".into();page.text_excerpt="Verify you are human".into();
+        assert!(observed_google_first_result(goal,&page,Specialist::Research,&history).is_none());
+    }
     #[test]
     fn exact_google_search_navigation_works_without_a_unique_searchbox(){
         use crate::agent::dom_extractor::DomNodeSummary;
