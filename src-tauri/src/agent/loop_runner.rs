@@ -2989,6 +2989,39 @@ async fn run_browser_loop(
                 action_binding_error=Some("Read-only route revisit budget exhausted".into());
             }
         }
+        // Prefer a uniquely relevant, observed public link over a weak
+        // model-selected scroll/navigation. This never adds a new permission:
+        // the candidate must still pass the specialist, objective, route,
+        // live-DOM and standard browser policy gates below.
+        let model_proposed = ["ollama:","litellm:","groq:","bedrock:"]
+            .iter().any(|part|model_route.contains(part));
+        if model_proposed && action_binding_error.is_none()
+            && catalog.is_none() && skill.is_none() && !objectives.active()
+            && freshly_observed
+        {
+            let excluded:std::collections::HashSet<String>=failed_choices.iter()
+                .filter_map(|item|item.get("node_id").and_then(|v|v.as_str()))
+                .map(str::to_owned).collect();
+            if let Some(candidate)=crate::agent::action_intelligence::better_observed_link(
+                &goal,&semantic_focus,&snapshot,&action,&excluded
+            ){
+                let route_ok=matches!(&candidate,BrowserAction::Navigate{url} if route_ledger.allowed(url));
+                if route_ok
+                    && orchestrator.specialist().allows_on_page(&candidate,&snapshot)
+                    && crate::agent::objective_gate::check(
+                        &goal,&initial_origin,&snapshot,&objectives,&candidate).is_ok()
+                {
+                    action=candidate;
+                    thought="Choose a uniquely objective-relevant link observed on the live page".into();
+                    model_route="action_intelligence:observed_objective_link".into();
+                    let _=app.emit("agent:action_intelligence",serde_json::json!({
+                        "run_id":run_id,"step_index":step,
+                        "decision":"substitute_unique_relevant_observed_link"
+                    }));
+                }
+            }
+        }
+        let before_effect=snapshot.clone();
         let semantic_attempt=run_core.prepare(&action,&snapshot,orchestrator.current);
         let signature = action_state_signature(orchestrator.current, &action, &snapshot);
         let redundant_navigation = matches!(&action, BrowserAction::Navigate { url }
@@ -3111,6 +3144,13 @@ async fn run_browser_loop(
         if let Some(reason) = action_binding_error {
             decision = PolicyDecision::Deny {
                 reason: format!("Live DOM action validation failed: {reason}"),
+            };
+        }
+        if crate::agent::action_intelligence::irrelevant_control(
+            &goal,&snapshot,&action
+        ){
+            decision=PolicyDecision::Deny{
+                reason:"This control is unrelated to the requested read-only objective".into()
             };
         }
         // Download permission cannot be introduced by a planner, supervisor
@@ -3649,10 +3689,25 @@ async fn run_browser_loop(
             crate::agent::semantic_core::objective_words(&goal).len()>=2&&
             crate::agent::semantic_core::navigation_relevance(&goal,&orchestrator.stage().objective,&snapshot)==0;
         if unrelated_model_navigation{outcome.push_str(" | NAVIGATION OBSERVED BUT OBJECTIVE RELEVANCE NOT ESTABLISHED; reassess remaining goal");}
+        // A browser acknowledgment alone cannot reset stall detection.
+        // Require an actual native change to the observed page/field, or a
+        // separately confirmed completion/download effect. This is independent
+        // from whether the browser accepted the action.
+        let objective_effect=crate::agent::action_intelligence::effect_observed(
+            &goal,&semantic_focus,&before_effect,&snapshot,&action
+        );
         let progress = if !ok { "failed or unverified" }
-            else if unrelated_model_navigation || outcome.contains("NO MEANINGFUL PAGE CHANGE") || outcome.contains("PAGE CHANGE NOT OBSERVED") {
-                "executed; no observed progress"
+            else if !objective_effect || unrelated_model_navigation ||
+                outcome.contains("NO MEANINGFUL PAGE CHANGE") ||
+                outcome.contains("PAGE CHANGE NOT OBSERVED") {
+                "executed; no observed objective progress"
             } else { "executed" };
+        if ok&&!objective_effect&&!matches!(action,BrowserAction::Complete{..}|BrowserAction::Download{..}){
+            let _=app.emit("agent:action_intelligence",serde_json::json!({
+                "run_id":run_id,"step_index":step,
+                "decision":"acknowledged_but_effect_not_observed"
+            }));
+        }
         if ok&&progress=="executed" {
             used_reviewer|=model_route=="review:observed_stage_handoff";
             let visual_used_for_action=match &action{
