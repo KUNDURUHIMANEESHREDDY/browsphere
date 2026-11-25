@@ -2042,6 +2042,9 @@ async fn route_lucia_intent(
     state: tauri::State<'_, Arc<AppState>>,
     message: String,
 ) -> Result<agent::intent_router::LuciaIntent, String> {
+    if let Some(greeting)=agent::intent_router::LuciaIntent::explicit_chat_greeting(&message){
+        return Ok(greeting);
+    }
     // A clear, explicit user navigation command is not ambiguous intent.
     // Do not turn "open youtube" into chat when the configured intent model
     // is unavailable, returns malformed JSON, or classifies it incorrectly.
@@ -2539,6 +2542,9 @@ async fn start_agent_run(
     voice_mode: Option<bool>,
     task_tab_id: Option<String>,
 ) -> Result<Uuid, String> {
+    if agent::intent_router::LuciaIntent::explicit_chat_greeting(&goal).is_some(){
+        return Err("This is a greeting, not a browser task. Reply in Lucia chat instead.".into());
+    }
     let private_mode = is_private.unwrap_or(false);
     let memory_enabled = allow_learning.unwrap_or(false) && !private_mode;
 
