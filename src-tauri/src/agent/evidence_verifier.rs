@@ -623,6 +623,14 @@ struct NamedComparisonSelection {
 #[serde(deny_unknown_fields)]
 struct NamedComparisonPick { name:String, ids:Vec<String> }
 
+fn named_free_candidates(goal:&str,source:&SourceEvidence)->Vec<Passage>{
+    candidate_passages(goal,source).into_iter().filter(|p|{
+        let lower=p.text.to_ascii_lowercase();
+        !["everything in free, and","everything in free forever, plus",
+          "everything in free, plus","regular price","billed yearly",
+          "billed annually","per user per month"].iter().any(|x|lower.contains(x))
+    }).take(7).collect()
+}
 pub fn named_comparison_catalog(goal:&str,sources:&[SourceEvidence])->Option<serde_json::Value>{
     let names=super::deliberation::named_research_entities(goal);
     if names.len()<2{return None}
@@ -656,16 +664,23 @@ pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Re
             .is_some_and(|host|host.strip_prefix("www.").unwrap_or(&host)
                 .split('.').next()==Some(name.to_ascii_lowercase().replace([' ','-'],"").as_str())))
             .ok_or("Named source was not observed")?;
-        let candidates=candidate_passages(goal,page);
+        let candidates=named_free_candidates(goal,page);
+        let mut free_tier_quote=false;
         for id in &row.ids {
             if !selected.insert((name.to_ascii_lowercase(),id.clone())){return Err("Duplicate passage ID".into())}
-            let passage=candidates.iter().take(7).find(|p|p.id==*id)
+            let passage=candidates.iter().find(|p|p.id==*id)
                 .ok_or("Selected passage ID is not in the observed source catalog")?;
             if !page.excerpt.contains(&passage.text){return Err("Quote absent from source".into())}
             let low=passage.text.to_ascii_lowercase();
+            free_tier_quote|=low.contains("free");
             if !low.contains("free")&&!low.contains("member")&&!low.contains("user")
                 &&!low.contains("collaborat")&&!low.contains("board")&&!low.contains("block"){
                 return Err("Selected quote does not discuss the requested free-plan comparison".into())
+            }
+            if ["everything in free, and","everything in free forever, plus",
+                "everything in free, plus","regular price","per user per month",
+                "billed yearly","billed annually"].iter().any(|paid|low.contains(paid)){
+                return Err("Selected quote belongs to an upgraded or paid tier, not necessarily the free plan".into())
             }
             findings.push(GroundedFinding{claim:passage.text.clone(),quote:passage.text.clone(),url:page.url.clone()});
         }
