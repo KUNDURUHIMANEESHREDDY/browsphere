@@ -5,6 +5,10 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const port=Number(process.env.LUCIA_CDP_PORT||9272);
 const goal="Search Google for the best free note-taking apps for Windows. Open the first relevant result and report its page title.";
 const query="the best free note-taking apps for Windows";
+const googleHome=url=>{try{const u=new URL(url);return u.protocol==='https:' &&
+    ['www.google.com','google.com'].includes(u.hostname) && u.pathname==='/' &&
+    [...u.searchParams].every(([k,v])=>k==='zx'&&/^[a-z0-9]{1,64}$/i.test(v));
+  }catch{return false;}};
 async function attach(){
  let target;
  for(let i=0;i<75;i++){try{
@@ -57,10 +61,10 @@ async function main(){
    let home=null;
    for(let i=0;i<55;i++){
      home=await evaluate("(async()=>{const p=await window.__TAURI__.core.invoke('capture_live_snapshot');return {origin:p?.origin||'',title:p?.title||'',controls:p?.interactive_nodes?.length||0}})()");
-     if(home?.origin==='https://www.google.com/'&&home.controls>0)break;
+     if(googleHome(home?.origin)&&home.controls>0)break;
      await sleep(500);
    }
-   if(home?.origin!=='https://www.google.com/'||home.controls<1)
+   if(!googleHome(home?.origin)||home.controls<1)
      throw Error('Google homepage unavailable: '+JSON.stringify(home));
    taskTab=await evaluate("window.browsphereApp.createTaskTab('https://www.google.com/')");
    if(!taskTab)throw Error('Task tab not created');
