@@ -210,6 +210,15 @@ pub fn requested_music_entry_url(goal: &str) -> Option<Url> {
     if normalized.len() > 220 || normalized.chars().any(char::is_control) {
         return None;
     }
+    // For a short, explicit request to play any song, the user has
+    // authorized opening a public music site, not downloading a file.
+    // This is only the first navigation; actual playback still needs
+    // independent native media-clock verification.
+    if matches!(normalized.as_str(),
+        "play any song" | "play a song" | "play music" | "play any music"
+        | "play some music" | "play a music video" | "play some songs") {
+        return Url::parse("https://www.youtube.com/").ok();
+    }
     let request = ["open youtube and play ", "visit youtube and play ",
         "go to youtube and play ", "navigate to youtube and play "]
         .iter().find_map(|prefix| normalized.strip_prefix(prefix))?;
@@ -576,6 +585,22 @@ mod tests {
         assert_eq!(requested_navigation_url("open youtube").unwrap().as_str(), "https://www.youtube.com/");
         assert!(requested_navigation_url("Open YouTube and play any music").is_none(),
             "Compound playback task must not be reduced to navigation-only");
+        for music in ["play any song", "Play any song!", "play a song",
+            "play music", "play some music", "play any music"]{
+            assert!(requested_navigation_url(music).is_none(),
+                "Music playback cannot be marked complete by opening YouTube");
+            assert_eq!(requested_music_entry_url(music).unwrap().as_str(),
+                "https://www.youtube.com/");
+            assert!(matches!(evaluate_user_navigation_policy(origin,
+                &navigate("https://www.youtube.com/"), &[], music).1,
+                PolicyDecision::Allow),"Expected trusted entry only: {music}");
+        }
+        for unrelated in ["how to play any song", "play any song and download it",
+            "play any song and buy an album", "play a random song then log in",
+            "play any song https://example.org", "play any song; delete files"] {
+            assert!(requested_music_entry_url(unrelated).is_none(),"{unrelated}");
+        }
+
         assert_eq!(requested_music_entry_url("Open YouTube and play any music")
             .unwrap().as_str(), "https://www.youtube.com/");
         assert!(matches!(evaluate_user_navigation_policy(origin,
