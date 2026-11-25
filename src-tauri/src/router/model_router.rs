@@ -99,6 +99,14 @@ fn default_writer_model() -> String { "qwen2.5:3b-instruct".into() }
 mod local_action_default_tests {
     use super::*;
     #[test]
+    #[test]
+    fn browser_model_preflight_never_switches_explicit_cloud_only_to_local(){
+        let mut cfg=RouterConfig::default();
+        cfg.lucia_cloud_only=true;
+        let route=ModelRouter::new(cfg);
+        let rt=tokio::runtime::Runtime::new().expect("runtime");
+        assert!(rt.block_on(route.preflight_agent_model("https://example.org")).is_ok());
+    }
     fn default_agent_model_is_a_supported_configured_role(){
         let c=RouterConfig::default();
         assert_eq!(c.ollama_model,"qwen2.5:3b-instruct");
@@ -321,6 +329,26 @@ impl ModelRouter {
         Ok(data.get("models").and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(str::to_string)).collect())
             .unwrap_or_default())
+    }
+
+    /// A valid API endpoint is not evidence that the configured action model
+    /// exists. Resolve it before allocating a browser task, rather than
+    /// spending multiple action iterations receiving Ollama HTTP 404.
+    /// This never downloads models or changes the user's preferred provider.
+    pub async fn preflight_agent_model(&self, origin:&str)->anyhow::Result<()>{
+        if self.select_backend(origin)!="ollama"{return Ok(());}
+        let selected=self.config.ollama_model.trim();
+        anyhow::ensure!(!selected.is_empty(),
+            "No local browser-action model is configured. Select a model in AI & ML settings.");
+        let installed=self.list_local_models().await.map_err(|e|
+            anyhow::anyhow!("Local model service is not ready at {}: {e}. Start Ollama or select a connected cloud model before running Lucia.",
+                self.config.ollama_url))?;
+        anyhow::ensure!(!installed.is_empty(),
+            "Ollama is running but no local models are installed. Configure an available model in AI & ML settings.");
+        anyhow::ensure!(installed.iter().any(|name|name==selected),
+            "Lucia cannot start: local browser-action model '{}' is not installed. Available models: {}. Choose one in AI & ML settings.",
+            selected,installed.join(", "));
+        Ok(())
     }
 
     pub fn new(config: RouterConfig) -> Self {
