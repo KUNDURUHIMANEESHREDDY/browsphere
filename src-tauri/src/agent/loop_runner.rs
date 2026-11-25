@@ -3086,7 +3086,11 @@ async fn run_browser_loop(
                     let is_comparison = orchestrator.plan.stages.iter()
                         .any(|stage| stage.specialist == Specialist::Comparison)
                         || !crate::agent::deliberation::explicit_research_sources(&goal).is_empty();
-                    let result = if let Some(target) = requested_navigation_url(&goal) {
+                    let result = if crate::agent::policy::requested_wikipedia_article_url(&goal).is_some(){
+                        crate::agent::evidence_verifier::verify_wikipedia_article(
+                            &goal,&snapshot,&orchestrator.evidence)
+                            .map_err(anyhow::Error::msg)
+                    } else if let Some(target) = requested_navigation_url(&goal) {
                         verify_direct_navigation(target.as_str(), &snapshot)
                             .map_err(anyhow::Error::msg)
                     } else if music_task {
