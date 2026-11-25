@@ -264,6 +264,25 @@ fn is_named_search_submit_click(
     )
 }
 
+/// Explicit, public Google research requests use the user's literal search
+/// phrase, not model-generated terms. The native search field is still required,
+/// and the normal DOM binding, action policy, and post-action checks apply.
+fn trusted_google_research_query(goal:&str,snapshot:&DomSnapshot)->Option<String>{
+    const PREFIX:&str="search google for ";
+    if !crate::agent::deliberation::read_only(goal) ||
+        !goal.to_ascii_lowercase().starts_with(PREFIX) ||
+        snapshot.text_excerpt.starts_with("Active dialog:"){return None;}
+    let url=url::Url::parse(&snapshot.origin).ok()?;
+    if !matches!(url.host_str(),Some("google.com"|"www.google.com")) ||
+        !matches!(url.scheme(),"https"|"http"){return None;}
+    let phrase=goal.get(PREFIX.len()..)?
+        .split(['.','?','!','\n']).next()?.trim();
+    if !(4..=150).contains(&phrase.chars().count()) ||
+        phrase.split_whitespace().count()>24 ||
+        phrase.contains("://"){return None;}
+    Some(phrase.to_owned())
+}
+
 /// For an explicitly requested read-only named article lookup, place the
 /// user's exact term into one uniquely observed non-sensitive search field.
 /// This is never a guessed input or an LLM-invented value. No general form,
@@ -275,7 +294,8 @@ fn trusted_named_search_query_input(
         || snapshot.text_excerpt.starts_with("Active dialog:")
     { return None; }
     let subject = if is_simple_named_title_task(goal) {requested_named_result_title(goal)}
-        else {crate::agent::deliberation::lookup_subject(goal)}?;
+        else {crate::agent::deliberation::lookup_subject(goal)
+            .or_else(||trusted_google_research_query(goal,snapshot))}?;
     let candidates: Vec<_> = snapshot.interactive_nodes.iter().filter(|node|
         !node.is_sensitive
         && matches!(node.tag.to_ascii_lowercase().as_str(), "input" | "textarea")
@@ -3556,6 +3576,35 @@ mod production_safety_tests {
             goal, &before.origin, &before, &wrong, &observed).is_err());
     }
 
+    #[test]
+    fn explicit_google_research_uses_the_observed_search_field_once(){
+        use crate::agent::dom_extractor::DomNodeSummary;
+        let goal="Search Google for the best free note-taking apps for Windows. Open the first three relevant results, visit their official websites and compare features, offline support and limitations.";
+        let mut page=DomSnapshot{
+            structure:Default::default(),origin:"https://www.google.com/".into(),
+            title:"Google".into(),text_excerpt:"Google Search homepage with a search field.".into(),
+            interactive_nodes:vec![DomNodeSummary{
+                node_id:"google_search".into(),tag:"input".into(),role:"searchbox".into(),
+                label:"Search".into(),href:None,is_submit:false,is_sensitive:false,
+                checked:None,search_state:Some("empty".into()),options:vec![],bbox:None
+            }]
+        };
+        assert_eq!(trusted_google_research_query(goal,&page).as_deref(),
+            Some("the best free note-taking apps for Windows"));
+        let first=trusted_named_search_query_input(goal,&page,Specialist::Research).unwrap();
+        assert!(matches!(first,BrowserAction::TypeText{ref node_id,ref text,is_sensitive:false}
+            if node_id=="google_search"&&text=="the best free note-taking apps for Windows"));
+        page.interactive_nodes[0].search_state=Some("filled".into());
+        let next=trusted_named_search_enter(goal,&page,Specialist::Research).unwrap();
+        assert!(matches!(next,BrowserAction::PressKey{node_id, key} if node_id=="google_search"&&key=="Enter"));
+        page.interactive_nodes[0].is_sensitive=true;
+        assert!(trusted_named_search_query_input(goal,&page,Specialist::Research).is_none());
+        page.interactive_nodes[0].is_sensitive=false;
+        page.origin="https://example.org/".into();
+        assert!(trusted_google_research_query(goal,&page).is_none());
+        page.origin="https://www.google.com/".into();
+        assert!(trusted_google_research_query("Search Google for a laptop and buy it.",&page).is_none());
+    }
     #[test]
     fn named_search_enter_requires_a_real_non_sensitive_search_field() {
         let goal = "On this Wiktionary page, search for photosynthesis and open the corresponding article. Then report its page title.";
