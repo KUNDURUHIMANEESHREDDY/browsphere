@@ -819,6 +819,35 @@ pub fn check_youtube_music_search_navigation(requested:&str,after:&DomSnapshot)-
     Ok(())
 }
 
+/// A clicked, observed YouTube watch link may gain benign URL parameters.
+/// Verify the same exact video ID and readable native watch document; this
+/// is *not* proof of playing audio (the media clock verifies that separately).
+pub fn check_youtube_observed_watch_navigation(requested:&str,after:&DomSnapshot)->Result<(),String>{
+    let want=Url::parse(requested).map_err(|_|"Malformed observed YouTube video link")?;
+    let actual=Url::parse(&after.origin).map_err(|_|"YouTube watch destination not loaded")?;
+    if want.scheme()!="https"||actual.scheme()!="https"||
+        want.host_str()!=Some("www.youtube.com")||
+        actual.host_str()!=Some("www.youtube.com")||
+        want.path()!="/watch"||actual.path()!="/watch"{
+        return Err("Observed destination is not a public YouTube watch page".into());
+    }
+    let requested_ids:Vec<_>=want.query_pairs().filter(|(k,_)|k=="v")
+        .map(|(_,v)|v.into_owned()).collect();
+    let observed_ids:Vec<_>=actual.query_pairs().filter(|(k,_)|k=="v")
+        .map(|(_,v)|v.into_owned()).collect();
+    if requested_ids.len()!=1||requested_ids[0].is_empty()||
+        observed_ids!=requested_ids {
+        return Err("Opened a different YouTube video than the clicked link".into());
+    }
+    if super::deliberation::error_page(after)||
+        super::search_discovery::human_verification(
+            &after.origin,&after.title,&after.text_excerpt)||
+        after.title.trim().chars().count()<4{
+        return Err("YouTube watch page has not loaded a readable title".into());
+    }
+    Ok(())
+}
+
 pub fn check_navigation_result(requested: &str, after: &DomSnapshot) -> Result<(), String> {
     let target = web_url(requested).ok_or("Invalid navigation target")?;
     let actual = web_url(&after.origin).ok_or("Destination has not loaded")?;
@@ -1370,6 +1399,22 @@ mod tests {
         assert!(check_navigation_result("https://wikipedia.org/", &empty).is_err());
     }
 
+    #[test]
+    fn youtube_observed_video_id_is_required_despite_extra_parameters(){
+        let original="https://www.youtube.com/watch?v=abc123";
+        let good=dom("https://www.youtube.com/watch?pp=xyz&v=abc123",
+            "Beethoven Fur Elise piano performance - YouTube");
+        assert!(check_youtube_observed_watch_navigation(original,&good).is_ok());
+        for wrong in [
+            "https://www.youtube.com/watch?v=other",
+            "https://www.youtube.com/watch?v=abc123&v=other",
+            "https://evil.example/watch?v=abc123",
+            "https://www.youtube.com/results?search_query=piano",
+        ]{
+            assert!(check_youtube_observed_watch_navigation(original,
+                &dom(wrong,"Beethoven Fur Elise piano performance - YouTube")).is_err(),"{wrong}");
+        }
+    }
     #[test]
     fn delegated_youtube_music_query_accepts_extra_parameters_but_not_wrong_results(){
         let url="https://www.youtube.com/results?search_query=Beethoven+Fur+Elise+piano+performance";
