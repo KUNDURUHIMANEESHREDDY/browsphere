@@ -54,6 +54,7 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Build Windows NSIS installer
+        id: installer_build
         uses: tauri-apps/tauri-action@v0
         with:
           projectPath: src-tauri
@@ -77,6 +78,9 @@ jobs:
           $files | ForEach-Object { Write-Host "$($_.Name): $($_.Length) bytes" }
 
       - name: Upload Windows installer (unsigned test artifact)
+        # Preserve the compiled installer when an unrelated native E2E gate
+        # fails; its presence is NOT evidence that the release was accepted.
+        if: always() && steps.installer_build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: Browsphere-Windows-Installer
