@@ -248,7 +248,10 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
        el.closest('.result--ad,[data-testid="result-ad"]')||!isVisible(el))return null;
     try{{
       const q=new URL(location.href).searchParams.get("q")||"";
-      if(!/\b(?:free\s+beginner|beginner\s+free)\b/i.test(q)||!/\bcertificate\s+duration\b/i.test(q))return null;
+      // This is restricted to visible organic search results; the query is
+      // never a permission grant. Accept short public research topics, not
+      // opaque or oversized navigation payloads.
+      if(q.length<8||q.length>220||!/[a-z]{{3}}/i.test(q))return null;
       const redirect=new URL(el.href);
       let target=redirect;
       if(redirect.hostname==="duckduckgo.com"&&redirect.pathname==="/l/"){{

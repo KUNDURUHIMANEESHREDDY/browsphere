@@ -481,8 +481,16 @@ async function main(){
       if(!hasQwen)throw Error('Local model unavailable');
       const goal='Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the most suitable option.';
       const task=await runTask(goal,'browsphere://start',240);
-      console.log('DEMO_W1_RESULT',JSON.stringify(task));
-      if(task.status!=='completed'||!task.verified)process.exitCode=1;
+      const expected=['notion','trello','clickup'];
+      const hosts=new Set((task.report?.findings||[]).map(f=>{try{return new URL(f.url).hostname.replace(/^www\./,'').split('.')[0].toLowerCase()}catch{return ''}}));
+      const allSources=expected.every(name=>hosts.has(name));
+      const freeEvidence=expected.every(name=>(task.report?.findings||[]).some(f=>{
+        try{return new URL(f.url).hostname.replace(/^www\./,'').split('.')[0].toLowerCase()===name&&/\bfree\b/i.test(f.quote)}catch{return false}
+      }));
+      const recommended=/recommend|suitable/i.test(task.report?.summary||'');
+      const pass=task.status==='completed'&&task.verified&&!task.approvalRequired&&allSources&&freeEvidence&&recommended;
+      console.log('DEMO_W1_RESULT',JSON.stringify({pass,allSources,freeEvidence,recommended,task}));
+      if(!pass)process.exitCode=1;
       return;
     }
     if(process.env.LUCIA_COMPLEX_TEST==='1'){

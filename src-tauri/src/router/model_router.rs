@@ -981,8 +981,22 @@ User text: <text>{}</text>"#,
             let raw=tokio::time::timeout(Duration::from_secs(32),
                 selected.model_structured_response(system,&payload.to_string(),creds)).await
                 .map_err(|_|anyhow::anyhow!("Named-source evidence selection timed out"))??;
-            let report=crate::agent::evidence_verifier::named_comparison_report(goal,sources,&raw)
-                .map_err(anyhow::Error::msg)?;
+            let initial=crate::agent::evidence_verifier::named_comparison_report(goal,sources,&raw);
+            let report=match initial {
+                Ok(report)=>report,
+                Err(ref reason) if reason=="Invalid named comparison selection JSON"
+                    || reason=="Not every named website has evidence picks"=>{
+                    // One format-only correction against the same immutable
+                    // source catalog; never retry a substantive evidence rejection.
+                    let repair_system="Return exactly ONE JSON object (no markdown). Keys: picks (one {name, ids} for EVERY named source, 1-2 ID strings each), recommended (one listed source name or empty), rationale (one sentence or empty). Select ONLY the provided candidate IDs. Every selected source needs an explicitly FREE-tier quote; ignore paid upgrade claims. Never invent evidence, numbers or recommendations.";
+                    let repair=tokio::time::timeout(Duration::from_secs(25),
+                        selected.model_structured_response(repair_system,&payload.to_string(),creds)).await
+                        .map_err(|_|anyhow::anyhow!("Comparison JSON repair timed out"))??;
+                    crate::agent::evidence_verifier::named_comparison_report(goal,sources,&repair)
+                        .map_err(anyhow::Error::msg)?
+                },
+                Err(reason)=>return Err(anyhow::Error::msg(reason)),
+            };
             // A second reviewer checks objective coverage and semantic
             // relevance. Source text and the first model's claims cannot
             // authorize completion on their own.

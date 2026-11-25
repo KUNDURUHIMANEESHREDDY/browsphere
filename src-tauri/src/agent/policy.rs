@@ -285,6 +285,23 @@ pub fn named_research_waypoint(goal:&str, stage:usize)->Option<Url>{
 /// Enter a public search engine from the internal browser start page for
 /// explicitly read-only, open-ended research. This is navigation only, not
 /// evidence or permission to complete. The query is supplied by the user.
+/// Reduce verbose public outing requests to search terms without changing
+/// the original budget, people count, or factual completion requirements.
+fn compact_public_outing_query(goal:&str)->Option<String>{
+    let lower=goal.to_ascii_lowercase();
+    if !super::deliberation::read_only(goal)
+        || !(lower.contains("outing")||lower.contains("day trip"))
+        || !lower.contains("attraction")
+        || !lower.contains("opening hour")
+        || !lower.contains("ticket price") {return None;}
+    let city=lower.split_once(" in ")?.1.split_once(" for ")?.0.trim();
+    if city.len()<3||city.len()>50
+        || !city.chars().all(|c|c.is_ascii_alphabetic()||c==' '||c=='-'){
+        return None;
+    }
+    Some(format!("family friendly attractions {city} opening hours ticket prices"))
+}
+
 pub fn public_research_bootstrap(goal: &str, origin: &str) -> Option<Url> {
     if !matches!(origin, "about:blank" | "browsphere://start")
         || !super::deliberation::read_only(goal)
@@ -298,6 +315,7 @@ pub fn public_research_bootstrap(goal: &str, origin: &str) -> Option<Url> {
     { return None; }
     let mut url = Url::parse("https://html.duckduckgo.com/html/").ok()?;
     let query=super::course_comparison::discovery_terms(goal)
+        .or_else(||compact_public_outing_query(goal))
         .unwrap_or_else(||goal.trim().to_string());
     url.query_pairs_mut().append_pair("q",&query);
     Some(url)
@@ -1071,5 +1089,20 @@ mod duckduckgo_observation_tests {
         assert!(!matches!(evaluate_observed_course_result_policy(origin,&action,&[],GOAL,&page).1,PolicyDecision::Allow));
         assert!(crate::agent::action_intelligence::observed_search_destination(origin,
             "https://duckduckgo.com/l/?uddg=http%3A%2F%2F127.0.0.1%2Fprivate").is_none());
+    }
+}
+
+#[cfg(test)]
+mod public_outing_discovery_tests {
+    use super::*;
+    #[test]
+    fn verbose_outing_request_uses_city_grounded_public_query() {
+        let goal="Plan a Sunday outing in Bengaluru for a family of four under INR 2,000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary.";
+        let url=public_research_bootstrap(goal,"browsphere://start").expect("read only search");
+        assert_eq!(url.host_str(),Some("html.duckduckgo.com"));
+        assert_eq!(url.query_pairs().find(|(k,_)|k=="q").unwrap().1,"family friendly attractions bengaluru opening hours ticket prices");
+        assert!(matches!(evaluate_user_navigation_policy("browsphere://start",&BrowserAction::Navigate{url:url.to_string()},&[],goal).1,PolicyDecision::Allow));
+        assert!(public_research_bootstrap("Plan a Sunday outing in Bengaluru and buy four tickets","browsphere://start").is_none());
+        assert!(compact_public_outing_query("Plan an outing in https://example.com with hours and ticket prices").is_none());
     }
 }
