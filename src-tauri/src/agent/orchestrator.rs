@@ -255,7 +255,7 @@ pub(crate) fn is_simple_named_title_task(goal: &str) -> bool {
 /// The selected LLM decides actual actions for each specialist at runtime.
 pub fn plan_task(goal: &str) -> TaskPlan {
     let lower = goal.to_lowercase();
-    let mut roles: Vec<Specialist> = if crate::agent::prerequisites::route_values(goal).is_some() || crate::agent::prerequisites::filter_constraints(goal).is_some() || is_simple_named_title_task(goal) || super::evidence_verifier::requested_named_link_title(goal).is_some() {
+    let mut roles: Vec<Specialist> = if super::policy::requested_wikipedia_article_url(goal).is_some() || crate::agent::prerequisites::route_values(goal).is_some() || crate::agent::prerequisites::filter_constraints(goal).is_some() || is_simple_named_title_task(goal) || super::evidence_verifier::requested_named_link_title(goal).is_some() {
         vec![Specialist::Browser]
     } else if super::execution_intelligence::current_reference_subject(goal).is_some(){
         vec![Specialist::Research]
@@ -461,6 +461,11 @@ impl Orchestrator {
             }
         }
         if let Some(target) = requested_navigation_url(&self.plan.goal) {
+            if super::policy::requested_wikipedia_article_url(&self.plan.goal).is_some(){
+                super::evidence_verifier::verify_wikipedia_article(
+                    &self.plan.goal,snapshot,&self.evidence)
+                    .map_err(|_|"Requested Wikipedia article title and source are not independently verified")?;
+            }
             if self.confirmed_navigation.as_deref() != Some(snapshot.origin.as_str())
                 || self.successful_actions == 0
                 || self.fresh_observations == 0
@@ -603,6 +608,18 @@ impl Orchestrator {
     }
 }
 
+#[cfg(test)]
+mod explicit_wikipedia_article_plan_tests{
+    use super::*;
+    #[test]
+    fn wikipedia_article_lookup_uses_browser_then_verification(){
+        let g="Open Wikipedia, find the Ada Lovelace article, and report its title and source URL. Verify the final webpage before finishing.";
+        let p=plan_task(g);
+        assert_eq!(p.stages.len(),2);
+        assert_eq!(p.stages[0].specialist,Specialist::Browser);
+        assert_eq!(p.stages[1].specialist,Specialist::Verification);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
