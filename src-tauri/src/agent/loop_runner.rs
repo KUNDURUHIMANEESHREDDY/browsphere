@@ -424,6 +424,21 @@ fn trusted_explicit_youtube_search(
     Some(BrowserAction::Navigate { url: target.to_string() })
 }
 
+/// For "play any song", the user has delegated selecting a song. Search
+/// YouTube for a public-domain classical work exactly once, after the public
+/// homepage is observed. No video IDs or playback are fabricated.
+fn trusted_unspecified_music_search(goal:&str,snapshot:&DomSnapshot,
+    specialist:Specialist)->Option<BrowserAction>{
+    if specialist!=Specialist::Browser{return None;}
+    let current=url::Url::parse(&snapshot.origin).ok()?;
+    if current.scheme()!="https"||current.host_str()!=Some("www.youtube.com")
+        ||current.path()!="/"||snapshot.title.trim().chars().count()<4
+        ||crate::agent::search_discovery::human_verification(
+            &snapshot.origin,&snapshot.title,&snapshot.text_excerpt){return None;}
+    let target=crate::agent::policy::requested_unspecified_music_search_url(goal)?;
+    Some(BrowserAction::Navigate{url:target.to_string()})
+}
+
 /// Choose a freshly observed watch-page link only when the user explicitly
 /// asked for the first YouTube video result. This still passes through
 /// live DOM binding, standard policy checks, and independent verification.
@@ -433,8 +448,10 @@ fn trusted_first_youtube_video_result(
     specialist: Specialist,
 ) -> Option<BrowserAction> {
     let request = goal.to_ascii_lowercase();
-    if !request.contains("youtube") || !request.contains("first video result")
-        || !(request.contains("open ") || request.contains("click "))
+    let named_result = request.contains("youtube") && request.contains("first video result")
+        && (request.contains("open ") || request.contains("click "));
+    let delegated_music = crate::agent::policy::requested_unspecified_music_search_url(goal);
+    if (!named_result && delegated_music.is_none())
         || !matches!(specialist, Specialist::Browser | Specialist::Research)
     {
         return None;
@@ -445,6 +462,12 @@ fn trusted_first_youtube_video_result(
         || location.path() != "/results"
     {
         return None;
+    }
+    if let Some(expected)=delegated_music {
+        let term=expected.query_pairs().find(|(k,_)|k=="search_query")?.1.into_owned();
+        let actual:Vec<_>=location.query_pairs().filter(|(k,_)|k=="search_query")
+            .map(|(_,v)|v.into_owned()).collect();
+        if actual!=vec![term]{return None;}
     }
     let candidates: Vec<_> = snapshot.interactive_nodes.iter()
         .filter(|node| !node.is_sensitive
@@ -475,7 +498,8 @@ fn trusted_youtube_watch_link_followup(
     goal: &str, snapshot: &DomSnapshot, specialist: Specialist, clicked_url: &str,
 ) -> Option<BrowserAction> {
     if !matches!(specialist, Specialist::Browser | Specialist::Research)
-        || !crate::agent::orchestrator::requested_youtube_video_page(goal)
+        || (!crate::agent::orchestrator::requested_youtube_video_page(goal)
+            && crate::agent::policy::requested_unspecified_music_search_url(goal).is_none())
     { return None; }
     let current = url::Url::parse(&snapshot.origin).ok()?;
     let target = url::Url::parse(clicked_url).ok()?;
@@ -1412,6 +1436,9 @@ async fn run_browser_loop(
     // Never force the same deterministic navigation after it fails. The
     // specialist model must inspect the fresh state and choose recovery.
     let mut direct_navigation_attempted = false;
+    // A user-delegated music choice is searched only once. A failed or
+    // challenged results page cannot cause repeated submissions.
+    let mut unspecified_music_search_attempted=false;
     // Never repeat the exact Google query navigation if the first attempt
     // fails or a human challenge blocks the target.
     let mut google_research_navigation_attempted = false;
@@ -2566,6 +2593,19 @@ async fn run_browser_loop(
                     "Open YouTube as the first step of the user's music request".into(),
                     BrowserAction::Navigate { url: url.to_string() },
                     "music_entry:trusted_user_goal".into(),
+                )
+            } else if freshly_observed
+                && !unspecified_music_search_attempted
+                && trusted_unspecified_music_search(
+                    &goal,&snapshot,orchestrator.specialist()).is_some()
+            {
+                unspecified_music_search_attempted=true;
+                (
+                    "Search YouTube once for a public-domain classical piano performance".into(),
+                    trusted_unspecified_music_search(
+                        &goal,&snapshot,orchestrator.specialist())
+                        .expect("public YouTube home and bounded delegated song choice"),
+                    "music_discovery:delegated_public_song".into()
                 )
             } else if should_bootstrap_direct_navigation(&goal, orchestrator.specialist(), direct_navigation_attempted)
             {
@@ -4781,6 +4821,37 @@ mod first_youtube_result_tests {
         assert!(trusted_explicit_youtube_search(goal, &page, Specialist::Browser).is_none());
     }
 
+    #[test]
+    fn delegated_music_search_requires_real_youtube_and_observed_watch_link(){
+        let goal="play any song";
+        let mut page=DomSnapshot{
+            structure:Default::default(),
+            origin:"https://www.youtube.com/".into(),
+            title:"YouTube".into(),
+            text_excerpt:"YouTube homepage with public videos and search".into(),
+            interactive_nodes:vec![],
+        };
+        let discovery=crate::agent::policy::requested_unspecified_music_search_url(goal).unwrap();
+        assert!(matches!(trusted_unspecified_music_search(goal,&page,Specialist::Browser),
+            Some(BrowserAction::Navigate{url}) if url==discovery.as_str()));
+        assert!(trusted_unspecified_music_search(goal,&page,Specialist::Verification).is_none());
+        page.origin="https://evil.example/".into();
+        assert!(trusted_unspecified_music_search(goal,&page,Specialist::Browser).is_none());
+        page.origin=discovery.to_string();
+        page.title="YouTube search results".into();
+        page.interactive_nodes=vec![
+            result_node("offsite","https://evil.example/watch?v=bad",true),
+            result_node("public-song","https://www.youtube.com/watch?v=music123",true)
+        ];
+        assert!(matches!(trusted_first_youtube_video_result(goal,&page,Specialist::Browser),
+            Some(BrowserAction::Click{node_id,..}) if node_id=="public-song"));
+        let observed="https://www.youtube.com/watch?v=music123";
+        assert!(trusted_youtube_watch_link_followup(goal,&page,Specialist::Browser,observed).is_some());
+        page.origin="https://www.youtube.com/results?search_query=unrelated".into();
+        assert!(trusted_first_youtube_video_result(goal,&page,Specialist::Browser).is_none());
+        assert!(trusted_youtube_watch_link_followup(goal,&page,Specialist::Browser,observed).is_some(),
+            "Fallback requires an observed watch link and matching YouTube origin");
+    }
     #[test]
     fn first_video_click_is_grounded_in_same_site_watch_link() {
         let page = DomSnapshot {
