@@ -784,6 +784,34 @@ pub fn check_google_query_navigation(requested:&str,after:&DomSnapshot)->Result<
     Ok(())
 }
 
+/// YouTube may append display/tracking parameters to public search results.
+/// Require the exact delegated term, public host and readable native page.
+pub fn check_youtube_music_search_navigation(requested:&str,after:&DomSnapshot)->Result<(),String>{
+    let want=Url::parse(requested).map_err(|_|"Invalid delegated YouTube search URL")?;
+    let actual=Url::parse(&after.origin).map_err(|_|"YouTube search destination not loaded")?;
+    if want.scheme()!="https"||actual.scheme()!="https"||
+        want.host_str()!=Some("www.youtube.com")||
+        actual.host_str()!=Some("www.youtube.com")||
+        want.path()!="/results"||actual.path()!="/results"{
+        return Err("Opened page is not a public YouTube results page".into());
+    }
+    let query=want.query_pairs().find(|(k,_)|k=="search_query")
+        .map(|(_,v)|v.into_owned()).filter(|q|!q.trim().is_empty())
+        .ok_or("Missing delegated music query")?;
+    let actual_terms:Vec<_>=actual.query_pairs().filter(|(k,_)|k=="search_query")
+        .map(|(_,v)|v.into_owned()).collect();
+    if actual_terms!=vec![query]{
+        return Err("YouTube displayed different results than the delegated query".into());
+    }
+    if super::deliberation::error_page(after)||
+        super::search_discovery::human_verification(
+            &after.origin,&after.title,&after.text_excerpt) ||
+        (after.title.trim().chars().count()<4 && after.text_excerpt.trim().chars().count()<30){
+        return Err("YouTube results are unavailable, blocked or unreadable".into());
+    }
+    Ok(())
+}
+
 pub fn check_navigation_result(requested: &str, after: &DomSnapshot) -> Result<(), String> {
     let target = web_url(requested).ok_or("Invalid navigation target")?;
     let actual = web_url(&after.origin).ok_or("Destination has not loaded")?;
@@ -1335,6 +1363,28 @@ mod tests {
         assert!(check_navigation_result("https://wikipedia.org/", &empty).is_err());
     }
 
+    #[test]
+    fn delegated_youtube_music_query_accepts_extra_parameters_but_not_wrong_results(){
+        let url="https://www.youtube.com/results?search_query=Beethoven+Fur+Elise+piano+performance";
+        let page=dom("https://www.youtube.com/results?sp=abc&search_query=Beethoven%20Fur%20Elise%20piano%20performance",
+            "YouTube public results page for a classical piano performance.");
+        assert!(check_youtube_music_search_navigation(url,&page).is_ok());
+        for wrong in [
+            "https://www.youtube.com/",
+            "https://www.youtube.com/results?search_query=other",
+            "https://evil.example/results?search_query=Beethoven+Fur+Elise+piano+performance",
+            "https://www.youtube.com/results?search_query=Beethoven+Fur+Elise+piano+performance&search_query=other"
+        ]{
+            assert!(check_youtube_music_search_navigation(url,&dom(wrong,
+                "Public YouTube results for classical piano performance.")).is_err(),"{wrong}");
+        }
+        let challenge=DomSnapshot{
+            title:"Verify you're human".into(),
+            text_excerpt:"Please complete this verification challenge".into(),
+            ..page
+        };
+        assert!(check_youtube_music_search_navigation(url,&challenge).is_err());
+    }
     #[test]
     fn wikipedia_article_report_requires_actual_page_and_saved_native_evidence(){
         let goal="Open Wikipedia, find the Ada Lovelace article, and report its title and source URL. Verify the final webpage before finishing.";
