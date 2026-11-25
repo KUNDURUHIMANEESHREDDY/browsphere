@@ -687,6 +687,27 @@ fn observed_google_first_result(
     None
 }
 
+/// Search-result navigation can settle before Google renders its organic
+/// links. Re-observe a bounded number of times instead of following unrelated
+/// recovery navigation or asking a small model to repeat the query.
+fn awaiting_google_public_results(goal:&str,snapshot:&DomSnapshot,
+    executed:&[BrowserAction])->bool {
+    if !requested_open_result(goal) || !goal.to_ascii_lowercase().contains("first")
+        || crate::agent::search_discovery::human_verification(
+            &snapshot.origin,&snapshot.title,&snapshot.text_excerpt) {return false;}
+    let Some(requested)=crate::agent::policy::requested_google_research_url(goal)else{return false;};
+    if crate::agent::evidence_verifier::check_google_query_navigation(
+        requested.as_str(),snapshot).is_err()
+        || !executed.iter().any(|a|matches!(a,BrowserAction::Navigate{url} if url==requested.as_str())){
+        return false;
+    }
+    !snapshot.interactive_nodes.iter().any(|n|
+        !n.is_sensitive&&!n.is_submit&&n.href.as_deref()
+            .and_then(|url|url::Url::parse(url).ok()).is_some_and(|u|
+                u.scheme()=="https" && u.host_str().is_some_and(|h|
+                    h!="google.com" && h!="www.google.com")))
+}
+
 /// Independent native verification for the narrow read-only request to open
 /// the FIRST search result. This proves only navigation and observed content,
 /// never the truth of the opened page's claims. No model-written citations.
@@ -1371,6 +1392,8 @@ async fn run_browser_loop(
     // fails or a human challenge blocks the target.
     let mut google_research_navigation_attempted = false;
     let mut google_first_result_attempted = false;
+    // Bounded read-only settling; never retry the search submission.
+    let mut google_results_settle_attempts: u8 = 0;
     let mut objectives=crate::agent::semantic_core::ObjectiveLedger::new(&goal);
     // WebView2 may acknowledge navigation before a slow site yields a loaded DOM.
     // Only a later, fresh and exact native page observation may recover it.
@@ -1626,6 +1649,29 @@ async fn run_browser_loop(
         };
         observation_failures = 0;
         snapshot = live;
+        if awaiting_google_public_results(&goal,&snapshot,&recorded_steps) {
+            if google_results_settle_attempts >= 7 {
+                let _=app.emit("agent:run_error",serde_json::json!({
+                    "run_id":run_id,
+                    "message":"Google displayed the requested search but no selectable public result links after repeated native observations. Lucia stopped without guessing or navigating to unrelated sites.",
+                    "source":"google_results_not_observed"
+                }));
+                final_status="unverified".into();
+                break;
+            }
+            google_results_settle_attempts+=1;
+            let _=app.emit("agent:activity",serde_json::json!({
+                "run_id":run_id,
+                "phase":"google_results_settling",
+                "step_index":step,
+                "retry_count":google_results_settle_attempts
+            }));
+            tokio::select!{
+                _=cancel.cancelled()=>return Ok("cancelled".into()),
+                _=tokio::time::sleep(std::time::Duration::from_millis(600))=>{}
+            }
+            continue;
+        }
         if let Some(scope)=child_scope.as_ref(){
             anyhow::ensure!(scope.contains(&snapshot.origin),"Browser specialist left its approved public origins");
             if !super::multimodal_perception::independent_discovery_allowed(&snapshot){
@@ -3798,6 +3844,13 @@ mod production_safety_tests {
             Some(BrowserAction::Click{node_id,..}) if node_id=="first"));
         page.interactive_nodes.remove(3);
         let history=vec![BrowserAction::Navigate{url:search.clone()}];
+        let mut sparse=page.clone();
+        sparse.interactive_nodes.clear();
+        assert!(!awaiting_google_public_results(goal,&sparse,&[]));
+        assert!(awaiting_google_public_results(goal,&sparse,&history));
+        assert!(!awaiting_google_public_results(goal,&page,&history));
+        sparse.origin="https://www.google.com/sorry/index".into();
+        assert!(!awaiting_google_public_results(goal,&sparse,&history));
         assert!(observed_google_first_result(goal,&page,Specialist::Research,&[]).is_none());
         // Google can place the first organic result below an AI overview;
         // it remains selectable because native execution scrolls it into view.
