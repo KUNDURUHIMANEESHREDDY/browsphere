@@ -155,7 +155,7 @@ pub fn requested_wikipedia_article_url(goal:&str)->Option<Url>{
         ||!name.chars().all(|c|c.is_ascii_alphanumeric()||matches!(c,' '|'-'))
         ||!super::deliberation::read_only(goal)
     {return None;}
-    let mut result=Url::parse("https://en.wikipedia.org/wiki/").ok()?;
+    let mut result=Url::parse("https://en.wikipedia.org/wiki").ok()?;
     result.path_segments_mut().ok()?.push(&name.replace(' ',"_"));
     Some(result)
 }
