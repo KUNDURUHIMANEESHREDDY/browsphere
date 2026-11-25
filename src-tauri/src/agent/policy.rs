@@ -225,6 +225,16 @@ pub fn requested_search_entry_url(goal: &str) -> Option<Url> {
 /// The user explicitly requested Google research. Preserve only the exact
 /// bounded query before the next sentence, and construct a standard public
 /// search URL. Never use a model suggestion or untrusted website content.
+pub fn is_public_google_homepage(raw:&str)->bool{
+    let Ok(url)=Url::parse(raw)else{return false};
+    matches!(url.scheme(),"https"|"http")
+        && matches!(url.host_str(),Some("google.com"|"www.google.com"))
+        && url.path()=="/" && url.username().is_empty() && url.password().is_none()
+        && url.query_pairs().all(|(key,value)|key=="zx" && !value.is_empty()
+            && value.len()<=64 && value.bytes().all(|b|b.is_ascii_alphanumeric()))
+}
+
+/// The exact user-requested search query is distinct from transient homepage metadata.
 pub fn requested_google_research_url(goal:&str)->Option<Url>{
     const PREFIX:&str="search google for ";
     if !super::deliberation::read_only(goal) ||
@@ -744,7 +754,19 @@ mod explicit_google_research_tests{
     use super::*;
     const TASK:&str="Search Google for the best free note-taking apps for Windows. Open the first three relevant results, visit the apps' official websites, compare their features, offline support, and limitations, then recommend the best option. Include the source links and explain your choice.";
     #[test]
-    fn derives_only_exact_user_query_not_follow_on_instructions(){
+    fn google_zx_homepage_is_not_a_search_or_auth_page(){
+        for s in ["https://www.google.com/","https://www.google.com/?zx=1795622658721","https://google.com/?zx=AbC42"]{
+            assert!(is_public_google_homepage(s),"{s}");
+        }
+        for s in ["https://www.google.com/search?q=notes","https://www.google.com/?q=notes",
+            "https://www.google.com/?zx=123&next=auth","https://accounts.google.com/?zx=123",
+            "https://www.google.com/sorry/index?zx=123","https://google.evil.test/?zx=123",
+            "https://www.google.com/?zx=bad%2Fvalue"]{
+            assert!(!is_public_google_homepage(s),"{s}");
+        }
+    }
+    #[test]
+        fn derives_only_exact_user_query_not_follow_on_instructions(){
         let u=requested_google_research_url(TASK).expect("public explicit query");
         assert_eq!(u.host_str(),Some("www.google.com"));
         assert_eq!(u.path(),"/search");
