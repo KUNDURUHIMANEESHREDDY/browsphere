@@ -502,6 +502,12 @@ fn trusted_youtube_watch_link_followup(
             && crate::agent::policy::requested_unspecified_music_search_url(goal).is_none())
     { return None; }
     let current = url::Url::parse(&snapshot.origin).ok()?;
+    if let Some(expected)=crate::agent::policy::requested_unspecified_music_search_url(goal){
+        let search=expected.query_pairs().find(|(k,_)|k=="search_query")?.1.into_owned();
+        let current_query:Vec<_>=current.query_pairs().filter(|(k,_)|k=="search_query")
+            .map(|(_,v)|v.into_owned()).collect();
+        if current_query!=vec![search]{return None;}
+    }
     let target = url::Url::parse(clicked_url).ok()?;
     if current.scheme() != "https" || current.host_str() != Some("www.youtube.com")
         || current.path() != "/results" || target.scheme() != "https"
@@ -3414,6 +3420,8 @@ async fn run_browser_loop(
                         BrowserAction::Navigate { url } =>
                             if model_route.starts_with("google_research:exact_user_query") {
                                 crate::agent::evidence_verifier::check_google_query_navigation(url, &after)
+                            } else if model_route.starts_with("music_discovery:delegated_public_song") {
+                                crate::agent::evidence_verifier::check_youtube_music_search_navigation(url,&after)
                             } else if auth_recovery_attempts > 0 && crate::agent::recovery::navigation_confirmed(url, &after) {
                                 Ok(())
                             } else { check_navigation_result(url, &after) },
@@ -4849,8 +4857,8 @@ mod first_youtube_result_tests {
         assert!(trusted_youtube_watch_link_followup(goal,&page,Specialist::Browser,observed).is_some());
         page.origin="https://www.youtube.com/results?search_query=unrelated".into();
         assert!(trusted_first_youtube_video_result(goal,&page,Specialist::Browser).is_none());
-        assert!(trusted_youtube_watch_link_followup(goal,&page,Specialist::Browser,observed).is_some(),
-            "Fallback requires an observed watch link and matching YouTube origin");
+        assert!(trusted_youtube_watch_link_followup(goal,&page,Specialist::Browser,observed).is_none(),
+            "Fallback must match the exact delegated search query");
     }
     #[test]
     fn first_video_click_is_grounded_in_same_site_watch_link() {
