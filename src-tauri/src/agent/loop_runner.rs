@@ -264,6 +264,41 @@ fn is_named_search_submit_click(
     )
 }
 
+/// A Google homepage can present several ambiguous search inputs or UI
+/// overlays. For an explicitly requested public Google search, navigate once
+/// to the standard query URL constructed from the user's exact words. This
+/// does not certify results, skip policy, or bypass a human challenge.
+fn trusted_google_search_navigation(
+    goal:&str, snapshot:&DomSnapshot, specialist:Specialist,
+)->Option<BrowserAction>{
+    if !matches!(specialist,Specialist::Browser|Specialist::Research) ||
+        snapshot.text_excerpt.starts_with("Active dialog:") ||
+        crate::agent::search_discovery::human_verification(
+            &snapshot.origin,&snapshot.title,&snapshot.text_excerpt){return None;}
+    if !crate::agent::policy::is_public_google_homepage(&snapshot.origin){return None;}
+    let url=crate::agent::policy::requested_google_research_url(goal)?;
+    Some(BrowserAction::Navigate{url:url.to_string()})
+}
+
+/// Explicit, public Google research requests use the user's literal search
+/// phrase, not model-generated terms. The native search field is still required,
+/// and the normal DOM binding, action policy, and post-action checks apply.
+fn trusted_google_research_query(goal:&str,snapshot:&DomSnapshot)->Option<String>{
+    const PREFIX:&str="search google for ";
+    if !crate::agent::deliberation::read_only(goal) ||
+        !goal.to_ascii_lowercase().starts_with(PREFIX) ||
+        snapshot.text_excerpt.starts_with("Active dialog:"){return None;}
+    let url=url::Url::parse(&snapshot.origin).ok()?;
+    if !matches!(url.host_str(),Some("google.com"|"www.google.com")) ||
+        !matches!(url.scheme(),"https"|"http"){return None;}
+    let phrase=goal.get(PREFIX.len()..)?
+        .split(['.','?','!','\n']).next()?.trim();
+    if !(4..=150).contains(&phrase.chars().count()) ||
+        phrase.split_whitespace().count()>24 ||
+        phrase.contains("://"){return None;}
+    Some(phrase.to_owned())
+}
+
 /// For an explicitly requested read-only named article lookup, place the
 /// user's exact term into one uniquely observed non-sensitive search field.
 /// This is never a guessed input or an LLM-invented value. No general form,
@@ -274,8 +309,15 @@ fn trusted_named_search_query_input(
     if !matches!(specialist, Specialist::Browser | Specialist::Research)
         || snapshot.text_excerpt.starts_with("Active dialog:")
     { return None; }
+    // Google results already show the exact query. Never type it again into
+    // the results-page search box; select an observed result link instead.
+    if crate::agent::policy::requested_google_research_url(goal)
+        .as_ref().is_some_and(|u|
+            crate::agent::evidence_verifier::check_google_query_navigation(u.as_str(),snapshot).is_ok())
+    {return None;}
     let subject = if is_simple_named_title_task(goal) {requested_named_result_title(goal)}
-        else {crate::agent::deliberation::lookup_subject(goal)}?;
+        else {crate::agent::deliberation::lookup_subject(goal)
+            .or_else(||trusted_google_research_query(goal,snapshot))}?;
     let candidates: Vec<_> = snapshot.interactive_nodes.iter().filter(|node|
         !node.is_sensitive
         && matches!(node.tag.to_ascii_lowercase().as_str(), "input" | "textarea")
@@ -382,6 +424,21 @@ fn trusted_explicit_youtube_search(
     Some(BrowserAction::Navigate { url: target.to_string() })
 }
 
+/// For "play any song", the user has delegated selecting a song. Search
+/// YouTube for a public-domain classical work exactly once, after the public
+/// homepage is observed. No video IDs or playback are fabricated.
+fn trusted_unspecified_music_search(goal:&str,snapshot:&DomSnapshot,
+    specialist:Specialist)->Option<BrowserAction>{
+    if specialist!=Specialist::Browser{return None;}
+    let current=url::Url::parse(&snapshot.origin).ok()?;
+    if current.scheme()!="https"||current.host_str()!=Some("www.youtube.com")
+        ||current.path()!="/"||snapshot.title.trim().chars().count()<4
+        ||crate::agent::search_discovery::human_verification(
+            &snapshot.origin,&snapshot.title,&snapshot.text_excerpt){return None;}
+    let target=crate::agent::policy::requested_unspecified_music_search_url(goal)?;
+    Some(BrowserAction::Navigate{url:target.to_string()})
+}
+
 /// Choose a freshly observed watch-page link only when the user explicitly
 /// asked for the first YouTube video result. This still passes through
 /// live DOM binding, standard policy checks, and independent verification.
@@ -391,8 +448,10 @@ fn trusted_first_youtube_video_result(
     specialist: Specialist,
 ) -> Option<BrowserAction> {
     let request = goal.to_ascii_lowercase();
-    if !request.contains("youtube") || !request.contains("first video result")
-        || !(request.contains("open ") || request.contains("click "))
+    let named_result = request.contains("youtube") && request.contains("first video result")
+        && (request.contains("open ") || request.contains("click "));
+    let delegated_music = crate::agent::policy::requested_unspecified_music_search_url(goal);
+    if (!named_result && delegated_music.is_none())
         || !matches!(specialist, Specialist::Browser | Specialist::Research)
     {
         return None;
@@ -403,6 +462,12 @@ fn trusted_first_youtube_video_result(
         || location.path() != "/results"
     {
         return None;
+    }
+    if let Some(expected)=delegated_music {
+        let term=expected.query_pairs().find(|(k,_)|k=="search_query")?.1.into_owned();
+        let actual:Vec<_>=location.query_pairs().filter(|(k,_)|k=="search_query")
+            .map(|(_,v)|v.into_owned()).collect();
+        if actual!=vec![term]{return None;}
     }
     let candidates: Vec<_> = snapshot.interactive_nodes.iter()
         .filter(|node| !node.is_sensitive
@@ -426,6 +491,27 @@ fn trusted_first_youtube_video_result(
     })
 }
 
+/// For a delegated *any-song* choice, follow the exact public watch URL
+/// observed on the current YouTube results page. A fresh DOM extraction must
+/// reveal the link first; no generated video IDs, redirects or downloads.
+fn trusted_delegated_youtube_watch_navigation(
+    goal:&str,snapshot:&DomSnapshot,specialist:Specialist,
+)->Option<BrowserAction>{
+    crate::agent::policy::requested_unspecified_music_search_url(goal)?;
+    let selected=trusted_first_youtube_video_result(goal,snapshot,specialist)?;
+    let BrowserAction::Click{node_id,..}=selected else{return None;};
+    let link=snapshot.interactive_nodes.iter().find(|n|
+        n.node_id==node_id && !n.is_sensitive && n.tag=="a")?.href.as_ref()?;
+    let url=url::Url::parse(link).ok()?;
+    if url.scheme()!="https"||url.host_str()!=Some("www.youtube.com")||
+        url.path()!="/watch"||url.query_pairs().filter(|(k,_)|k=="v")
+            .count()!=1 ||
+        !url.query_pairs().any(|(k,v)|k=="v"&&!v.is_empty()){
+        return None;
+    }
+    Some(BrowserAction::Navigate{url:url.to_string()})
+}
+
 /// When a clicked first video link leaves a SPA on its results URL, follow
 /// only the exact watch URL still visible in a new native DOM capture.
 /// This avoids re-clicking the same control and triggering the loop guard.
@@ -433,18 +519,32 @@ fn trusted_youtube_watch_link_followup(
     goal: &str, snapshot: &DomSnapshot, specialist: Specialist, clicked_url: &str,
 ) -> Option<BrowserAction> {
     if !matches!(specialist, Specialist::Browser | Specialist::Research)
-        || !crate::agent::orchestrator::requested_youtube_video_page(goal)
+        || (!crate::agent::orchestrator::requested_youtube_video_page(goal)
+            && crate::agent::policy::requested_unspecified_music_search_url(goal).is_none())
     { return None; }
     let current = url::Url::parse(&snapshot.origin).ok()?;
+    if let Some(expected)=crate::agent::policy::requested_unspecified_music_search_url(goal){
+        let search=expected.query_pairs().find(|(k,_)|k=="search_query")?.1.into_owned();
+        let current_query:Vec<_>=current.query_pairs().filter(|(k,_)|k=="search_query")
+            .map(|(_,v)|v.into_owned()).collect();
+        if current_query!=vec![search]{return None;}
+    }
     let target = url::Url::parse(clicked_url).ok()?;
     if current.scheme() != "https" || current.host_str() != Some("www.youtube.com")
         || current.path() != "/results" || target.scheme() != "https"
         || target.host_str() != Some("www.youtube.com") || target.path() != "/watch"
         || !target.query_pairs().any(|(key, value)| key == "v" && !value.is_empty())
-        || !snapshot.interactive_nodes.iter().any(|node| {
-            node.tag == "a" && !node.is_sensitive && node.href.as_deref() == Some(clicked_url)
-        })
+        || (crate::agent::policy::requested_unspecified_music_search_url(goal).is_none()
+            && !snapshot.interactive_nodes.iter().any(|node| {
+                node.tag == "a" && !node.is_sensitive
+                    && node.href.as_deref() == Some(clicked_url)
+            }))
     { return None; }
+    // For a delegated song, clicked_url is already the *previously observed*
+    // public watch link from an acknowledged click. YouTube can replace the
+    // results DOM after that click, so requiring the exact link to remain in
+    // a second snapshot can prevent recovery. Never accept a model-invented
+    // destination: only a recorded prior first-result click creates this state.
     Some(BrowserAction::Navigate { url: clicked_url.to_string() })
 }
 
@@ -501,6 +601,30 @@ fn delayed_navigation_is_verified(expected: &str, observed: &DomSnapshot) -> boo
 /// or observing a results list is not enough to hand off to verification.
 /// Require a non-submitting click and an independently observed destination
 /// URL change. The final evidence verifier still checks the actual goal.
+/// An LLM proposal never creates permission to fetch a file. The original
+/// request must explicitly ask for a download, and its URL must be present
+/// verbatim in that request or on a freshly observed public link.
+fn download_authorized_by_goal(goal:&str, page:&DomSnapshot, url:&str)->bool{
+    let lower=goal.trim().to_ascii_lowercase();
+    let explicit=(lower.starts_with("download ")
+        || lower.starts_with("download:")
+        || lower.starts_with("save file ")
+        || lower.starts_with("save the file ")
+        || lower.starts_with("export ")
+        || lower.contains(" and download ")
+        || lower.contains(" then download "))
+        && !lower.starts_with("how ")
+        && !lower.starts_with("why ")
+        && !lower.starts_with("what ");
+    if !explicit{return false;}
+    let Ok(target)=url::Url::parse(url)else{return false};
+    if target.scheme()!="https"||target.username()!=""||target.password().is_some(){
+        return false;
+    }
+    goal.contains(url)||page.interactive_nodes.iter().any(|n|
+        !n.is_sensitive&&!n.is_submit&&n.href.as_deref()==Some(url))
+}
+
 fn requested_open_result(goal: &str) -> bool {
     let lower = goal.to_ascii_lowercase();
     (lower.contains("open ") || lower.contains("click ") || lower.contains("select "))
@@ -513,8 +637,13 @@ fn result_opening_observed(
     current: &DomSnapshot,
     successful_steps: &[BrowserAction],
 ) -> bool {
+    // Google's results page is not proof that a clicked result opened.
+    let on_google_results=crate::agent::policy::requested_google_research_url(goal).is_some()
+        && url::Url::parse(&current.origin).ok().is_some_and(|u|
+            matches!(u.host_str(),Some("google.com"|"www.google.com"))&&u.path()=="/search");
     !requested_open_result(goal) || (
-        current.origin != initial_origin
+        !on_google_results
+            && current.origin != initial_origin
             && current.origin.starts_with("http")
             && successful_steps.iter().any(|step| matches!(step,
                 BrowserAction::Click { is_submit: false, .. }))
@@ -562,6 +691,103 @@ fn observed_first_result_followup(
     Some(BrowserAction::Click {
         node_id: node.node_id.clone(), element_label: node.label.clone(), is_submit: false,
     })
+}
+
+/// After an independently confirmed, user-specified Google search, choose
+/// the first relevant, directly linked PUBLIC result from the actual native
+/// DOM reading order. Skip Google chrome, ads, account controls and unobserved
+/// destinations. This only dispatches a click; the normal policy, DOM binding,
+/// navigation observation and independent verifier remain mandatory.
+fn observed_google_first_result(
+    goal:&str, snapshot:&DomSnapshot, specialist:Specialist,
+    executed:&[BrowserAction],
+)->Option<BrowserAction>{
+    if !matches!(specialist,Specialist::Browser|Specialist::Research)
+        || !requested_open_result(goal)
+        || !goal.to_ascii_lowercase().contains("first")
+        || !crate::agent::deliberation::read_only(goal)
+    {return None;}
+    let requested=crate::agent::policy::requested_google_research_url(goal)?;
+    if crate::agent::evidence_verifier::check_google_query_navigation(
+        requested.as_str(),snapshot).is_err()
+        || !executed.iter().any(|a|matches!(a,
+            BrowserAction::Navigate{url} if url==requested.as_str()))
+    {return None;}
+    let query=requested.query_pairs().find(|(k,_)|k=="q")?.1.into_owned();
+    let topics:Vec<_>=query.split(|c:char|!c.is_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|t|t.len()>=4 && ![
+            "best","free","apps","application","applications","windows",
+            "with","from","about","which","what","where","their","this",
+            "that","the","official","review","reviews","2026","2025"
+        ].contains(&t.as_str()))
+        .collect();
+    if topics.is_empty(){return None;}
+    let mut seen=HashSet::new();
+    for node in &snapshot.interactive_nodes {
+        if node.is_sensitive||node.is_submit
+            || !(node.tag=="a"||node.role=="link")
+            || node.label.trim().chars().count()<12
+            // A scrollable result below the viewport is still a real DOM link.
+            // The native click executor scrolls it into view and rechecks
+            // visibility before dispatching any event.
+            || node.bbox.as_ref().is_some_and(|b|b.width<2.0||b.height<2.0)
+        {continue;}
+        let Some(raw)=node.href.as_deref()else{continue};
+        let Ok(url)=url::Url::parse(raw)else{continue};
+        if url.scheme()!="https"||url.port().is_some()
+            || !url.username().is_empty()||url.password().is_some()
+            || !matches!(url.host(),Some(url::Host::Domain(_)))
+        {continue;}
+        let Some(host)=url.host_str()else{continue};
+        let host=host.to_ascii_lowercase();
+        if !host.contains('.')
+            || host.ends_with(".local")||host.ends_with(".test")
+            || host.ends_with(".internal")||host.ends_with(".invalid")
+            || host.ends_with(".example")||host.ends_with(".onion")
+            || matches!(host.as_str(),"google.com"|"www.google.com"|
+                "accounts.google.com"|"support.google.com"|"policies.google.com")
+            || host.starts_with("google.")
+            || host=="googleadservices.com"||host.ends_with(".googleadservices.com")
+            || host=="doubleclick.net"||host.ends_with(".doubleclick.net")
+            || host=="gstatic.com"||host.ends_with(".gstatic.com")
+            || host=="youtube.com"||host.ends_with(".youtube.com")
+        {continue;}
+        let label=node.label.to_ascii_lowercase();
+        if ["sponsored","advertisement","sign in","log in","checkout",
+            "purchase","subscribe","account","privacy policy","settings"]
+            .iter().any(|term|label.contains(term)) {continue;}
+        let combined=format!("{} {}",label,url.path().replace(['-','_','/']," ").to_ascii_lowercase());
+        if !topics.iter().any(|term|combined.contains(term))
+            || !seen.insert(url.to_string()){continue;}
+        return Some(BrowserAction::Click{
+            node_id:node.node_id.clone(),
+            element_label:node.label.clone(),
+            is_submit:false
+        });
+    }
+    None
+}
+
+/// Search-result navigation can settle before Google renders its organic
+/// links. Re-observe a bounded number of times instead of following unrelated
+/// recovery navigation or asking a small model to repeat the query.
+fn awaiting_google_public_results(goal:&str,snapshot:&DomSnapshot,
+    executed:&[BrowserAction])->bool {
+    if !requested_open_result(goal) || !goal.to_ascii_lowercase().contains("first")
+        || crate::agent::search_discovery::human_verification(
+            &snapshot.origin,&snapshot.title,&snapshot.text_excerpt) {return false;}
+    let Some(requested)=crate::agent::policy::requested_google_research_url(goal)else{return false;};
+    if crate::agent::evidence_verifier::check_google_query_navigation(
+        requested.as_str(),snapshot).is_err()
+        || !executed.iter().any(|a|matches!(a,BrowserAction::Navigate{url} if url==requested.as_str())){
+        return false;
+    }
+    !snapshot.interactive_nodes.iter().any(|n|
+        !n.is_sensitive&&!n.is_submit&&n.href.as_deref()
+            .and_then(|url|url::Url::parse(url).ok()).is_some_and(|u|
+                u.scheme()=="https" && u.host_str().is_some_and(|h|
+                    h!="google.com" && h!="www.google.com")))
 }
 
 /// Independent native verification for the narrow read-only request to open
@@ -1257,6 +1483,13 @@ async fn run_browser_loop(
     // Never force the same deterministic navigation after it fails. The
     // specialist model must inspect the fresh state and choose recovery.
     let mut direct_navigation_attempted = false;
+    // Integrate upstream explicit-Google and delegated-media task state.
+    let mut unspecified_music_search_attempted=false;
+    let mut delegated_music_video_attempted=false;
+    let mut google_research_navigation_attempted=false;
+    let mut google_first_result_attempted=false;
+    let mut google_results_settle_attempts: u8=0;
+
     let mut named_waypoints_attempted=std::collections::HashSet::<usize>::new();
     let mut objectives=crate::agent::semantic_core::ObjectiveLedger::new(&goal);
     // WebView2 may acknowledge navigation before a slow site yields a loaded DOM.
@@ -1518,6 +1751,29 @@ async fn run_browser_loop(
         };
         observation_failures = 0;
         snapshot = live;
+        if awaiting_google_public_results(&goal,&snapshot,&recorded_steps) {
+            if google_results_settle_attempts >= 7 {
+                let _=app.emit("agent:run_error",serde_json::json!({
+                    "run_id":run_id,
+                    "message":"Google displayed the requested search but no selectable public result links after repeated native observations. Lucia stopped without guessing or navigating to unrelated sites.",
+                    "source":"google_results_not_observed"
+                }));
+                final_status="unverified".into();
+                break;
+            }
+            google_results_settle_attempts+=1;
+            let _=app.emit("agent:activity",serde_json::json!({
+                "run_id":run_id,
+                "phase":"google_results_settling",
+                "step_index":step,
+                "retry_count":google_results_settle_attempts
+            }));
+            tokio::select!{
+                _=cancel.cancelled()=>return Ok("cancelled".into()),
+                _=tokio::time::sleep(std::time::Duration::from_millis(600))=>{}
+            }
+            continue;
+        }
         if let Some(scope)=child_scope.as_ref(){
             anyhow::ensure!(scope.contains(&snapshot.origin),"Browser specialist left its approved public origins");
             if !super::multimodal_perception::independent_discovery_allowed(&snapshot){
@@ -1657,6 +1913,41 @@ async fn run_browser_loop(
             "run_id": run_id, "phase": "observed", "step_index": step,
             "controls": snapshot.interactive_nodes.len()
         }));
+        // Public-search acceptance diagnostics are run-local counts only.
+        // Never expose raw Google queries, page text, tokens or link URLs.
+        if let Some(requested)=crate::agent::policy::requested_google_research_url(&goal){
+            let current=url::Url::parse(&snapshot.origin).ok();
+            let is_google=current.as_ref().and_then(|u|u.host_str())
+                .is_some_and(|h|matches!(h,"google.com"|"www.google.com"));
+            let page_kind=if is_google {
+                match current.as_ref().map(|u|u.path()){
+                    Some("/search")=>"results",Some("/")=>"home",_=>"other_google"
+                }
+            }else{"external"};
+            let observed_public_links=snapshot.interactive_nodes.iter()
+                .filter(|n|!n.is_sensitive&&!n.is_submit&&n.href.as_deref()
+                    .and_then(|h|url::Url::parse(h).ok()).is_some_and(|u|
+                        u.scheme()=="https" && u.host_str().is_some_and(|h|
+                            !matches!(h,"google.com"|"www.google.com"))))
+                .count();
+            let candidate=observed_google_first_result(
+                &goal,&snapshot,orchestrator.specialist(),&recorded_steps).is_some();
+            let _=app.emit("agent:google_search_diagnostic",serde_json::json!({
+                "run_id":run_id,
+                "step_index":step,
+                "page_kind":page_kind,
+                "controls":snapshot.interactive_nodes.len(),
+                "href_controls":snapshot.interactive_nodes.iter().filter(|n|n.href.is_some()).count(),
+                "external_public_links":observed_public_links,
+                "query_verified":crate::agent::evidence_verifier::check_google_query_navigation(
+                    requested.as_str(),&snapshot).is_ok(),
+                "query_dispatched":recorded_steps.iter().any(|a|
+                    matches!(a,BrowserAction::Navigate{url} if url==requested.as_str())),
+                "requested_first_result":requested_open_result(&goal),
+                "candidate_found":candidate,
+                "first_result_attempted":google_first_result_attempted
+            }));
+        }
         if let Some(before) = pending_named_search_enter.as_ref() {
             if check_named_title_search_navigation(
                 &goal, &initial_origin, before, &snapshot, &orchestrator.evidence
@@ -2513,16 +2804,48 @@ async fn run_browser_loop(
                     "first_video_result:observed_href_fallback".to_string(),
                 )
             } else if freshly_observed
+                && !delegated_music_video_attempted
+                && trusted_delegated_youtube_watch_navigation(
+                    &goal,&snapshot,orchestrator.specialist()).is_some()
+            {
+                delegated_music_video_attempted=true;
+                (
+                    "Navigate to the observed YouTube song video without repeating SPA clicks".into(),
+                    trusted_delegated_youtube_watch_navigation(
+                        &goal,&snapshot,orchestrator.specialist())
+                        .expect("live results and exact public watch URL validated"),
+                    "music_discovery:observed_watch_navigation".into()
+                )
+            } else if freshly_observed
+                && crate::agent::policy::requested_unspecified_music_search_url(&goal).is_none()
                 && trusted_first_youtube_video_result(
                     &goal, &snapshot, orchestrator.specialist()).is_some()
             {
                 let action = trusted_first_youtube_video_result(
                     &goal, &snapshot, orchestrator.specialist())
                     .expect("checked live video-result target");
+                if crate::agent::policy::requested_unspecified_music_search_url(&goal).is_some(){
+                    delegated_music_video_attempted=true;
+                }
                 (
                     "Click the first verified YouTube watch link observed on the live results page".to_string(),
                     action,
                     "first_video_result:observed_dom".to_string(),
+                )
+            } else if freshly_observed
+                && !google_research_navigation_attempted
+                && trusted_google_search_navigation(
+                    &goal,&snapshot,orchestrator.specialist()).is_some()
+            {
+                // Independent navigation and observed-page postconditions are
+                // still enforced before the research stage may advance.
+                google_research_navigation_attempted=true;
+                (
+                    "Open the exact public Google query explicitly requested by the user".into(),
+                    trusted_google_search_navigation(
+                        &goal,&snapshot,orchestrator.specialist())
+                        .expect("observed Google homepage and bounded user query"),
+                    "google_research:exact_user_query".into(),
                 )
             } else if freshly_observed
                 && !confirmed_named_search_query
@@ -2817,6 +3140,39 @@ async fn run_browser_loop(
                 action_binding_error=Some("Read-only route revisit budget exhausted".into());
             }
         }
+        // Prefer a uniquely relevant, observed public link over a weak
+        // model-selected scroll/navigation. This never adds a new permission:
+        // the candidate must still pass the specialist, objective, route,
+        // live-DOM and standard browser policy gates below.
+        let model_proposed = ["ollama:","litellm:","groq:","bedrock:"]
+            .iter().any(|part|model_route.contains(part));
+        if model_proposed && action_binding_error.is_none()
+            && catalog.is_none() && skill.is_none() && !objectives.active()
+            && freshly_observed
+        {
+            let excluded:std::collections::HashSet<String>=failed_choices.iter()
+                .filter_map(|item|item.get("node_id").and_then(|v|v.as_str()))
+                .map(str::to_owned).collect();
+            if let Some(candidate)=crate::agent::action_intelligence::better_observed_link(
+                &goal,&semantic_focus,&snapshot,&action,&excluded
+            ){
+                let route_ok=matches!(&candidate,BrowserAction::Navigate{url} if route_ledger.allowed(url));
+                if route_ok
+                    && orchestrator.specialist().allows_on_page(&candidate,&snapshot)
+                    && crate::agent::objective_gate::check(
+                        &goal,&initial_origin,&snapshot,&objectives,&candidate).is_ok()
+                {
+                    action=candidate;
+                    thought="Choose a uniquely objective-relevant link observed on the live page".into();
+                    model_route="action_intelligence:observed_objective_link".into();
+                    let _=app.emit("agent:action_intelligence",serde_json::json!({
+                        "run_id":run_id,"step_index":step,
+                        "decision":"substitute_unique_relevant_observed_link"
+                    }));
+                }
+            }
+        }
+        let before_effect=snapshot.clone();
         let semantic_attempt=run_core.prepare(&action,&snapshot,orchestrator.current);
         let signature = action_state_signature(orchestrator.current, &action, &snapshot);
         let redundant_navigation = matches!(&action, BrowserAction::Navigate { url }
@@ -2949,6 +3305,23 @@ async fn run_browser_loop(
                 reason: format!("Live DOM action validation failed: {reason}"),
             };
         }
+        if crate::agent::action_intelligence::irrelevant_control(
+            &goal,&snapshot,&action
+        ){
+            decision=PolicyDecision::Deny{
+                reason:"This control is unrelated to the requested read-only objective".into()
+            };
+        }
+        // Download permission cannot be introduced by a planner, supervisor
+        // or downloaded page. Block proposals without the user's request
+        // and a matching live link or exact URL they explicitly supplied.
+        if let BrowserAction::Download{url,..}=&action {
+            if !download_authorized_by_goal(&goal,&snapshot,url){
+                decision=PolicyDecision::Deny{
+                    reason:"The user did not request a download from this observed link".into(),
+                };
+            }
+        }
         if let BrowserAction::Complete { .. } = &action {
             if !freshly_observed || cancel.is_cancelled() {
                 decision = PolicyDecision::Deny { reason: "Stage completion requires fresh live evidence and an active run".into() };
@@ -3007,7 +3380,11 @@ async fn run_browser_loop(
                     let is_comparison = orchestrator.plan.stages.iter()
                         .any(|stage| stage.specialist == Specialist::Comparison)
                         || !crate::agent::deliberation::explicit_research_sources(&goal).is_empty();
-                    let result = if let Some(target) = requested_navigation_url(&goal) {
+                    let result = if crate::agent::policy::requested_wikipedia_article_url(&goal).is_some(){
+                        crate::agent::evidence_verifier::verify_wikipedia_article(
+                            &goal,&snapshot,&orchestrator.evidence)
+                            .map_err(anyhow::Error::msg)
+                    } else if let Some(target) = requested_navigation_url(&goal) {
                         verify_direct_navigation(target.as_str(), &snapshot)
                             .map_err(anyhow::Error::msg)
                     } else if music_task {
@@ -3301,7 +3678,14 @@ async fn run_browser_loop(
                         crate::agent::prerequisites::completion_blocker(&goal,&after).map_or(Ok(()),|r|Err(r.into()))
                     }else{match &action {
                         BrowserAction::Navigate { url } =>
-                            if auth_recovery_attempts > 0 && crate::agent::recovery::navigation_confirmed(url, &after) {
+                            if model_route.starts_with("google_research:exact_user_query") {
+                                crate::agent::evidence_verifier::check_google_query_navigation(url, &after)
+                            } else if model_route.starts_with("music_discovery:delegated_public_song") {
+                                crate::agent::evidence_verifier::check_youtube_music_search_navigation(url,&after)
+                            } else if model_route.starts_with("first_video_result:observed_href_fallback") ||
+                                model_route.starts_with("music_discovery:observed_watch_navigation") {
+                                crate::agent::evidence_verifier::check_youtube_observed_watch_navigation(url,&after)
+                            } else if auth_recovery_attempts > 0 && crate::agent::recovery::navigation_confirmed(url, &after) {
                                 Ok(())
                             } else { check_navigation_result(url, &after) },
                         BrowserAction::Click { is_submit: true, .. } =>
@@ -3489,9 +3873,18 @@ async fn run_browser_loop(
             crate::agent::semantic_core::objective_words(&goal).len()>=2&&
             crate::agent::semantic_core::navigation_relevance(&goal,&orchestrator.stage().objective,&snapshot)==0;
         if unrelated_model_navigation{outcome.push_str(" | NAVIGATION OBSERVED BUT OBJECTIVE RELEVANCE NOT ESTABLISHED; reassess remaining goal");}
+        // A browser acknowledgment alone cannot reset stall detection.
+        // Require an actual native change to the observed page/field, or a
+        // separately confirmed completion/download effect. This is independent
+        // from whether the browser accepted the action.
+        let objective_effect=crate::agent::action_intelligence::effect_observed(
+            &goal,&semantic_focus,&before_effect,&snapshot,&action
+        );
         let progress = if !ok { "failed or unverified" }
-            else if unrelated_model_navigation || outcome.contains("NO MEANINGFUL PAGE CHANGE") || outcome.contains("PAGE CHANGE NOT OBSERVED") {
-                "executed; no observed progress"
+            else if !objective_effect || unrelated_model_navigation ||
+                outcome.contains("NO MEANINGFUL PAGE CHANGE") ||
+                outcome.contains("PAGE CHANGE NOT OBSERVED") {
+                "executed; no observed objective progress"
             } else { "executed" };
         // Dispatch success is not task progress. Treat a no-change outcome
         // as a failed strategy so recovery starts rather than repeating it.
@@ -3777,6 +4170,160 @@ mod production_safety_tests {
             goal, &before.origin, &before, &wrong, &observed).is_err());
     }
 
+    #[test]
+    fn casual_conversation_never_authorizes_a_download(){
+        let page=DomSnapshot{structure:Default::default(),origin:"about:blank".into(),
+            title:"New Tab".into(),text_excerpt:String::new(),interactive_nodes:vec![]};
+        for message in ["whats up","hi","what's up?","how do I download a PDF?",
+            "Summarize downloading files","check for open tabs"]{
+            assert!(!download_authorized_by_goal(message,&page,"https://example.org/file.pdf"));
+        }
+        assert!(!download_authorized_by_goal("download the report",&page,
+            "https://example.org/file.pdf"),"Unobserved file target must not be guessed");
+        assert!(download_authorized_by_goal(
+            "download https://example.org/file.pdf",&page,
+            "https://example.org/file.pdf"));
+        assert!(!download_authorized_by_goal(
+            "download https://example.org/file.pdf",&page,
+            "https://unrelated.example/file.pdf"));
+        assert!(!download_authorized_by_goal(
+            "download https://example.org/file.pdf",&page,
+            "http://example.org/file.pdf"));
+    }
+    #[test]
+    fn first_google_result_is_selected_from_verified_live_links_only(){
+        use crate::agent::dom_extractor::DomNodeSummary;
+        let goal="Search Google for the best free note-taking apps for Windows. Open the first relevant result and report its title.";
+        let search=crate::agent::policy::requested_google_research_url(goal).unwrap().to_string();
+        let mut page=DomSnapshot{
+            structure:Default::default(),
+            origin:"https://www.google.com/search?q=the+best+free+note-taking+apps+for+Windows&sei=token".into(),
+            title:"the best free note-taking apps for Windows - Google Search".into(),
+            text_excerpt:"Free note-taking apps and official websites for Windows. Search results are available.".into(),
+            interactive_nodes:vec![]
+        };
+        let mk=|id:&str,label:&str,href:&str|DomNodeSummary{
+            node_id:id.into(),tag:"a".into(),role:"link".into(),label:label.into(),
+            href:Some(href.into()),is_submit:false,is_sensitive:false,
+            checked:None,search_state:None,options:vec![],bbox:None
+        };
+        page.interactive_nodes=vec![
+            mk("chrome","Explore Google search settings","https://www.google.com/preferences"),
+            mk("ad","Sponsored note taking app advertisement","https://sponsor.org/notes"),
+            mk("unrelated","Weather forecast today","https://forecast.org/weather"),
+            mk("first","Best free note-taking apps for Windows — detailed review","https://public-notes.org/guide"),
+            mk("second","Windows note taking software comparison","https://another-notes.org/guide"),
+        ];
+        let click=vec![BrowserAction::Click{node_id:"first".into(),
+            element_label:"Best free note-taking apps for Windows — detailed review".into(),is_submit:false}];
+        assert!(!result_opening_observed(goal,"https://www.google.com/",&page,&click));
+        let mut opened=page.clone();
+        opened.origin="https://public-notes.org/guide".into();
+        assert!(result_opening_observed(goal,"https://www.google.com/",&opened,&click));
+        // Google products can be legitimate note-taking results, while
+        // Google search chrome and ad-click services remain excluded.
+        page.interactive_nodes.insert(3,mk(
+            "keep","Google Keep — Notes and lists across devices",
+            "https://keep.google.com/"));
+        let search_history=vec![BrowserAction::Navigate{url:search.clone()}];
+        assert!(matches!(observed_google_first_result(goal,&page,Specialist::Research,&search_history),
+            Some(BrowserAction::Click{node_id,..}) if node_id=="keep"));
+        page.interactive_nodes.remove(3);
+        // An earlier generic icon for the same URL must not hide its
+        // subsequently observed descriptive result title.
+        page.interactive_nodes.insert(3,mk("generic","Visit this website",
+            "https://public-notes.org/guide"));
+        assert!(matches!(observed_google_first_result(goal,&page,Specialist::Research,&search_history),
+            Some(BrowserAction::Click{node_id,..}) if node_id=="first"));
+        page.interactive_nodes.remove(3);
+        let history=vec![BrowserAction::Navigate{url:search.clone()}];
+        let mut sparse=page.clone();
+        sparse.interactive_nodes.clear();
+        assert!(!awaiting_google_public_results(goal,&sparse,&[]));
+        assert!(awaiting_google_public_results(goal,&sparse,&history));
+        assert!(!awaiting_google_public_results(goal,&page,&history));
+        sparse.origin="https://www.google.com/sorry/index".into();
+        assert!(!awaiting_google_public_results(goal,&sparse,&history));
+        assert!(observed_google_first_result(goal,&page,Specialist::Research,&[]).is_none());
+        // Google can place the first organic result below an AI overview;
+        // it remains selectable because native execution scrolls it into view.
+        page.interactive_nodes[3].bbox=Some(crate::agent::dom_extractor::BoundingBox{
+            x:25.0,y:1550.0,width:310.0,height:40.0,in_viewport:false
+        });
+        assert!(matches!(observed_google_first_result(goal,&page,Specialist::Research,&history),
+            Some(BrowserAction::Click{node_id,..}) if node_id=="first"));
+        page.interactive_nodes[3].bbox=None;
+        let action=observed_google_first_result(goal,&page,Specialist::Research,&history).unwrap();
+        assert!(matches!(action,BrowserAction::Click{node_id,..} if node_id=="first"));
+        assert!(observed_google_first_result(goal,&page,Specialist::Verification,&history).is_none());
+        page.origin="https://www.google.com/search?q=unrelated&sei=token".into();
+        assert!(observed_google_first_result(goal,&page,Specialist::Research,&history).is_none());
+        page.origin="https://www.google.com/search?q=the+best+free+note-taking+apps+for+Windows&sei=token".into();
+        page.interactive_nodes[3].is_sensitive=true;
+        assert!(matches!(observed_google_first_result(goal,&page,Specialist::Research,&history),
+            Some(BrowserAction::Click{node_id,..}) if node_id=="second"));
+        page.title="Just a moment...".into();page.text_excerpt="Verify you are human".into();
+        assert!(observed_google_first_result(goal,&page,Specialist::Research,&history).is_none());
+    }
+    #[test]
+    fn exact_google_search_navigation_works_without_a_unique_searchbox(){
+        use crate::agent::dom_extractor::DomNodeSummary;
+        let goal="Search Google for the best free note-taking apps for Windows. Open the first three relevant results, visit the apps' official websites, compare their features, offline support, and limitations, then recommend the best option. Include the source links and explain your choice.";
+        let mut page=DomSnapshot{
+            structure:Default::default(),origin:"https://www.google.com/".into(),
+            title:"Google".into(),text_excerpt:"Google public search home.".into(),
+            interactive_nodes:(0..28).map(|i|DomNodeSummary{
+                node_id:format!("node_{i}"),tag:"input".into(),role:"searchbox".into(),
+                label:format!("Search {i}"),href:None,is_submit:false,is_sensitive:false,
+                checked:None,search_state:None,options:vec![],bbox:None
+            }).collect()
+        };
+        let action=trusted_google_search_navigation(goal,&page,Specialist::Research).unwrap();
+        let BrowserAction::Navigate{url}=action else{panic!("public search must navigate")};
+        let u=url::Url::parse(&url).unwrap();
+        assert_eq!(u.host_str(),Some("www.google.com"));
+        assert_eq!(u.path(),"/search");
+        assert_eq!(u.query_pairs().find(|(k,_)|k=="q").unwrap().1,
+            "the best free note-taking apps for Windows");
+        assert!(trusted_google_search_navigation(goal,&page,Specialist::Verification).is_none());
+        page.origin=url;
+        assert!(trusted_google_search_navigation(goal,&page,Specialist::Research).is_none(),
+            "search result navigation must not be repeated");
+        page.origin="https://www.google.com/sorry/index".into();
+        assert!(trusted_google_search_navigation(goal,&page,Specialist::Research).is_none());
+        page.origin="https://www.google.com/".into();
+        page.text_excerpt="Active dialog: Sign in to Google".into();
+        assert!(trusted_google_search_navigation(goal,&page,Specialist::Research).is_none());
+    }
+    #[test]
+    fn explicit_google_research_uses_the_observed_search_field_once(){
+        use crate::agent::dom_extractor::DomNodeSummary;
+        let goal="Search Google for the best free note-taking apps for Windows. Open the first three relevant results, visit their official websites and compare features, offline support and limitations.";
+        let mut page=DomSnapshot{
+            structure:Default::default(),origin:"https://www.google.com/".into(),
+            title:"Google".into(),text_excerpt:"Google Search homepage with a search field.".into(),
+            interactive_nodes:vec![DomNodeSummary{
+                node_id:"google_search".into(),tag:"input".into(),role:"searchbox".into(),
+                label:"Search".into(),href:None,is_submit:false,is_sensitive:false,
+                checked:None,search_state:Some("empty".into()),options:vec![],bbox:None
+            }]
+        };
+        assert_eq!(trusted_google_research_query(goal,&page).as_deref(),
+            Some("the best free note-taking apps for Windows"));
+        let first=trusted_named_search_query_input(goal,&page,Specialist::Research).unwrap();
+        assert!(matches!(first,BrowserAction::TypeText{ref node_id,ref text,is_sensitive:false}
+            if node_id=="google_search"&&text=="the best free note-taking apps for Windows"));
+        page.interactive_nodes[0].search_state=Some("filled".into());
+        let next=trusted_named_search_enter(goal,&page,Specialist::Research).unwrap();
+        assert!(matches!(next,BrowserAction::PressKey{node_id, key} if node_id=="google_search"&&key=="Enter"));
+        page.interactive_nodes[0].is_sensitive=true;
+        assert!(trusted_named_search_query_input(goal,&page,Specialist::Research).is_none());
+        page.interactive_nodes[0].is_sensitive=false;
+        page.origin="https://example.org/".into();
+        assert!(trusted_google_research_query(goal,&page).is_none());
+        page.origin="https://www.google.com/".into();
+        assert!(trusted_google_research_query("Search Google for a laptop and buy it.",&page).is_none());
+    }
     #[test]
     fn named_search_enter_requires_a_real_non_sensitive_search_field() {
         let goal = "On this Wiktionary page, search for photosynthesis and open the corresponding article. Then report its page title.";
@@ -4569,6 +5116,52 @@ mod first_youtube_result_tests {
         assert!(trusted_explicit_youtube_search(goal, &page, Specialist::Browser).is_none());
     }
 
+    #[test]
+    fn delegated_music_search_requires_real_youtube_and_observed_watch_link(){
+        let goal="play any song";
+        let mut page=DomSnapshot{
+            structure:Default::default(),
+            origin:"https://www.youtube.com/".into(),
+            title:"YouTube".into(),
+            text_excerpt:"YouTube homepage with public videos and search".into(),
+            interactive_nodes:vec![],
+        };
+        let discovery=crate::agent::policy::requested_unspecified_music_search_url(goal).unwrap();
+        assert!(matches!(trusted_unspecified_music_search(goal,&page,Specialist::Browser),
+            Some(BrowserAction::Navigate{url}) if url==discovery.as_str()));
+        assert!(trusted_unspecified_music_search(goal,&page,Specialist::Verification).is_none());
+        page.origin="https://evil.example/".into();
+        assert!(trusted_unspecified_music_search(goal,&page,Specialist::Browser).is_none());
+        page.origin=discovery.to_string();
+        page.title="YouTube search results".into();
+        page.interactive_nodes=vec![
+            result_node("offsite","https://evil.example/watch?v=bad",true),
+            result_node("public-song","https://www.youtube.com/watch?v=music123",true)
+        ];
+        assert!(matches!(trusted_first_youtube_video_result(goal,&page,Specialist::Browser),
+            Some(BrowserAction::Click{node_id,..}) if node_id=="public-song"));
+        assert!(matches!(trusted_delegated_youtube_watch_navigation(
+            goal,&page,Specialist::Browser),
+            Some(BrowserAction::Navigate{url}) if url=="https://www.youtube.com/watch?v=music123"));
+        assert!(trusted_delegated_youtube_watch_navigation(
+            goal,&page,Specialist::Verification).is_none());
+        assert!(trusted_delegated_youtube_watch_navigation(
+            "open youtube and play any music",&page,Specialist::Browser).is_none());
+        let observed="https://www.youtube.com/watch?v=music123";
+        assert!(trusted_youtube_watch_link_followup(goal,&page,Specialist::Browser,observed).is_some());
+        page.interactive_nodes.clear();
+        assert!(trusted_delegated_youtube_watch_navigation(goal,&page,Specialist::Browser).is_none());
+        assert!(trusted_youtube_watch_link_followup(goal,&page,Specialist::Browser,observed).is_some(),
+            "Previously observed and successfully clicked public watch URL remains a bounded fallback");
+        assert!(trusted_youtube_watch_link_followup(
+            "Search YouTube for NASA and open the first video result",
+            &page,Specialist::Browser,observed).is_none(),
+            "Other video tasks still require a freshly observed link");
+        page.origin="https://www.youtube.com/results?search_query=unrelated".into();
+        assert!(trusted_first_youtube_video_result(goal,&page,Specialist::Browser).is_none());
+        assert!(trusted_youtube_watch_link_followup(goal,&page,Specialist::Browser,observed).is_none(),
+            "Fallback must match the exact delegated search query");
+    }
     #[test]
     fn first_video_click_is_grounded_in_same_site_watch_link() {
         let page = DomSnapshot {

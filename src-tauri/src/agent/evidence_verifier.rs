@@ -455,6 +455,72 @@ fn facet_score(goal:&str,facet:&str,text:&str)->i32{
     }
     count
 }
+/// Named, explicitly sourced comparisons must bind each requested subject to
+/// its own evidence, not merely match a generic output or limitation phrase.
+/// Ambiguous or unnamed comparisons keep the existing general facet checks.
+fn named_comparison_subjects(goal:&str)->Option<[String;2]>{
+    let lower=goal.to_ascii_lowercase();
+    let (_,tail)=lower.split_once("compare ")?;
+    let (pair,_)=tail.split_once(" using ").or_else(||tail.split_once(" from "))?;
+    let (a,b)=pair.split_once(" and ").or_else(||pair.split_once(" with ")).or_else(||pair.split_once(" vs "))?;
+    let clean=|s:&str|->Option<String>{
+        let s=s.trim().trim_end_matches(['.', '?', ',']);
+        if s.contains("://")||s.split_whitespace().count()>8||
+            s.split_whitespace().count()==0||
+            ["features","limitations","the two","both","these","advantages"].iter().any(|p|s.starts_with(*p)){
+            return None;
+        }
+        Some(s.to_string())
+    };
+    let a=clean(a)?;let b=clean(b)?;
+    if a==b||super::deliberation::explicit_research_sources(goal).len()!=2{return None;}
+    Some([a,b])
+}
+fn subject_words(text:&str)->Vec<String>{
+    words(text).into_iter().map(|w|{
+        if w.len()>4&&w.ends_with('s')&&!w.ends_with("ss"){w[..w.len()-1].to_string()}else{w}
+    }).collect()
+}
+fn subject_sequence(haystack:&[String],needle:&[String])->bool{
+    !needle.is_empty()&&haystack.windows(needle.len()).any(|part|part==needle)
+}
+/// The full name is preferred. For a qualified subject such as "Python list
+/// comprehensions", its two-word suffix can identify it inside a Python page.
+fn subject_anchor(subject:&str,text:&str,source:&SourceEvidence)->bool{
+    let target=subject_words(subject);
+    let actual=subject_words(text);
+    if subject_sequence(&actual,&target){return true;}
+    let metadata=subject_words(&format!("{} {}",source.title,source.url));
+    let suffix=if target.len()>2&&metadata.iter().any(|w|w==&target[0]){&target[1..]}else{&target[..]};
+    if subject_sequence(&actual,suffix){return true;}
+    // Qualified API identifiers may be referred to by their method name on
+    // a dedicated reference page. Do not grant this alias on broad guides.
+    if subject.contains('.')&&suffix.len()>=2&&subject_sequence(&metadata,suffix){
+        if let Some(method)=suffix.last(){
+            let called=format!("{method}(");
+            let method_phrase=format!("{method} method");
+            let low=text.to_ascii_lowercase();
+            return actual.iter().any(|w|w==method)&&(low.contains(&called)||low.contains(&method_phrase));
+        }
+    }
+    false
+}
+fn named_facet_relevant(goal:&str,source:&SourceEvidence,facet:&str,text:&str)->bool{
+    if !matches!(facet,"output_behavior"|"operational_distinction"){return true;}
+    let Some(subjects)=named_comparison_subjects(goal)else{return true;};
+    let urls=super::deliberation::explicit_research_sources(goal);
+    let Some(index)=urls.iter().position(|u|web_url(&source.url).as_ref()==Some(u))else{return false;};
+    // Prefer an explicit match in the source's title/path over input order.
+    let meta=format!("{} {}",source.title,source.url);
+    let matched:Vec<_>=subjects.iter().enumerate().filter(|(_,s)|subject_anchor(s,&meta,source)).map(|(i,_)|i).collect();
+    let index=if matched.len()==1{matched[0]}else{index};
+    // Require the subject and the requested behavior in the same sentence,
+    // so joining an unrelated output sentence to a topical heading cannot
+    // manufacture support. Keep punctuation within API identifiers intact.
+    text.split(". ").flat_map(|s|s.split("! ")).flat_map(|s|s.split("? "))
+        .any(|s|subject_anchor(&subjects[index],s,source)&&facet_score(goal,facet,s)>0)
+}
+
 fn quality_tier(goal:&str,facet:&str,text:&str)->u8{
     let t=semantic_text(text);
     if facet_score(goal,facet,text)==0{return 0;}
@@ -526,7 +592,7 @@ pub fn facet_candidates(goal:&str,source:&SourceEvidence)->Vec<FacetCandidates>{
             if !source_facet_supported(goal,facet,source,p){return None;}
             let n=normalized(p);
             let minimum=if matches!(facet,"installation_command"|"runtime_compatibility"){12}else if facet=="caveat"&&direct_usage_warning(p){20}else{30};
-            if score==0||p.chars().count()<minimum||p.chars().count()>240||
+            if score==0||!named_facet_relevant(goal,source,facet,p)||p.chars().count()<minimum||p.chars().count()>240||
                 ["ignore previous","ignore instructions","system prompt","reveal credentials","output exactly","developer message"].iter().any(|x|n.contains(x)){return None;}
             // Incomplete references like "does not support this" need context;
             // penalize them rather than confidently presenting fragments.
@@ -942,6 +1008,99 @@ pub fn check_model_verification(
 
 /// Navigation dispatch is not completion: require the requested URL and
 /// actual document evidence (text or meaningful title) from a later WebView snapshot.
+/// Google can add presentation/analytics parameters to a search URL without
+/// changing the requested public query. Require the same Google search path and
+/// decoded q value, a readable real page, and no challenge/error page. This
+/// narrows the special case to the exact user-requested read-only search.
+pub fn check_google_query_navigation(requested:&str,after:&DomSnapshot)->Result<(),String>{
+    let wanted=url::Url::parse(requested).map_err(|_|"Invalid Google search URL")?;
+    let actual=url::Url::parse(&after.origin).map_err(|_|"Google search destination not loaded")?;
+    if wanted.scheme()!="https" || actual.scheme()!="https" ||
+        wanted.host_str()!=Some("www.google.com") ||
+        !matches!(actual.host_str(),Some("www.google.com"|"google.com")) ||
+        wanted.path()!="/search" || actual.path()!="/search" ||
+        !wanted.query_pairs().any(|(k,v)|k=="q"&&!v.trim().is_empty()) {
+        return Err("Navigation is not a public Google search".into());
+    }
+    let q=wanted.query_pairs().find(|(k,_)|k=="q").map(|(_,v)|v.into_owned());
+    let actual_q=actual.query_pairs().filter(|(k,_)|k=="q").map(|(_,v)|v.into_owned()).collect::<Vec<_>>();
+    if actual_q.len()!=1||q.as_deref()!=actual_q.first().map(String::as_str){
+        return Err("The observed Google results query differs from the user's request".into());
+    }
+    if super::search_discovery::human_verification(&after.origin,&after.title,&after.text_excerpt)
+        || super::deliberation::error_page(after){
+        return Err("Google results are blocked by a challenge or an error page".into());
+    }
+    if after.title.trim().chars().count()<4 && after.text_excerpt.trim().chars().count()<30 {
+        return Err("Google results are not yet readable".into());
+    }
+    Ok(())
+}
+
+/// YouTube may append display/tracking parameters to public search results.
+/// Require the exact delegated term, public host and readable native page.
+pub fn check_youtube_music_search_navigation(requested:&str,after:&DomSnapshot)->Result<(),String>{
+    let want=Url::parse(requested).map_err(|_|"Invalid delegated YouTube search URL")?;
+    let actual=Url::parse(&after.origin).map_err(|_|"YouTube search destination not loaded")?;
+    if want.scheme()!="https"||actual.scheme()!="https"||
+        want.host_str()!=Some("www.youtube.com")||
+        actual.host_str()!=Some("www.youtube.com")||
+        want.path()!="/results"||actual.path()!="/results"{
+        return Err("Opened page is not a public YouTube results page".into());
+    }
+    let query=want.query_pairs().find(|(k,_)|k=="search_query")
+        .map(|(_,v)|v.into_owned()).filter(|q|!q.trim().is_empty())
+        .ok_or("Missing delegated music query")?;
+    let actual_terms:Vec<_>=actual.query_pairs().filter(|(k,_)|k=="search_query")
+        .map(|(_,v)|v.into_owned()).collect();
+    if actual_terms!=vec![query]{
+        return Err("YouTube displayed different results than the delegated query".into());
+    }
+    let title=after.title.to_ascii_lowercase();
+    let excerpt=after.text_excerpt.to_ascii_lowercase();
+    let challenged=["verify you're human","verify you are human",
+        "are you a robot","unusual traffic","captcha","checking your browser",
+        "sign in to confirm"];
+    if super::deliberation::error_page(after)||
+        super::search_discovery::human_verification(
+            &after.origin,&after.title,&after.text_excerpt) ||
+        challenged.iter().any(|s|title.contains(s) || excerpt.starts_with(s))
+        || excerpt.starts_with("please complete this verification challenge")
+        || (after.title.trim().chars().count()<4 && after.text_excerpt.trim().chars().count()<30){
+        return Err("YouTube results are unavailable, blocked or unreadable".into());
+    }
+    Ok(())
+}
+
+/// A clicked, observed YouTube watch link may gain benign URL parameters.
+/// Verify the same exact video ID and readable native watch document; this
+/// is *not* proof of playing audio (the media clock verifies that separately).
+pub fn check_youtube_observed_watch_navigation(requested:&str,after:&DomSnapshot)->Result<(),String>{
+    let want=Url::parse(requested).map_err(|_|"Malformed observed YouTube video link")?;
+    let actual=Url::parse(&after.origin).map_err(|_|"YouTube watch destination not loaded")?;
+    if want.scheme()!="https"||actual.scheme()!="https"||
+        want.host_str()!=Some("www.youtube.com")||
+        actual.host_str()!=Some("www.youtube.com")||
+        want.path()!="/watch"||actual.path()!="/watch"{
+        return Err("Observed destination is not a public YouTube watch page".into());
+    }
+    let requested_ids:Vec<_>=want.query_pairs().filter(|(k,_)|k=="v")
+        .map(|(_,v)|v.into_owned()).collect();
+    let observed_ids:Vec<_>=actual.query_pairs().filter(|(k,_)|k=="v")
+        .map(|(_,v)|v.into_owned()).collect();
+    if requested_ids.len()!=1||requested_ids[0].is_empty()||
+        observed_ids!=requested_ids {
+        return Err("Opened a different YouTube video than the clicked link".into());
+    }
+    if super::deliberation::error_page(after)||
+        super::search_discovery::human_verification(
+            &after.origin,&after.title,&after.text_excerpt)||
+        after.title.trim().chars().count()<4{
+        return Err("YouTube watch page has not loaded a readable title".into());
+    }
+    Ok(())
+}
+
 pub fn check_navigation_result(requested: &str, after: &DomSnapshot) -> Result<(), String> {
     let target = web_url(requested).ok_or("Invalid navigation target")?;
     let actual = web_url(&after.origin).ok_or("Destination has not loaded")?;
@@ -1181,6 +1340,42 @@ pub fn check_named_search_transition(
 
 /// A deterministic verifier is more reliable than an LLM quote-generation pass
 /// for the narrow task of opening an explicitly named website.
+/// Validate the article requested by the user using a fresh, matching
+/// native WebView snapshot and the independent saved source observation.
+/// A successful navigation dispatch alone does not prove the article exists.
+pub fn verify_wikipedia_article(
+    goal:&str, after:&DomSnapshot, sources:&[SourceEvidence],
+)->Result<VerificationReport,String>{
+    let target=super::policy::requested_wikipedia_article_url(goal)
+        .ok_or("No explicit Wikipedia article request")?;
+    check_navigation_result(target.as_str(),after)?;
+    let subject=target.path_segments().and_then(|mut path|path.next_back())
+        .ok_or("Missing Wikipedia article slug")?.replace('_'," ");
+    let title=after.title.trim();
+    let title_lower=title.to_ascii_lowercase();
+    let expected=subject.to_ascii_lowercase();
+    if !title_lower.starts_with(&expected)
+        || !title_lower.contains("wikipedia")
+        || !title_lower.get(expected.len()..).is_some_and(|rest|
+            rest.starts_with(" - ")||rest.starts_with(" — ")||rest.starts_with(" – "))
+        || after.text_excerpt.trim().chars().count()<80
+    {return Err("Live Wikipedia page title and article content were not verified".into());}
+    if !sources.iter().any(|s|s.url==after.origin && s.title==after.title
+        && s.excerpt.trim().chars().count()>=80){
+        return Err("No independent saved live Wikipedia article observation".into());
+    }
+    Ok(VerificationReport{
+        status:"evidence_checked",
+        summary:format!("Wikipedia article title: {title}. Source URL: {}",after.origin),
+        findings:vec![GroundedFinding{
+            claim:format!("The requested {subject} article was opened on Wikipedia"),
+            url:after.origin.clone(),
+            quote:format!("Observed document title: {title}")
+        }],
+        limitations:"Confirmed the native article URL, document title and readable page; not an independent fact-check of article contents.".into()
+    })
+}
+
 pub fn verify_direct_navigation(
     requested: &str, after: &DomSnapshot,
 ) -> Result<VerificationReport, String> {
@@ -1307,6 +1502,26 @@ mod tests {
     fn dom(url: &str, text: &str) -> DomSnapshot {
         DomSnapshot {structure: Default::default(), origin:url.into(), title:"Demo".into(),
             text_excerpt:text.into(),interactive_nodes:vec![]}
+    }
+    #[test]
+    fn google_search_accepts_same_query_with_extra_parameters_only(){
+        let target="https://www.google.com/search?q=free+notes+windows";
+        let ok=dom("https://www.google.com/search?source=hp&q=free%20notes%20windows&client=webview",
+            "Real observed search results for free notes windows.");
+        assert!(check_google_query_navigation(target,&ok).is_ok());
+        for different in [
+            "https://www.google.com/",
+            "https://www.google.com/search?q=different",
+            "https://www.google.com/search?q=free+notes+windows&q=different",
+            "https://evil.example/search?q=free+notes+windows",
+            "https://www.google.com/sorry/index?q=free+notes+windows",
+        ]{
+            let bad=dom(different,"Real observed search results for free notes windows.");
+            assert!(check_google_query_navigation(target,&bad).is_err(),"{different}");
+        }
+        let challenge=DomSnapshot{title:"Just a moment...".into(),
+            text_excerpt:"Verify you are human".into(),..ok};
+        assert!(check_google_query_navigation(target,&challenge).is_err());
     }
     #[test]
     fn accepts_exact_observed_quote_and_url() {
@@ -1437,6 +1652,66 @@ mod tests {
         assert!(check_navigation_result("https://wikipedia.org/", &empty).is_err());
     }
 
+    #[test]
+    fn youtube_observed_video_id_is_required_despite_extra_parameters(){
+        let original="https://www.youtube.com/watch?v=abc123";
+        let good=dom("https://www.youtube.com/watch?pp=xyz&v=abc123",
+            "Beethoven Fur Elise piano performance - YouTube");
+        assert!(check_youtube_observed_watch_navigation(original,&good).is_ok());
+        for wrong in [
+            "https://www.youtube.com/watch?v=other",
+            "https://www.youtube.com/watch?v=abc123&v=other",
+            "https://evil.example/watch?v=abc123",
+            "https://www.youtube.com/results?search_query=piano",
+        ]{
+            assert!(check_youtube_observed_watch_navigation(original,
+                &dom(wrong,"Beethoven Fur Elise piano performance - YouTube")).is_err(),"{wrong}");
+        }
+    }
+    #[test]
+    fn delegated_youtube_music_query_accepts_extra_parameters_but_not_wrong_results(){
+        let url="https://www.youtube.com/results?search_query=Beethoven+Fur+Elise+piano+performance";
+        let page=dom("https://www.youtube.com/results?sp=abc&search_query=Beethoven%20Fur%20Elise%20piano%20performance",
+            "YouTube public results page for a classical piano performance.");
+        assert!(check_youtube_music_search_navigation(url,&page).is_ok());
+        for wrong in [
+            "https://www.youtube.com/",
+            "https://www.youtube.com/results?search_query=other",
+            "https://evil.example/results?search_query=Beethoven+Fur+Elise+piano+performance",
+            "https://www.youtube.com/results?search_query=Beethoven+Fur+Elise+piano+performance&search_query=other"
+        ]{
+            assert!(check_youtube_music_search_navigation(url,&dom(wrong,
+                "Public YouTube results for classical piano performance.")).is_err(),"{wrong}");
+        }
+        let challenge=DomSnapshot{
+            title:"Verify you're human".into(),
+            text_excerpt:"Please complete this verification challenge".into(),
+            ..page
+        };
+        assert!(check_youtube_music_search_navigation(url,&challenge).is_err());
+    }
+    #[test]
+    fn wikipedia_article_report_requires_actual_page_and_saved_native_evidence(){
+        let goal="Open Wikipedia, find the Ada Lovelace article, and report its title and source URL. Verify the final webpage before finishing.";
+        let page=DomSnapshot{
+            structure:Default::default(),
+            origin:"https://en.wikipedia.org/wiki/Ada_Lovelace".into(),
+            title:"Ada Lovelace - Wikipedia".into(),
+            text_excerpt:"Augusta Ada King, Countess of Lovelace, was an English mathematician and writer known for her work on Charles Babbage's proposed Analytical Engine.".into(),
+            interactive_nodes:vec![],
+        };
+        let evidence=vec![SourceEvidence{url:page.origin.clone(),title:page.title.clone(),excerpt:page.text_excerpt.clone()}];
+        let report=verify_wikipedia_article(goal,&page,&evidence).unwrap();
+        assert!(report.summary.contains("Ada Lovelace - Wikipedia"));
+        assert!(report.summary.contains("https://en.wikipedia.org/wiki/Ada_Lovelace"));
+        assert!(verify_wikipedia_article(goal,&page,&[]).is_err());
+        let wrong=DomSnapshot{title:"Other Person - Wikipedia".into(),..page.clone()};
+        assert!(verify_wikipedia_article(goal,&wrong,&evidence).is_err());
+        let search=DomSnapshot{origin:"https://en.wikipedia.org/w/index.php?search=Ada+Lovelace".into(),..page.clone()};
+        assert!(verify_wikipedia_article(goal,&search,&evidence).is_err());
+        let empty=DomSnapshot{text_excerpt:"Loading".into(),..page};
+        assert!(verify_wikipedia_article(goal,&empty,&evidence).is_err());
+    }
     #[test]
     fn named_search_result_title_requires_new_matching_article_and_source() {
         let goal = "On this documentation site, search for Ada Lovelace and open the corresponding article. Then report its page title.";
@@ -1900,4 +2175,38 @@ mod extractive_comparison_tests{
         assert!(bound_selection_report(goal,&[source],&tampered,r#"{"ids":["p2"]}"#).is_err());
     }
 
+}
+
+#[cfg(test)]
+mod named_comparison_relevance_tests {
+    use super::*;
+    const GOAL:&str="Research and compare Python list comprehensions and JavaScript Array.map using the official documentation pages https://docs.python.org/3/tutorial/datastructures.html and https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/map . Read both sources. Explain what each produces and one limitation or distinction of each. Cite exact supporting excerpts from both pages.";
+    fn python(excerpt:&str)->SourceEvidence{SourceEvidence{url:"https://docs.python.org/3/tutorial/datastructures.html".into(),title:"Data Structures — Python documentation".into(),excerpt:excerpt.into()}}
+    fn javascript(excerpt:&str)->SourceEvidence{SourceEvidence{url:"https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/map".into(),title:"Array.prototype.map() — JavaScript".into(),excerpt:excerpt.into()}}
+    #[test]
+    fn authentic_but_off_topic_behavior_is_not_a_candidate(){
+        let p=python("The sorted() function creates a new list containing the sorted elements. The remove method does not return a value.");
+        assert!(named_comparison_subjects(GOAL).is_some());
+        assert!(facet_candidates(GOAL,&p).iter().all(|s|s.candidates.is_empty()));
+        let mixed="List comprehensions are described below. The sorted() function creates a new list containing the sorted elements.";
+        assert!(!named_facet_relevant(GOAL,&p,"output_behavior",mixed));
+    }
+    #[test]
+    fn subject_bound_behavior_is_retained_on_both_sources(){
+        let p=python("List comprehensions provide a concise way to create lists. A list comprehension uses a for clause followed by optional if clauses.");
+        let j=javascript("The map() method creates a new array populated with the results. The map() method does not mutate the original array.");
+        for s in [&p,&j]{
+            let sets=facet_candidates(GOAL,s);
+            assert_eq!(sets.len(),2);
+            assert!(sets.iter().all(|set|!set.candidates.is_empty()),"{:?}",sets);
+        }
+        assert!(!named_facet_relevant(GOAL,&p,"output_behavior","The map() method creates a new array populated with the results."));
+    }
+    #[test]
+    fn final_report_rejects_off_topic_quotes_even_when_authentic(){
+        let p=python("The sorted() function creates a new list containing the sorted elements. The remove method does not return a value.");
+        let j=javascript("The map() method creates a new array populated with the results. The map() method does not mutate the original array.");
+        let findings=[(&p,"The sorted() function creates a new list containing the sorted elements."),(&p,"The remove method does not return a value."),(&j,"The map() method creates a new array populated with the results."),(&j,"The map() method does not mutate the original array.")].into_iter().map(|(s,q)|GroundedFinding{claim:q.into(),quote:q.into(),url:s.url.clone()}).collect();
+        assert!(assemble_extractive_comparison(GOAL,&[p,j],findings).is_err());
+    }
 }

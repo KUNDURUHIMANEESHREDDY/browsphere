@@ -135,9 +135,35 @@ fn host_matches_allowlist(host: &str, allowed_domains: &[String]) -> bool {
 }
 
 
+/// The user explicitly named a Wikipedia article and asked for its title
+/// and source. Build one potential destination from that exact user-supplied
+/// name. This is navigation authorization, never proof the article exists.
+/// All page evidence and the returned title/URL must be read back natively.
+pub fn requested_wikipedia_article_url(goal:&str)->Option<Url>{
+    let text=goal.trim();
+    let lower=text.to_ascii_lowercase();
+    let prefix=["open wikipedia, find the ","open wikipedia and find the "]
+        .into_iter().find(|p|lower.starts_with(p))?;
+    let remainder=text.get(prefix.len()..)?;
+    let index=remainder.to_ascii_lowercase().find(" article")?;
+    let name=remainder.get(..index)?.trim();
+    let rest=remainder.get(index+" article".len()..)?.to_ascii_lowercase();
+    if !rest.contains("report")||!rest.contains("title")
+        ||!rest.contains("source url")||!rest.contains("verify")
+        ||name.chars().count()<3||name.chars().count()>75
+        ||name.split_whitespace().count()>10
+        ||!name.chars().all(|c|c.is_ascii_alphanumeric()||matches!(c,' '|'-'))
+        ||!super::deliberation::read_only(goal)
+    {return None;}
+    let mut result=Url::parse("https://en.wikipedia.org/wiki").ok()?;
+    result.path_segments_mut().ok()?.push(&name.replace(' ',"_"));
+    Some(result)
+}
+
 /// Only the user's short, explicit navigation request can authorize opening a
 /// new site without a second approval. Model and webpage text never qualify.
 pub fn requested_navigation_url(goal: &str) -> Option<Url> {
+    if let Some(article)=requested_wikipedia_article_url(goal){return Some(article);}
     let g = goal.trim().trim_end_matches(['.', '!', '?']).trim().to_ascii_lowercase();
     if g.chars().any(char::is_control) || g.len() > 220 { return None; }
     let value = ["open ", "visit ", "go to ", "navigate to "].iter()
@@ -184,6 +210,15 @@ pub fn requested_music_entry_url(goal: &str) -> Option<Url> {
     if normalized.len() > 220 || normalized.chars().any(char::is_control) {
         return None;
     }
+    // For a short, explicit request to play any song, the user has
+    // authorized opening a public music site, not downloading a file.
+    // This is only the first navigation; actual playback still needs
+    // independent native media-clock verification.
+    if matches!(normalized.as_str(),
+        "play any song" | "play a song" | "play music" | "play any music"
+        | "play some music" | "play a music video" | "play some songs") {
+        return Url::parse("https://www.youtube.com/").ok();
+    }
     let request = ["open youtube and play ", "visit youtube and play ",
         "go to youtube and play ", "navigate to youtube and play "]
         .iter().find_map(|prefix| normalized.strip_prefix(prefix))?;
@@ -192,6 +227,21 @@ pub fn requested_music_entry_url(goal: &str) -> Option<Url> {
         return None;
     }
     Url::parse("https://www.youtube.com/").ok()
+}
+
+/// A request to play *any* song delegates the choice of music. Use a
+/// fixed public-domain classical composition as a bounded discovery query.
+/// This never supplies a fabricated video ID or certifies playback; selecting
+/// a video still requires an actual YouTube results page and observed link.
+pub fn requested_unspecified_music_search_url(goal:&str)->Option<Url>{
+    let g=goal.trim().trim_end_matches(['.','!','?']).trim().to_ascii_lowercase();
+    if !matches!(g.as_str(),"play any song"|"play a song"|"play music"|
+        "play any music"|"play some music"|"play a music video"|"play some songs"){
+        return None;
+    }
+    let mut url=Url::parse("https://www.youtube.com/results").ok()?;
+    url.query_pairs_mut().append_pair("search_query","Beethoven Fur Elise piano performance");
+    Some(url)
 }
 
 /// A user who asks to search a named public website has already authorized
@@ -263,6 +313,31 @@ pub fn course_search_matches_source(goal:&str,origin:&str,target:&str)->bool{
     b.query_pairs().any(|(k,q)|k=="q" && q.starts_with("beginner free ")
         &&q.contains("certificate duration")
         &&q.contains(&format!("-site:{host}")))
+}
+
+pub fn is_public_google_homepage(raw:&str)->bool{
+    let Ok(url)=Url::parse(raw)else{return false};
+    matches!(url.scheme(),"https"|"http")
+        && matches!(url.host_str(),Some("google.com"|"www.google.com"))
+        && url.path()=="/" && url.username().is_empty() && url.password().is_none()
+        && url.query_pairs().all(|(key,value)|key=="zx" && !value.is_empty()
+            && value.len()<=64 && value.bytes().all(|b|b.is_ascii_alphanumeric()))
+}
+
+/// The exact user-requested search query is distinct from transient homepage metadata.
+pub fn requested_google_research_url(goal:&str)->Option<Url>{
+    const PREFIX:&str="search google for ";
+    if !super::deliberation::read_only(goal) ||
+       !goal.to_ascii_lowercase().starts_with(PREFIX){return None;}
+    let phrase=goal.get(PREFIX.len()..)?
+        .split(['.','?','!','\n']).next()?.trim();
+    if !(4..=150).contains(&phrase.chars().count()) ||
+       phrase.split_whitespace().count()>24 ||
+       phrase.chars().any(char::is_control) ||
+       phrase.contains("://"){return None;}
+    let mut url=Url::parse("https://www.google.com/search").ok()?;
+    url.query_pairs_mut().append_pair("q",phrase);
+    Some(url)
 }
 
 /// Preserve existing approval/deny policy for any target not explicitly
@@ -658,6 +733,29 @@ mod tests {
         assert_eq!(requested_navigation_url("open youtube").unwrap().as_str(), "https://www.youtube.com/");
         assert!(requested_navigation_url("Open YouTube and play any music").is_none(),
             "Compound playback task must not be reduced to navigation-only");
+        for music in ["play any song", "Play any song!", "play a song",
+            "play music", "play some music", "play any music"]{
+            assert!(requested_navigation_url(music).is_none(),
+                "Music playback cannot be marked complete by opening YouTube");
+            assert_eq!(requested_music_entry_url(music).unwrap().as_str(),
+                "https://www.youtube.com/");
+            assert!(matches!(evaluate_user_navigation_policy(origin,
+                &navigate("https://www.youtube.com/"), &[], music).1,
+                PolicyDecision::Allow),"Expected trusted entry only: {music}");
+        }
+        let chosen=requested_unspecified_music_search_url("play any song").unwrap();
+        assert_eq!(chosen.host_str(),Some("www.youtube.com"));
+        assert_eq!(chosen.path(),"/results");
+        assert_eq!(chosen.query_pairs().find(|(k,_)|k=="search_query").unwrap().1,
+            "Beethoven Fur Elise piano performance");
+        assert!(requested_unspecified_music_search_url("open youtube and play any music").is_none());
+        assert!(requested_unspecified_music_search_url("how to play music").is_none());
+        for unrelated in ["how to play any song", "play any song and download it",
+            "play any song and buy an album", "play a random song then log in",
+            "play any song https://example.org", "play any song; delete files"] {
+            assert!(requested_music_entry_url(unrelated).is_none(),"{unrelated}");
+        }
+
         assert_eq!(requested_music_entry_url("Open YouTube and play any music")
             .unwrap().as_str(), "https://www.youtube.com/");
         assert!(matches!(evaluate_user_navigation_policy(origin,

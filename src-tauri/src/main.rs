@@ -2042,6 +2042,9 @@ async fn route_lucia_intent(
     state: tauri::State<'_, Arc<AppState>>,
     message: String,
 ) -> Result<agent::intent_router::LuciaIntent, String> {
+    if let Some(greeting)=agent::intent_router::LuciaIntent::explicit_chat_greeting(&message){
+        return Ok(greeting);
+    }
     // A clear, explicit user navigation command is not ambiguous intent.
     // Do not turn "open youtube" into chat when the configured intent model
     // is unavailable, returns malformed JSON, or classifies it incorrectly.
@@ -2539,6 +2542,16 @@ async fn start_agent_run(
     voice_mode: Option<bool>,
     task_tab_id: Option<String>,
 ) -> Result<Uuid, String> {
+    if agent::intent_router::LuciaIntent::explicit_chat_greeting(&goal).is_some(){
+        return Err("This is a greeting, not a browser task. Reply in Lucia chat instead.".into());
+    }
+    // Check local agent model existence before creating a task tab or run.
+    // An Ollama API health check alone is insufficient: a missing model
+    // otherwise produces minutes of 404s and unrelated recovery actions.
+    // Cloud-only users are not probed through Ollama.
+    let configured_router = { state.router.lock().await.clone() };
+    configured_router.preflight_agent_model(&snapshot.origin).await
+        .map_err(|e|e.to_string())?;
     let private_mode = is_private.unwrap_or(false);
     let memory_enabled = allow_learning.unwrap_or(false) && !private_mode;
 

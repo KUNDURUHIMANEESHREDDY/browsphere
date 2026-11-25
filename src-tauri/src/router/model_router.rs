@@ -98,11 +98,34 @@ fn default_supervisor_model() -> String { "lfm3:1.7b".into() }
 
 fn default_writer_model() -> String { "qwen2.5:3b-instruct".into() }
 
+#[cfg(test)]
+mod local_action_default_tests {
+    use super::*;
+    #[test]
+    fn browser_model_preflight_never_switches_explicit_cloud_only_to_local(){
+        let mut cfg=RouterConfig::default();
+        cfg.lucia_cloud_only=true;
+        let route=ModelRouter::new(cfg);
+        let rt=tokio::runtime::Runtime::new().expect("runtime");
+        assert!(rt.block_on(route.preflight_agent_model("https://example.org")).is_ok());
+    }
+    #[test]
+    fn default_agent_model_is_a_supported_configured_role(){
+        let c=RouterConfig::default();
+        assert_eq!(c.ollama_model,"qwen2.5:3b-instruct");
+        assert_eq!(c.writer_model,c.ollama_model);
+        assert_ne!(c.ollama_model,"qwen3.5:4b");
+        assert!(c.prefer_local_for_simple);
+        assert!(!c.lucia_cloud_only);
+    }
+}
 impl Default for RouterConfig {
     fn default() -> Self {
         Self {
             ollama_url: "http://127.0.0.1:11434".to_string(),
-            ollama_model: "qwen3.5:4b".to_string(),
+            // Prefer a model with demonstrated structured-action capability.
+            // The 4B tag was not bundled and caused 404s on clean installs.
+            ollama_model: "qwen2.5:3b-instruct".to_string(),
             vision_model: String::new(),
             writer_model: default_writer_model(),
             supervisor_model: default_supervisor_model(),
@@ -309,6 +332,26 @@ impl ModelRouter {
         Ok(data.get("models").and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(str::to_string)).collect())
             .unwrap_or_default())
+    }
+
+    /// A valid API endpoint is not evidence that the configured action model
+    /// exists. Resolve it before allocating a browser task, rather than
+    /// spending multiple action iterations receiving Ollama HTTP 404.
+    /// This never downloads models or changes the user's preferred provider.
+    pub async fn preflight_agent_model(&self, origin:&str)->anyhow::Result<()>{
+        if self.select_backend(origin)!="ollama"{return Ok(());}
+        let selected=self.config.ollama_model.trim();
+        anyhow::ensure!(!selected.is_empty(),
+            "No local browser-action model is configured. Select a model in AI & ML settings.");
+        let installed=self.list_local_models().await.map_err(|e|
+            anyhow::anyhow!("Local model service is not ready at {}: {e}. Start Ollama or select a connected cloud model before running Lucia.",
+                self.config.ollama_url))?;
+        anyhow::ensure!(!installed.is_empty(),
+            "Ollama is running but no local models are installed. Configure an available model in AI & ML settings.");
+        anyhow::ensure!(installed.iter().any(|name|name==selected),
+            "Lucia cannot start: local browser-action model '{}' is not installed. Available models: {}. Choose one in AI & ML settings.",
+            selected,installed.join(", "));
+        Ok(())
     }
 
     pub fn new(config: RouterConfig) -> Self {
