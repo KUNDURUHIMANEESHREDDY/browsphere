@@ -286,12 +286,17 @@ pub fn plan_task(goal: &str) -> TaskPlan {
     } else {
         vec![Specialist::Browser]
     };
+    let named_sources=super::deliberation::named_research_entities(goal);
+    if !named_sources.is_empty() {
+        roles=vec![Specialist::Research;named_sources.len()];
+        roles.push(Specialist::Comparison);
+    }
     roles.push(Specialist::Verification);
     TaskPlan {
         goal: goal.to_string(),
         semantic: None,
         semantic_provenance: None,
-        stages: roles.into_iter().map(|specialist| {
+        stages: roles.into_iter().enumerate().map(|(stage_index,specialist)| {
             let (objective, criteria) = match specialist {
                 Specialist::Research => (
                     format!("Research authentic webpage sources relevant to: {goal}"),
@@ -318,6 +323,13 @@ pub fn plan_task(goal: &str) -> TaskPlan {
                     "Confirm observed evidence and successful actions before reporting completion".to_string()
                 ),
             };
+            let (objective, criteria)=if specialist==Specialist::Research && stage_index<named_sources.len() {
+                let name=&named_sources[stage_index];
+                (format!("Visit the official website of {name} and capture free-plan details for: {goal}"),
+                 format!("Capture relevant plan evidence from the actual {name} website, not a search listing"))
+            } else if specialist==Specialist::Comparison && !named_sources.is_empty() {
+                (objective,format!("Compare evidence from all {} named websites while preserving user constraints",named_sources.len()))
+            } else {(objective,criteria)};
             SpecialistStage { specialist, objective, success_criteria: criteria, status: "pending" }
         }).collect()
     }
@@ -357,7 +369,14 @@ impl Orchestrator {
         let Some(evidence)=super::browser_skills::extraction::capture(snapshot)else{return;};
         self.fresh_observations+=1;
         if let Some(old) = self.evidence.iter_mut().find(|e| e.url == evidence.url) {
-            *old = evidence;
+            // Prefer the stronger actual capture on explicit factual research.
+            // Never stitch different snapshots together into a purported quote.
+            let goal=&self.plan.goal;
+            let explicit=super::deliberation::explicit_research_sources(goal);
+            let scoped=url::Url::parse(&evidence.url).ok().is_some_and(|u|explicit.contains(&u));
+            if !scoped||super::evidence_verifier::fact_capture_quality(goal,&evidence)>=super::evidence_verifier::fact_capture_quality(goal,old){
+                *old = evidence;
+            }
         } else {
             self.evidence.push(evidence);
             if self.evidence.len()>8{
@@ -556,12 +575,36 @@ impl Orchestrator {
                 return Err("Fresh evidence does not address the distinct unfinished acquisition objective".into());
             }
         }
+        let named=super::deliberation::named_research_entities(&self.plan.goal);
+        if !named.is_empty() {
+            let observed=|name:&str|self.evidence.iter().any(|e|{
+                let Ok(u)=url::Url::parse(&e.url)else{return false};
+                let Some(host)=u.host_str()else{return false};
+                let brand=name.to_ascii_lowercase().replace(' ',"").replace('-',"");
+                let h=host.to_ascii_lowercase().replace('-',"");
+                let excerpt=e.excerpt.to_ascii_lowercase();
+                let needs_free=self.plan.goal.to_ascii_lowercase().contains("free plan");
+                !["bing.com","google.com","duckduckgo.com","yahoo.com"].iter()
+                    .any(|d|h==*d||h.ends_with(&format!(".{d}")))
+                    && h.contains(&brand) && excerpt.trim().len()>=80
+                    && (!needs_free || (excerpt.contains("free")
+                        && (excerpt.contains("plan")||excerpt.contains("pricing"))))
+            });
+            if self.specialist()==Specialist::Research {
+                let name=&named[self.current.min(named.len()-1)];
+                if !observed(name){return Err("Named official website not observed with readable evidence".into());}
+            }
+            if matches!(self.specialist(),Specialist::Comparison|Specialist::Verification)
+                && named.iter().any(|name|!observed(name)){
+                return Err("All named official websites require observed evidence before comparison".into());
+            }
+        }
         if self.specialist() == Specialist::Comparison {
             let distinct_hosts: HashSet<String> = self.evidence.iter()
                 .filter_map(|e| url::Url::parse(&e.url).ok()
                     .and_then(|u| u.host_str().map(str::to_owned)))
                 .collect();
-            if distinct_hosts.len() < 2 {
+            if distinct_hosts.len() < named.len().max(2) {
                 return Err("A multi-source comparison needs evidence from two distinct sites".into());
             }
         }
@@ -606,6 +649,18 @@ impl Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn named_websites_require_separate_research_stages() {
+        let goal="Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the most suitable option.";
+        let p=plan_task(goal);
+        assert_eq!(p.stages.len(),5);
+        assert_eq!(p.stages.iter().filter(|s|s.specialist==Specialist::Research).count(),3);
+        for name in ["Notion","Trello","ClickUp"] {
+            assert_eq!(p.stages.iter().filter(|s|s.objective.contains(&format!("website of {name}"))).count(),1);
+        }
+        assert!(p.stages[3].success_criteria.contains("all 3 named websites"));
+        assert_eq!(p.stages[4].specialist,Specialist::Verification);
+    }
     fn snapshot(url: &str, text: &str) -> DomSnapshot {
         DomSnapshot { structure: Default::default(), origin: url.to_string(), title: "Demo".into(),
             text_excerpt: text.to_string(), interactive_nodes: vec![] }

@@ -10,7 +10,7 @@ fn phrase(text:&str,part:&str)->bool{
 fn off_topic(goal:&str,target:&str)->bool{
     // Reject unrelated utility links, not documentation about these topics.
     let n=target.replace(['-','_','/']," ");
-    ["pricing","contact sales","sign in","sign up","login","register","checkout","careers","privacy policy","reservation charts","online charts"].iter()
+    ["contact sales","sign in","sign up","login","register","checkout","careers","privacy policy","reservation charts","online charts"].iter()
         .any(|w|phrase(&n,w)&&!phrase(goal,w))
 }
 fn control<'a>(page:&'a DomSnapshot,id:&str)->Option<&'a DomNodeSummary>{
@@ -93,17 +93,32 @@ fn lookup_link_matches(subject:&str,label:&str,url:&str)->bool{
     exact||search
 }
 fn relevant_navigation(goal:&str,page:&DomSnapshot,url:&str)->bool{
+    // Search advertising/redirect links do not establish the destination.
+    // Named-source research must use a scoped, decoded official HTTPS URL.
+    if !super::deliberation::named_research_entities(goal).is_empty()
+        && url::Url::parse(url).ok().is_some_and(|u|
+            u.host_str()==Some("www.bing.com")
+                && matches!(u.path(),"/aclk"|"/ck/a")){return false}
     if off_topic(goal,url){return false}
     if super::catalog_research::entry_allowed(goal,url){return true;}
     if goal.split_whitespace().any(|s|s.trim_matches(['(',')','[',']','"', '\'',',','.',';'])==url){return true;}
     if super::policy::requested_navigation_url(goal).is_some_and(|u|u.as_str()==url){return true;}
+    if super::policy::course_search_matches_source(goal,&page.origin,url){return true;}
+    if super::policy::public_research_bootstrap(goal,&page.origin).is_some_and(|u|u.as_str()==url){return true;}
+    if super::deliberation::named_research_entities(goal).iter().enumerate()
+       .any(|(stage,_)|super::policy::named_research_waypoint(goal,stage).is_some_and(|u|u.as_str()==url)){return true;}
     if super::policy::requested_search_entry_url(goal).is_some_and(|u|u.as_str()==url){return true;}
     if let Some(subject)=super::deliberation::lookup_subject(goal){return page.interactive_nodes.iter().any(|n|!n.is_sensitive&&!n.is_submit&&n.href.as_deref()==Some(url)&&lookup_link_matches(&subject,&n.label,url));}
     if super::skills::TaskSpec::compile(goal).and_then(|s|s.explicit_repository_url(&page.origin)).as_deref()==Some(url){return true;}
     if super::requirements::repository_fact_link(goal,page,url){return true;}
     if super::skills::TaskSpec::compile(goal).is_some_and(|spec|page.interactive_nodes.iter().any(|n|n.href.as_deref()==Some(url)&&spec.link_score_on(page,n)>0)){return true;}
     if super::policy::requested_search_entry_url(goal).is_some_and(|u|u.as_str()==url){return true;}
-    page.interactive_nodes.iter().any(|n|!n.is_sensitive&&!n.is_submit&&n.href.as_deref()==Some(url)&&
+    page.interactive_nodes.iter().any(|n|!n.is_sensitive&&!n.is_submit&&
+        (n.href.as_deref()==Some(url) ||
+         (super::course_comparison::count(goal).is_some() &&
+          n.href.as_deref().and_then(|href|
+             super::action_intelligence::observed_search_destination(&page.origin,href))
+               .as_deref()==Some(url)))&&
         (super::semantic_core::relevance(goal,&format!("{} {}",n.label,url::Url::parse(url).map(|u|u.path().replace(['-','_','/']," ")).unwrap_or_default()))>0||
             docs_waypoint(goal,&n.label,url)||phrase(&n.label,"search")))
 }
@@ -199,6 +214,12 @@ pub fn check(goal:&str,initial:&str,page:&DomSnapshot,ledger:&ObjectiveLedger,ac
         }
         BrowserAction::Click{node_id,..}=>{
             let n=control(page,node_id).ok_or("Research control is not a live public control")?;
+            if !super::deliberation::named_research_entities(goal).is_empty()
+                && n.href.as_deref().is_some_and(|href|url::Url::parse(href).ok()
+                    .is_some_and(|u|u.host_str()==Some("www.bing.com")
+                        && matches!(u.path(),"/aclk"|"/ck/a"))) {
+                return Err("Named-source research must resolve a verified official URL, not click a search redirect");
+            }
             if off_topic(goal,&n.label)||n.href.as_ref().is_some_and(|h|off_topic(goal,h)){
                 return Err("Research cannot navigate to unrelated account, pricing or transaction controls");
             }
@@ -231,6 +252,21 @@ mod tests{
  use super::super::dom_extractor::DomNodeSummary;
  fn node(id:&str,label:&str,href:Option<&str>)->DomNodeSummary{DomNodeSummary{node_id:id.into(),tag:"a".into(),role:"link".into(),label:label.into(),href:href.map(str::to_owned),options:vec![],checked:None,search_state:None,is_sensitive:false,is_submit:false,bbox:None}}
  fn page()->DomSnapshot{DomSnapshot{structure: Default::default(), origin:"https://example.org/search".into(),title:"Public search".into(),text_excerpt:"Public search form with a selection of navigation controls".into(),interactive_nodes:vec![node("wrong","Reservation Charts",Some("https://example.org/online-charts/")),node("login","Sign in",Some("https://example.org/login")),node("right","SQL INSERT",Some("https://example.org/sql-insert.html"))]}}
+ #[test]fn named_research_rejects_search_ad_and_redirect_clicks(){
+    let goal="Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the most suitable option.";
+    let p=DomSnapshot{structure:Default::default(),
+        origin:"https://www.bing.com/search?q=Trello".into(),
+        title:"Search".into(),text_excerpt:"Relevant public search results".into(),
+        interactive_nodes:vec![
+            node("advertisement","Trello Free Plan",Some("https://www.bing.com/aclk")),
+            node("redirect","Trello Official",Some("https://www.bing.com/ck/a"))
+        ]};
+    let ledger=ObjectiveLedger::new(goal);
+    for id in ["advertisement","redirect"]{
+        assert!(check(goal,&p.origin,&p,&ledger,
+            &BrowserAction::Click{node_id:id.into(),element_label:"Trello Official".into(),is_submit:false}).is_err());
+    }
+ }
  #[test]fn journey_cannot_leave_form_or_click_unrelated_chart(){
   let g="Find trains from Bengaluru to New Delhi for 2026-11-24. Search only.";let p=page();let l=ObjectiveLedger::new(g);
   assert!(check(g,&p.origin,&p,&l,&BrowserAction::Navigate{url:"https://example.org/online-charts/".into()}).is_err());

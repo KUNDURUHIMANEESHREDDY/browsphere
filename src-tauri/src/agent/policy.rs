@@ -222,8 +222,130 @@ pub fn requested_search_entry_url(goal: &str) -> Option<Url> {
     Url::parse(&format!("https://{}/", requested_search_host(goal)?)).ok()
 }
 
+/// A search waypoint for each source explicitly named by the user.
+/// No inferred official URLs; results still require page evidence and policy.
+pub fn named_research_waypoint(goal:&str, stage:usize)->Option<Url>{
+    let names=super::deliberation::named_research_entities(goal);
+    let name=names.get(stage)?;
+    let mut url=Url::parse("https://www.bing.com/search").ok()?;
+    url.query_pairs_mut().append_pair("q",&format!("{name} official website free plan pricing"));
+    Some(url)
+}
+
+/// Enter a public search engine from the internal browser start page for
+/// explicitly read-only, open-ended research. This is navigation only, not
+/// evidence or permission to complete. The query is supplied by the user.
+pub fn public_research_bootstrap(goal: &str, origin: &str) -> Option<Url> {
+    if !matches!(origin, "about:blank" | "browsphere://start")
+        || !super::deliberation::read_only(goal)
+        || goal.len() > 300
+        || goal.chars().any(char::is_control)
+        || !["find ", "research ", "compare ", "search ", "look up ", "visit ", "plan "]
+            .iter().any(|prefix| goal.trim().to_ascii_lowercase().starts_with(prefix))
+        || goal.contains("http://") || goal.contains("https://")
+        || requested_navigation_url(goal).is_some()
+        || requested_search_entry_url(goal).is_some()
+    { return None; }
+    let mut url = Url::parse("https://html.duckduckgo.com/html/").ok()?;
+    let query=super::course_comparison::discovery_terms(goal)
+        .unwrap_or_else(||goal.trim().to_string());
+    url.query_pairs_mut().append_pair("q",&query);
+    Some(url)
+}
+
+/// Check only a read-only query scoped to the current observed course domain.
+pub fn course_search_matches_source(goal:&str,origin:&str,target:&str)->bool{
+    if super::course_comparison::count(goal).is_none(){return false;}
+    let (Ok(a),Ok(b))=(Url::parse(origin),Url::parse(target))else{return false};
+    if a.scheme()!="https"||b.scheme()!="https"||b.host_str()!=Some("html.duckduckgo.com")
+        ||b.path()!="/html/"{return false}
+    let Some(host)=super::course_comparison::site(origin)else{return false};
+    b.query_pairs().any(|(k,q)|k=="q" && q.starts_with("beginner free ")
+        &&q.contains("certificate duration")
+        &&q.contains(&format!("-site:{host}")))
+}
+
 /// Preserve existing approval/deny policy for any target not explicitly
 /// authorized by the user's own goal. Do not override run allowlists.
+/// Allow an observed search-result link only when it resolves to the named
+/// brand's own HTTPS registrable-style domain. Never trust inferred URLs,
+/// lookalike subdomains, unrelated search ads or off-allowlist sites.
+pub fn evaluate_observed_named_site_policy(
+    active_origin:&str,action:&BrowserAction,allowed_domains:&[String],goal:&str,
+    page:&crate::agent::dom_extractor::DomSnapshot,stage:usize
+)->(RiskLevel,PolicyDecision){
+    let named=super::deliberation::named_research_entities(goal);
+    if let BrowserAction::Navigate{url}=action {
+        // Search-result advertising and opaque redirect routes never count as
+        // observed destination navigation, even if they share the origin.
+        if !named.is_empty()&&Url::parse(url).ok().is_some_and(|target|
+            matches!(target.host_str(),Some("www.bing.com"))
+                && matches!(target.path(),"/ck/a"|"/aclk")){
+            return (RiskLevel::High,PolicyDecision::Deny{
+                reason:"Opaque search redirect is not an official research destination".into()
+            });
+        }
+    }
+    let base=evaluate_user_navigation_policy(active_origin,action,allowed_domains,goal);
+    let (BrowserAction::Navigate{url},PolicyDecision::RequireApproval{reason})=(action,&base.1)
+        else{return base};
+    if !reason.starts_with("Cross-origin navigation to "){return base}
+    let Ok(source)=Url::parse(&page.origin)else{return base};
+    if source.host_str()!=Some("www.bing.com"){return base}
+    let Ok(target)=Url::parse(url)else{return base};
+    if target.scheme()!="https"||target.port().is_some()
+        ||!target.username().is_empty()||target.password().is_some(){return base}
+    let Some(host)=target.host_str()else{return base};
+    if !host_matches_allowlist(host,allowed_domains){return base}
+    let bare=host.strip_prefix("www.").unwrap_or(host);
+    let labels:Vec<_>=bare.split('.').collect();
+    if labels.len()!=2||!labels[1].chars().all(|c|c.is_ascii_alphabetic())||labels[1].len()<2{
+        return base
+    }
+    // Authorize only the brand assigned to the current research stage.
+    // Other named sites must be visited through their own staged objectives.
+    if !named.get(stage).is_some_and(|name|
+        name.to_ascii_lowercase().replace([' ','-'],"")==labels[0]){
+        return base
+    }
+    if !page.interactive_nodes.iter().any(|node|!node.is_sensitive&&!node.is_submit
+        && node.href.as_deref()==Some(url.as_str())&&(node.tag=="a"||node.role=="link")){
+        return base
+    }
+    (RiskLevel::Low,PolicyDecision::Allow)
+}
+
+/// Opening an observed read-only course result must remain in Lucia's task
+/// tab. Only the exact fresh public HTTPS link from the search results can
+/// receive automatic authorization. No model-supplied site is trusted.
+pub fn evaluate_observed_course_result_policy(
+    active_origin:&str,action:&BrowserAction,allowed_domains:&[String],
+    goal:&str,page:&crate::agent::dom_extractor::DomSnapshot,
+)->(RiskLevel,PolicyDecision){
+    let base=evaluate_user_navigation_policy(active_origin,action,allowed_domains,goal);
+    let (BrowserAction::Navigate{url},PolicyDecision::RequireApproval{reason})=(action,&base.1)
+        else{return base};
+    if !reason.starts_with("Cross-origin navigation to ")
+        ||super::course_comparison::count(goal).is_none()
+        ||!matches!(Url::parse(active_origin).ok().and_then(|u|u.host_str().map(str::to_owned)).as_deref(),
+            Some("www.bing.com"|"www.google.com"|"duckduckgo.com"|"html.duckduckgo.com"))
+    {return base;}
+    let Ok(u)=Url::parse(url)else{return base};
+    let Some(host)=u.host_str()else{return base};
+    if u.scheme()!="https"||!u.username().is_empty()||u.password().is_some()
+        ||super::course_comparison::site(url).is_none()
+        ||!host_matches_allowlist(host,allowed_domains){return base;}
+    if page.origin!=active_origin
+        ||!page.interactive_nodes.iter().any(|n|!n.is_sensitive&&!n.is_submit
+            && n.href.as_deref().and_then(|href|
+                super::action_intelligence::observed_search_destination(active_origin,href))
+                .as_deref()==Some(url.as_str())
+            && (n.role=="link"||n.tag=="a")
+            && super::semantic_core::relevance(goal,&n.label)>=2)
+    {return base;}
+    (RiskLevel::Low,PolicyDecision::Allow)
+}
+
 pub fn evaluate_user_navigation_policy(
     active_origin: &str, action: &BrowserAction, allowed_domains: &[String], goal: &str
 ) -> (RiskLevel, PolicyDecision) {
@@ -232,6 +354,20 @@ pub fn evaluate_user_navigation_policy(
     let PolicyDecision::RequireApproval { ref reason } = base.1 else { return base };
     if !reason.starts_with("Cross-origin navigation to ") { return base; }
     let Ok(actual) = Url::parse(url) else { return base };
+    if course_search_matches_source(goal,active_origin,url)
+        && actual.host_str().is_some_and(|host|host_matches_allowlist(host,allowed_domains)){
+        return (RiskLevel::Low,PolicyDecision::Allow);
+    }
+    let research_bootstrap = public_research_bootstrap(goal,active_origin)
+        .is_some_and(|expected| actual == expected);
+    if research_bootstrap && actual.host_str().is_some_and(|host|host_matches_allowlist(host,allowed_domains)) {
+        return (RiskLevel::Low,PolicyDecision::Allow);
+    }
+    let named_search_waypoint=super::deliberation::named_research_entities(goal)
+        .iter().enumerate().any(|(stage,_)|named_research_waypoint(goal,stage).as_ref()==Some(&actual));
+    if named_search_waypoint && actual.host_str().is_some_and(|host|host_matches_allowlist(host,allowed_domains)){
+        return (RiskLevel::Low,PolicyDecision::Allow);
+    }
     let user_explicitly_named_destination = requested_navigation_url(goal)
         .is_some_and(|expected| actual == expected)
         || crate::agent::deliberation::explicit_research_sources(goal).iter().any(|expected| &actual==expected)
@@ -718,5 +854,124 @@ mod autonomous_form_tests {
             let (_, result) = evaluate_policy("https://example.org", &submission(label), &[]);
             assert!(matches!(result, PolicyDecision::RequireApproval { .. }), "{label}");
         }
+    }
+}
+
+#[cfg(test)]
+mod research_bootstrap_tests {
+    use super::*;
+    #[test] fn observed_named_sites_cannot_use_lookalike_domains() {
+        use crate::agent::dom_extractor::{DomSnapshot,DomNodeSummary};
+        let goal="Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the most suitable option.";
+        let origin="https://www.bing.com/search?q=Notion+official+website";
+        let mut page=DomSnapshot{origin:origin.into(),title:"Search results".into(),
+            text_excerpt:"Notion official website free plans".into(),
+            interactive_nodes:vec![],structure:Default::default()};
+        let node=|url:&str|DomNodeSummary{node_id:"n1".into(),tag:"a".into(),role:"link".into(),
+            label:"Notion Official".into(),options:vec![],checked:None,search_state:None,
+            href:Some(url.into()),is_submit:false,is_sensitive:false,bbox:None};
+        for (url,allowed) in [("https://www.notion.so/pricing",true),
+                              ("https://notion.evil.com/pricing",false),
+                              ("https://evil.com/notion",false)]{
+            page.interactive_nodes=vec![node(url)];
+            let action=BrowserAction::Navigate{url:url.into()};
+            assert_eq!(matches!(evaluate_observed_named_site_policy(origin,&action,&[],goal,&page,0).1,
+                PolicyDecision::Allow),allowed,"{url}");
+        }
+        page.interactive_nodes=vec![node("https://www.trello.com/pricing")];
+        let other_stage=BrowserAction::Navigate{url:"https://www.trello.com/pricing".into()};
+        assert!(!matches!(evaluate_observed_named_site_policy(origin,&other_stage,&[],goal,&page,0).1,
+            PolicyDecision::Allow),"Notion stage must not authorize Trello");
+        let redirect=BrowserAction::Navigate{url:"https://www.bing.com/aclk".into()};
+        assert!(matches!(evaluate_observed_named_site_policy(origin,&redirect,&[],goal,&page,1).1,
+            PolicyDecision::Deny{..}),"Search ad redirects must not be navigable as official evidence");
+        page.interactive_nodes.clear();
+        let action=BrowserAction::Navigate{url:"https://www.notion.so/pricing".into()};
+        assert!(!matches!(evaluate_observed_named_site_policy(origin,&action,&[],goal,&page,0).1,
+            PolicyDecision::Allow));
+    }
+    #[test] fn named_source_waypoints_are_bounded_and_policy_checked() {
+        let goal="Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the most suitable option.";
+        for index in 0..3 {
+            let url=named_research_waypoint(goal,index).unwrap();
+            assert_eq!(url.host_str(),Some("www.bing.com"));
+            assert!(matches!(evaluate_user_navigation_policy(
+                "https://www.notion.so/",&BrowserAction::Navigate{url:url.into()},&[],goal
+            ).1,PolicyDecision::Allow));
+        }
+        assert!(named_research_waypoint(goal,3).is_none());
+        assert!(named_research_waypoint("Buy products from Notion and Trello",0).is_none());
+    }
+    #[test] fn visit_multi_site_research_bootstraps_from_blank_only() {
+        let goal="Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the most suitable option.";
+        let url=public_research_bootstrap(goal,"about:blank").expect("read-only visit needs a safe bootstrap");
+        assert_eq!(url.host_str(),Some("html.duckduckgo.com"));
+        assert!(public_research_bootstrap(goal,"https://example.org").is_none());
+    }
+    #[test] fn planning_with_public_research_bootstraps_without_authorizing_transactions() {
+        let goal="Plan a Sunday outing in Bengaluru for a family of four under INR 2,000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary.";
+        let url=public_research_bootstrap(goal,"about:blank").expect("read-only planning needs a search entry");
+        assert_eq!(url.query_pairs().find(|(k,_)|k=="q").unwrap().1,goal);
+        assert!(matches!(evaluate_user_navigation_policy("about:blank",&BrowserAction::Navigate{url:url.into()},&[],goal).1,PolicyDecision::Allow));
+        assert!(public_research_bootstrap(goal,"https://example.org").is_none());
+        assert!(public_research_bootstrap("Plan a trip, find a hotel and book it","about:blank").is_none());
+    }
+    #[test] fn bounded_public_research_entry_without_fabricated_controls() {
+        let goal="Find three free Python courses from different platforms. Compare free certificates and duration.";
+        let url=public_research_bootstrap(goal,"about:blank").expect("expected search entry");
+        assert_eq!(url.host_str(),Some("html.duckduckgo.com"));
+        assert_eq!(url.query_pairs().find(|(k,_)|k=="q").unwrap().1,"free beginner Python course certificate duration");
+        assert!(matches!(evaluate_user_navigation_policy("about:blank",&BrowserAction::Navigate{url:url.into()},&[],goal).1,PolicyDecision::Allow));
+        assert!(public_research_bootstrap("buy a laptop","about:blank").is_none());
+        assert!(public_research_bootstrap(goal,"https://example.org").is_none());
+        assert!(public_research_bootstrap("Compare https://docs.python.org/3 and https://example.org","about:blank").is_none());
+    }
+}
+
+#[cfg(test)]
+mod course_site_navigation_tests {
+    use super::*;
+    use crate::agent::dom_extractor::{DomNodeSummary,DomSnapshot};
+    const GOAL: &str="Find three free Python courses suitable for beginners from different learning platforms. Check whether they provide free certificates, compare their duration and recommend the best one.";
+    #[test]
+    fn observed_read_only_course_link_can_open_without_a_popup() {
+        let source="https://www.bing.com/search?q=free+Python+courses";
+        let target="https://academy.example.org/courses/python-intro";
+        let mut page=DomSnapshot{origin:source.into(),title:"Search results".into(),
+            text_excerpt:"Python courses and certificate listings".into(),structure:Default::default(),
+            interactive_nodes:vec![DomNodeSummary{node_id:"result".into(),tag:"a".into(),role:"link".into(),
+                label:"Free Python beginner course".into(),href:Some(target.into()),options:vec![],
+                checked:None,search_state:None,is_sensitive:false,is_submit:false,bbox:None}]};
+        let action=BrowserAction::Navigate{url:target.into()};
+        assert!(matches!(evaluate_observed_course_result_policy(source,&action,&[],GOAL,&page).1,PolicyDecision::Allow));
+        page.interactive_nodes.clear();
+        assert!(!matches!(evaluate_observed_course_result_policy(source,&action,&[],GOAL,&page).1,PolicyDecision::Allow));
+        let other=BrowserAction::Navigate{url:"https://other.example.net/courses/python".into()};
+        assert!(!matches!(evaluate_observed_course_result_policy(source,&other,&[],GOAL,&page).1,PolicyDecision::Allow));
+    }
+}
+
+#[cfg(test)]
+mod duckduckgo_observation_tests {
+    use super::*;
+    use crate::agent::dom_extractor::{DomNodeSummary,DomSnapshot};
+    const GOAL:&str="Find three free Python courses suitable for beginners from different learning platforms. Check whether they provide free certificates, compare their duration and recommend the best one.";
+    #[test]
+    fn only_observed_public_search_result_redirects_can_navigate(){
+        let origin="https://html.duckduckgo.com/html/?q=free+python+course";
+        let href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.simplilearn.com%2Fskillup-free-online-courses%2Fpython";
+        let dest=crate::agent::action_intelligence::observed_search_destination(origin,href).unwrap();
+        assert_eq!(dest,"https://www.simplilearn.com/skillup-free-online-courses/python");
+        let mut page=DomSnapshot{origin:origin.into(),title:"Python search results".into(),structure:Default::default(),
+            text_excerpt:"Free Python courses and certificates".into(),interactive_nodes:vec![
+                DomNodeSummary{node_id:"first".into(),tag:"a".into(),role:"link".into(),
+                    label:"Free Python beginner course certificate".into(),href:Some(href.into()),
+                    is_submit:false,is_sensitive:false,options:vec![],checked:None,search_state:None,bbox:None}]};
+        let action=BrowserAction::Navigate{url:dest};
+        assert!(matches!(evaluate_observed_course_result_policy(origin,&action,&[],GOAL,&page).1,PolicyDecision::Allow));
+        page.interactive_nodes.clear();
+        assert!(!matches!(evaluate_observed_course_result_policy(origin,&action,&[],GOAL,&page).1,PolicyDecision::Allow));
+        assert!(crate::agent::action_intelligence::observed_search_destination(origin,
+            "https://duckduckgo.com/l/?uddg=http%3A%2F%2F127.0.0.1%2Fprivate").is_none());
     }
 }

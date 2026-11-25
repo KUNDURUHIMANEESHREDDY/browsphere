@@ -15,7 +15,7 @@ pub struct Requirement{
     #[serde(skip)] scope:Scope,
 }
 #[derive(Clone,Debug)]
-enum Scope{Source(String),Target,Fact{source:Option<String>,facet:&'static str}}
+enum Scope{Source(String),Target,Fact{source:Option<String>,facet:&'static str},CoursePlatform(usize),OpenResearch}
 #[derive(Clone,Debug,Default,Serialize)]
 pub struct Ledger{
     pub requirements:Vec<Requirement>,
@@ -52,13 +52,26 @@ pub fn target_sources(goal:&str,sources:&[SourceEvidence])->Vec<SourceEvidence>{
     let Some(anchor)=target_anchor(goal,sources)else{return vec![];};
     sources.iter().filter(|s|target_source(goal,&anchor,&s.url)&&browser_skills::readable(&page(s))).cloned().collect()
 }
+// Explicit planning deliverables are tracked even before a source is known.
+// Missing facts cannot be promoted merely because a browser visited a page.
+fn planning_requirements(goal:&str)->Vec<&'static str>{
+    let g=goal.to_ascii_lowercase();
+    if !deliberation::read_only(goal)||!g.trim_start().starts_with("plan "){return vec![];}
+    let mut out=vec!["research_subjects"];
+    for (kind,terms) in [("opening_hours", &["opening hours","opening times"][..]),("price", &["ticket price","admission price","cost","budget"][..]),("budget_constraint", &["under ","budget","within "][..]),("itinerary", &["itinerary","schedule"][..])]{
+        if terms.iter().any(|t|g.contains(t)){out.push(kind);}
+    }
+    out
+}
 impl Ledger{
     pub fn compile(goal:&str)->Self{
         let mut l=Self::default();
         if !deliberation::read_only(goal){return l;}
         let sources=deliberation::explicit_research_sources(goal);
         let facets=ev::research_facets(goal);
-        if !sources.is_empty(){
+        if let Some(n)=super::course_comparison::count(goal){
+            for i in 0..n { add(&mut l.requirements,"course_platform_certificate_duration",Scope::CoursePlatform(i)); }
+        }else if !sources.is_empty(){
             for u in sources{
                 let url=u.to_string();
                 add(&mut l.requirements,"source_observed",Scope::Source(url.clone()));
@@ -68,13 +81,17 @@ impl Ledger{
             add(&mut l.requirements,"target_identity",Scope::Target);
             for facet in facets{add(&mut l.requirements,facet,Scope::Fact{source:None,facet});}
         }
+        if l.requirements.is_empty(){for kind in planning_requirements(goal){add(&mut l.requirements,kind,Scope::OpenResearch);}}
         l.supported=!l.requirements.is_empty();l
     }
     pub fn refresh(&mut self,goal:&str,sources:&[SourceEvidence]){
         self.target_scope=target_anchor(goal,sources);
+        let course_hosts=super::course_comparison::source_hosts(goal,sources);
         for r in &mut self.requirements{
             r.candidates=0;r.state=State::Missing;
             match &r.scope{
+                Scope::OpenResearch=>{},
+                Scope::CoursePlatform(i)=>{if course_hosts.len()>*i{r.state=State::Observed;}},
                 Scope::Target=>{if self.target_scope.is_some(){r.state=State::Observed;}},
                 Scope::Source(url)=>{if sources.iter().any(|s|source_matches(s,url)&&browser_skills::readable(&page(s))){r.state=State::Observed;}},
                 Scope::Fact{source,facet}=>{
@@ -93,8 +110,34 @@ impl Ledger{
             }
         }
     }
+    /// Explicit requested URLs whose factual dimensions still need evidence.
+    pub fn missing_fact_sources(&self)->Vec<String>{
+        let mut out=Vec::new();
+        for r in &self.requirements{
+            if r.state==State::Missing{
+                if let Scope::Fact{source:Some(url),..}=&r.scope{
+                    if !out.contains(url){out.push(url.clone());}
+                }
+            }
+        }
+        out
+    }
     pub fn current_target_scope(&self,url:&str)->bool{
         self.target_scope.as_ref().is_some_and(|scope|web(scope).is_some()&&web(scope)==web(url))
+    }
+    /// Explicit outstanding objective for the native action selector. A candidate
+    /// remains missing until its source and claim have been verified.
+    pub fn next_research_objective(&self)->Option<&'static str>{
+        self.requirements.iter().find(|r|r.state==State::Missing)
+            .map(|r|match r.kind {
+                "research_subjects"=>"Find independent public sources for the requested subjects, not search-engine interface links",
+                "opening_hours"=>"Find exact opening hours on a public attraction source",
+                "price"=>"Find exact ticket or admission prices on a public attraction source",
+                "budget_constraint"=>"Collect itemized costs before calculating the total budget",
+                "itinerary"=>"Collect verified locations and hours before arranging an itinerary",
+                "course_platform_certificate_duration"=>"Find another independent course platform with certificate and duration evidence",
+                _=>"Collect primary-source evidence for the next missing requirement",
+            })
     }
     pub fn ready(&self)->bool{!self.supported||self.requirements.iter().all(|r|r.state!=State::Missing)}
     pub fn missing(&self)->Vec<&'static str>{self.requirements.iter().filter(|r|r.state==State::Missing).map(|r|r.kind).collect()}
@@ -111,13 +154,19 @@ impl Ledger{
         self.refresh(goal,sources);self.can_review()?;
         if !self.supported{return Ok(());}
         if report.status!="evidence_checked"{return Err("Independent report not verified".into());}
+        if super::course_comparison::count(goal).is_some(){
+            super::course_comparison::validate(goal,sources,report)?;
+            for r in &mut self.requirements{r.state=State::Verified;}
+            return Ok(());
+        }
+        ev::validate_comparison_operands(goal,sources,report)?;
         let facts:Vec<_>=self.requirements.iter().enumerate().filter_map(|(i,r)|if let Scope::Fact{source,facet}=&r.scope{Some((i,source,*facet))}else{None}).collect();
         let edges:Vec<Vec<usize>>=facts.iter().map(|(_,source,facet)|report.findings.iter().enumerate().filter_map(|(i,f)|{
             let scope_ok=match source{
                 Some(u)=>web(u)==web(&f.url),
                 None=>self.target_scope.as_ref().is_some_and(|a|target_source(goal,a,&f.url))
             };
-            (scope_ok&&ev::facet_supported(goal,facet,&f.quote)&&sources.iter().any(|s|source_matches(s,&f.url)&&browser_skills::verification::quote_present(s,&f.quote))).then_some(i)
+            (scope_ok&&sources.iter().any(|s|source_matches(s,&f.url)&&ev::source_facet_supported(goal,facet,s,&f.quote)&&browser_skills::verification::quote_present(s,&f.quote))).then_some(i)
         }).collect()).collect();
         // Maximum bipartite matching, keyed by canonical source and quote.
         // This prevents reuse of one finding (including duplicate claims) for
@@ -190,6 +239,20 @@ mod tests{
   assert!(l.validate_report(g,&[a.clone()],&report).is_err());
   report.findings.push(f("WHEN NOT MATCHED inserts a new row if the condition permits insertion."));
   assert!(l.validate_report(g,&[a],&report).is_ok());assert!(l.requirements.iter().all(|r|r.state==State::Verified));
+ }
+ #[test]fn planning_retains_explicit_deliverables_and_blocks_unverified_completion(){
+  let g="Plan a Sunday outing in Bengaluru for a family of four under INR 2000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary.";
+  let mut l=Ledger::compile(g);
+  assert!(l.supported);
+  assert_eq!(l.missing(),vec!["research_subjects","opening_hours","price","budget_constraint","itinerary"]);
+  l.refresh(g,&[s("https://example.org/","Example","A generic page with opening hours and ticket prices.")]);
+  assert!(l.can_review().is_err());
+ }
+ #[test]fn planning_provides_missing_evidence_as_native_action_objective(){
+  let g="Plan a Sunday outing. Find three family attractions, check opening hours and ticket prices, and prepare an itinerary under INR 2000.";
+  let l=Ledger::compile(g);
+  assert_eq!(l.next_research_objective(),Some("Find independent public sources for the requested subjects, not search-engine interface links"));
+  assert!(!l.ready());
  }
  #[test]fn unsupported_goals_keep_existing_verification(){
   assert!(!Ledger::compile("Open https://example.org").supported);

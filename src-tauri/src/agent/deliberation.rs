@@ -18,6 +18,35 @@ pub fn read_only(goal:&str)->bool{
              !super::browser_skills::phrase(super::evidence_verifier::title_task_action_text(&g),"book")))
         && !["buy ","pay ","purchase","register","sign up","submit","send ","publish","write ","draft ","upload","download","delete","change ","update ","play ","log in","sign in","account","password","credential","consent","reserve","transfer","checkout","my ","private"].iter().any(|s|g.contains(s))
 }
+/// Extract a bounded list of entities explicitly named by the user.
+/// Names are search objectives, never inferred official domain names.
+pub fn named_research_entities(goal:&str)->Vec<String>{
+    if !read_only(goal){return vec![]}
+    let lower=goal.to_ascii_lowercase();
+    let marker="visit the official websites of ";
+    let Some(start)=lower.find(marker).map(|i|i+marker.len())else{return vec![]};
+    let rest=goal[start..].split('.').next().unwrap_or("");
+    let normalized=rest.replace(", and ",", ").replace(" and ",", ");
+    let names:Vec<String>=normalized.split(',').map(str::trim)
+        .filter(|s|!s.is_empty()).map(str::to_owned).collect();
+    if !(2..=4).contains(&names.len())||names.iter().any(|n|n.len()<2||n.len()>48
+        ||n.split_whitespace().count()>5
+        ||!n.chars().all(|c|c.is_ascii_alphanumeric()||matches!(c,' '|'-'|'&'))){return vec![]}
+    names
+}
+
+#[cfg(test)]
+mod named_sources_tests {
+    use super::*;
+    #[test]
+    fn extracts_explicit_named_sites_without_guessing_urls() {
+        let goal="Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the most suitable option.";
+        assert_eq!(named_research_entities(goal),vec!["Notion","Trello","ClickUp"]);
+        assert!(named_research_entities("Buy a product from Notion and Trello").is_empty());
+        assert!(named_research_entities("Compare two sites").is_empty());
+    }
+}
+
 /// Track explicit public source addresses in a bounded read-only comparison.
 /// This does not grant navigation permissions or authorize external actions.
 pub fn explicit_research_sources(goal:&str)->Vec<Url>{
@@ -89,6 +118,8 @@ fn clean_url(s:&str)->Option<Url>{
 pub fn navigation_grounded(goal:&str,page:&DomSnapshot,target:&str)->bool{
     let Some(u)=clean_url(target) else{return false;};
     if [requested_navigation_url(goal),requested_music_entry_url(goal),requested_search_entry_url(goal)].into_iter().flatten().any(|v|v==u){return true}
+    if named_research_entities(goal).iter().enumerate()
+        .any(|(stage,_)|super::policy::named_research_waypoint(goal,stage).as_ref()==Some(&u)){return true}
     if u.as_str()=="https://www.google.com/"&&super::recovery::authentication_gate(page)&&super::recovery::alternatives_authorized(goal){return true}
     if goal.split_whitespace().filter_map(|s|clean_url(s.trim_matches(['(',')','[',']','"','\'',',','.',';']))).any(|v|v==u){return true}
     page.interactive_nodes.iter().any(|n|!n.is_sensitive&&!n.is_submit&&

@@ -54,6 +54,28 @@ fn tokens(text:&str)->HashSet<String>{
 /// Only letters, digits and label punctuation survive. Quotes, colons and line
 /// breaks are excluded so an observed label cannot terminate the sentence that
 /// introduces it.
+fn tactic_words(text:&str)->HashSet<String>{
+    tokens(text).into_iter().filter(|w| ![
+        "observed","current","objective","stage","page","then","before","after",
+        "fresh","native","evidence","progress","control","controls","relevant",
+        "deciding","using","with","from","this","that","read","inspect","review",
+        "look","open","find","again","different","another","advance","check",
+        "compare","reobserve","choose","select","attempt","retry","results"
+    ].contains(&w.as_str())).collect()
+}
+fn repeated_tactic(candidate:&str,tried:&[String])->bool{
+    let normalized_candidate=normalized(candidate);
+    let words=tactic_words(candidate);
+    tried.iter().any(|old|{
+        if normalized(old)==normalized_candidate{return true;}
+        let previous=tactic_words(old);
+        let common=words.intersection(&previous).count();
+        let union=words.union(&previous).count();
+        // Require multiple shared distinguishing terms; do not conflate
+        // separate single-word targets or materially different tactics.
+        common>=2 && union>0 && common*4>=union*3
+    })
+}
 fn sanitized_label(label:&str)->Option<String>{
     let trimmed=label.split_whitespace().collect::<Vec<_>>().join(" ");
     (!trimmed.is_empty()&&trimmed.chars().count()<=48&&
@@ -70,11 +92,14 @@ impl RecoveryPlan{
     pub fn criterion(&self)->&str{&self.criterion}
     pub fn basis(&self)->Basis{self.basis}
     fn grounded(&self,page:&DomSnapshot)->bool{
-        let mut observed=tokens(&page.title);
-        observed.extend(tokens(&page.text_excerpt));
-        for node in &page.interactive_nodes{observed.extend(tokens(&node.label));}
-        !tokens(&self.objective).is_disjoint(&observed)||
-            page.interactive_nodes.iter().any(|node|self.objective.contains(&node.node_id))
+        let mut observed=tactic_words(&page.title);
+        observed.extend(tactic_words(&page.text_excerpt));
+        for node in page.interactive_nodes.iter().filter(|n|browser_skills::public_control(n)){
+            observed.extend(tactic_words(&node.label));
+        }
+        !tactic_words(&self.objective).is_disjoint(&observed)||
+            page.interactive_nodes.iter().filter(|n|browser_skills::public_control(n))
+                .any(|node|!node.node_id.is_empty()&&self.objective.split(|c:char|!c.is_alphanumeric()&&c!='_'&&c!='-').any(|word|word==node.node_id.as_str()))
     }
     /// Fail closed unless the plan is plain, bounded, read-only, grounded in the
     /// page that is actually observed, and not a repeat of a failed attempt.
@@ -87,7 +112,7 @@ impl RecoveryPlan{
             ensure!(observed_urls.iter().any(|seen|seen==url),"Recovery objective names an unobserved URL: {url}");
         }
         ensure!(self.grounded(page),"Recovery objective is not grounded in the observed page");
-        ensure!(!tried.iter().any(|previous|normalized(previous)==normalized(&self.objective)),"Recovery objective was already attempted");
+        ensure!(!repeated_tactic(&self.objective,tried),"Recovery objective was already attempted");
         Ok(())
     }
     /// Compose a recovery objective that names a control this page actually
@@ -128,7 +153,8 @@ impl RecoveryPlan{
     pub async fn propose_model_plan(
         router:&crate::router::model_router::ModelRouter,
         creds:&crate::storage::credentials::CredentialStore,
-        goal:&str,page:&DomSnapshot,observed_urls:&[String],tried:&[String],
+        goal:&str,stage_objective:&str,page:&DomSnapshot,observed_urls:&[String],
+        tried:&[String],failed_choices:&[serde_json::Value],recent_outcomes:&[String],
     )->Result<Self>{
         let controls:Vec<serde_json::Value>=page.interactive_nodes.iter()
             .filter(|n|browser_skills::public_control(n)).take(40)
@@ -136,6 +162,10 @@ impl RecoveryPlan{
             .collect();
         let input=serde_json::json!({
             "original_goal":goal,
+            "unfinished_stage_objective":stage_objective,
+            "failed_choices_untrusted":failed_choices.iter().take(12).collect::<Vec<_>>(),
+            "recent_outcomes_untrusted":recent_outcomes.iter().take(8)
+                .map(|s|s.chars().take(300).collect::<String>()).collect::<Vec<_>>(),
             "observed_page_untrusted":{
                 "url":page.origin,
                 "title":page.title,
@@ -203,6 +233,25 @@ mod tests{
         let plan=RecoveryPlan::derive(&results(),"Apply the price range filter",&[]).unwrap();
         assert!(plan.validate(&results(),&[],&[]).is_ok());
         assert!(plan.validate(&results(),&[],&[plan.objective().to_ascii_uppercase()]).is_err());
+    }
+    #[test]fn paraphrased_failed_tactic_is_rejected(){
+        let tried=vec!["Inspect the observed price range panel".into()];
+        assert!(repeated_tactic("Review the price range panel again",&tried));
+        assert!(!repeated_tactic("Inspect availability filters",&tried));
+    }
+    #[test]fn generic_page_overlap_is_not_grounding(){
+        let p=page("Current page","Inspect the current page and review observed controls",vec![]);
+        let plan=RecoveryPlan{objective:"Inspect the observed page for unrelated material".into(),
+            criterion:"Fresh observation verifies the result".into(),basis:Basis::Model};
+        assert!(plan.validate(&p,&[],&[]).is_err());
+    }
+    #[test]fn sensitive_node_id_is_not_grounding(){
+        let p=page("Public listing","Read public listing",vec![
+            DomNodeSummary{is_sensitive:true,..node("agent_secret","Private account token","textbox")}
+        ]);
+        let plan=RecoveryPlan{objective:"Inspect agent_secret for additional information".into(),
+            criterion:"Fresh observation verifies the result".into(),basis:Basis::Model};
+        assert!(plan.validate(&p,&[],&[]).is_err());
     }
     #[test]fn fixed_strategy_converts_to_a_plan(){
         let plan=RecoveryPlan::from(RecoveryStrategy::OpenResult);

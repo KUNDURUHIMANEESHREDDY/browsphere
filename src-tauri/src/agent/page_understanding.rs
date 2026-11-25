@@ -85,7 +85,9 @@ pub fn classify(p:&DomSnapshot)->PageProfile{
     let listing_title=has_any(&title,&["search results","results for"])||title.starts_with("search for ");
     let search_url=url::Url::parse(&p.origin).ok().is_some_and(|u|
         u.query_pairs().any(|(k,v)|k=="title"&&v.eq_ignore_ascii_case("Special:Search"))||
-        (u.path().split('/').any(|s|s=="search"||s=="results")&&u.query_pairs().any(|(k,v)|matches!(k.as_ref(),"q"|"query"|"search")&&!v.trim().is_empty())));
+        ((u.path().split('/').any(|s|s=="search"||s=="results")||
+          (u.host_str()==Some("html.duckduckgo.com")&&u.path()=="/html/"))
+            &&u.query_pairs().any(|(k,v)|matches!(k.as_ref(),"q"|"query"|"search")&&!v.trim().is_empty())));
     let empty=has_any(&t,&["no results found","no matching results","no trains found","no train found","0 results for"]);
     let doc_hint=has_any(&title,&["documentation","reference","manual","quickstart","tutorial"])||
         url::Url::parse(&p.origin).ok().is_some_and(|u|u.path().split('/').any(|s|matches!(s,"docs"|"doc"|"documentation"|"reference")));

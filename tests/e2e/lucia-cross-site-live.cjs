@@ -490,6 +490,23 @@ async function main(){
       if(wanted('research')){
         const py='https://docs.python.org/3/tutorial/datastructures.html';
         const js='https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/map';
+        if(process.env.LUCIA_DEMO_EVIDENCE_PROBE==='1'){
+          const scan=async url=>{
+            await startAt(url);
+            const s=await evalJs("window.__TAURI__.core.invoke('capture_live_snapshot')");
+            const t=String(s?.text_excerpt||'').toLowerCase();
+            return {url:s?.origin,title:s?.title,length:t.length,controls:s?.interactive_nodes?.length,
+              listComprehensions:t.includes('list comprehensions'),pyOutput:t.includes('list comprehensions provide'),condition:t.includes('condition'),
+              jsArray:t.includes('creates a new array'),jsCallback:t.includes('callback'),
+              pyStart:t.indexOf('list comprehensions provide'),pyConditionAfter:t.indexOf('condition',Math.max(0,t.indexOf('list comprehensions provide'))),
+              jsStart:t.indexOf('creates a new array'),jsCallbackAfter:t.indexOf('callback',Math.max(0,t.indexOf('creates a new array'))),
+              pyContext:t.indexOf('list comprehensions provide')<0?'':t.slice(t.indexOf('list comprehensions provide'),t.indexOf('list comprehensions provide')+340),
+              jsContext:t.indexOf('creates a new array')<0?'':t.slice(t.indexOf('creates a new array'),t.indexOf('creates a new array')+340),
+              snippetPrefix:t.slice(0,60)};
+          };
+          const python=await scan(py),javascript=await scan(js);
+          console.log('DEMO_EVIDENCE_PROBE',JSON.stringify({python,javascript}));return;
+        }
         try{
           await startAt(py);
           const goal='Research and compare Python list comprehensions and JavaScript Array.map using the official documentation pages '+py+' and '+js+' . Read both sources. Explain what each produces and one limitation or distinction of each. Cite exact supporting excerpts from both pages.';
@@ -845,6 +862,72 @@ async function main(){
       }
       console.log('SEMANTIC_BROWSER_SUMMARY',JSON.stringify({passed:result.filter(r=>r.success).length,total:result.length,results:result}));
       if(result.some(r=>!r.success))process.exitCode=1;
+      return;
+    }
+    if (process.env.LUCIA_MODEL_DECISION_TEST === '1') {
+      if (useCloud || !hasQwen) throw Error('Model-decision benchmark requires an installed local model');
+      const http=require('node:http');
+      const server=http.createServer((req,res)=>{
+        res.setHeader('Content-Type','text/html; charset=utf-8');
+        if(req.method!=='GET'){res.writeHead(405);res.end();return;}
+        if(req.url==='/favicon.ico'){res.writeHead(404);res.end();return;}
+        if(req.url==='/reactive'){
+          res.end('<!doctype html><title>Reactive UI Guide</title><main><h1>Reactive UI Guide</h1><p>Respond to changing user interfaces with DOM change events and refreshed observations, without repetitive polling. This is the event-driven browser reference.</p></main>');
+          return;
+        }
+        const unrelatedPages={
+          '/setup':['Setup Notes','Install the application by extracting the archive and running the installer. No interface-change or event handling guidance is provided.'],
+          '/polling':['Polling Techniques','Repeated timer-based page refreshes and fixed-interval polling are explained here. This is not event-driven observation.'],
+          '/account':['Account Overview','Account settings, profile preferences and sign-in help are documented here.'],
+          '/appearance':['Appearance Guide','Choose a theme, change window colors and adjust display preferences.'],
+          '/cli':['CLI Commands','Invoke the command line tool with a configuration file and supported flags.']
+        };
+        if(unrelatedPages[req.url]){
+          const [title,description]=unrelatedPages[req.url];
+          res.end('<!doctype html><title>'+title+'</title><main><h1>'+title+'</h1><p>'+description+'</p></main>');
+          return;
+        }
+        if(req.url!=='/'){res.writeHead(404);res.end();return;}
+        const items=[
+          ['Setup Notes','/setup','How to install the application'],
+          ['Reactive UI Guide','/reactive','Responding to interface changes through events instead of frequent polling'],
+          ['Polling Techniques','/polling','Refreshing a page with repeated timer-based polling instead of event callbacks'],
+          ['Account Overview','/account','How user accounts work'],
+          ['Appearance Guide','/appearance','Themes and window colors'],
+          ['CLI Commands','/cli','Command line options'],
+        ];
+        const variant=Number(process.env.LUCIA_MODEL_DECISION_VARIANT||'0');
+        if(variant===1)items.reverse();
+        if(variant===2)items.push(items.shift(),items.shift());
+        if(process.env.LUCIA_MODEL_NEGATIVE_TEST==='1'){
+          const at=items.findIndex(item=>item[1]==='/reactive');
+          if(at!==-1)items.splice(at,1);
+        }
+        res.end('<!doctype html><title>Documentation Library</title><main><h1>Documentation Library</h1><p>Choose the guide that answers your question.</p>'+
+          items.map(([label,href,description])=>'<article><h2>'+label+'</h2><p>'+description+'</p><a href="'+href+'">Read '+label+'</a></article>').join('')+'</main>');
+      });
+      await new Promise((ok,no)=>{server.once('error',no);server.listen(0,'127.0.0.1',ok)});
+      const url='http://127.0.0.1:'+server.address().port+'/';
+      try{
+        await evalJs('window.browsphereApp.newTab('+JSON.stringify(url)+')');
+        let before;
+        for(let i=0;i<40;i++){before=await nativeState().catch(()=>null);if(before?.observed===url&&before.controls>=5)break;await sleep(300);}
+        if(before?.observed!==url||before.controls<5)throw Error('Live decision fixture did not load');
+        const goal='Which documentation guide explains reacting to changing interfaces without constantly polling? Open that guide and report its page title.';
+        const task=await runTask(goal,url,100);
+        const after=await nativeState().catch(()=>null);
+        const actualActions=task.actions.filter(a=>a.type!=='complete'&&['ok','confirmed'].includes(a.outcome));
+        const modelActed=actualActions.some(a=>/ollama:/.test(a.modelRoute||''));
+        const exact=after?.observed===url+'reactive';
+        const negative=process.env.LUCIA_MODEL_NEGATIVE_TEST==='1';
+        const safe=!task.approvalRequired&&!task.actions.some(a=>a.type==='download'||a.type==='set_checked');
+        const checks=negative
+          ? {noFalseCompletion:task.status!=='completed'&&!task.verified,noInventedDestination:!exact,safe}
+          : {modelActed,exact,verified:task.status==='completed'&&task.verified,safe};
+        const pass=Object.values(checks).every(Boolean);
+        console.log('MODEL_DECISION_RESULT',JSON.stringify({pass,negative,variant:process.env.LUCIA_MODEL_DECISION_VARIANT||'0',checks,task,after}));
+        if(!pass)process.exitCode=1;
+      }finally{await new Promise(ok=>server.close(ok));}
       return;
     }
     if (process.env.LUCIA_GENERALIZATION_TEST === '1') {

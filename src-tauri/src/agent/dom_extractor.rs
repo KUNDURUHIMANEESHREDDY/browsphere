@@ -78,6 +78,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   const MAX_TEXT = {max_text_chars};
   const POINT_PROBE = null;
   const EXPLICIT_LINK_SOURCE = null;
+  const NAMED_RESEARCH_SOURCE = null;
   const FOCUS_TERMS = [];
 
   const SENSITIVE_RE = /(password|passwd|passcode|otp|one[-_]?time|cvv|cvc|card[-_]?num|cc[-_]|ssn|secret|api[-_]?key|token)/i;
@@ -210,6 +211,61 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   // Resolve only explicit, public retailer product URLs on known search
   // result pages. Opaque redirect tokens and all tracking parameters stay
   // private; never guess a destination or treat a snippet as evidence.
+  function publicNamedResearchLink(el) {{
+    // Only scoped user-named research may recover a public organic result.
+    // Raw redirect tokens, query strings, credentials and ads never leave DOM.
+    if(!NAMED_RESEARCH_SOURCE||location.origin!=="https://www.bing.com"||
+       location.pathname!=="/search"||!el.matches("h2 a")||
+       !el.closest("li.b_algo")||!isVisible(el))return null;
+    try{{
+      const name=String(NAMED_RESEARCH_SOURCE).toLowerCase().replace(/[ -]/g,"");
+      const query=new URL(location.href).searchParams.get("q")||"";
+      if(!query.toLowerCase().includes(String(NAMED_RESEARCH_SOURCE).toLowerCase()))return null;
+      let candidate=new URL(el.href);
+      if(candidate.origin===location.origin&&candidate.pathname==="/ck/a"){{
+        const token=candidate.searchParams.get("u");
+        if(!token||token.length>1200||!/^a1[A-Za-z0-9_-]+$/.test(token))return null;
+        const chunk=token.slice(2).replace(/-/g,"+").replace(/_/g,"/");
+        const decoded=atob(chunk.padEnd(Math.ceil(chunk.length/4)*4,"="));
+        candidate=new URL(decoded);
+      }}
+      if(candidate.protocol!=="https:"||candidate.port||candidate.username||
+         candidate.password||candidate.pathname.length>240||candidate.hash)return null;
+      const bare=candidate.hostname.replace(/^www\./,"");
+      const segments=bare.split(".");
+      if(segments.length!==2||segments[0]!==name||
+         !/^[a-z]{{2,12}}$/.test(segments[1]))return null;
+      if(/\/(?:login|auth|oauth|token|password|account|checkout|payment|consent)(?:\/|$)/i.test(candidate.pathname))return null;
+      return candidate.origin+candidate.pathname;
+    }}catch(_e){{return null;}}
+  }}
+  // Read-only organic course-search results: expose only the exact public
+  // HTTPS destination encoded in a visible DuckDuckGo result link. Never
+  // expose tracking tokens, ads, hidden links or arbitrary page instructions.
+  function publicCourseSearchLink(el) {{
+    if(location.origin!=="https://html.duckduckgo.com"||location.pathname!=="/html/"||
+       !el.matches('a.result__a[href]')||!el.closest('.result')||
+       el.closest('.result--ad,[data-testid="result-ad"]')||!isVisible(el))return null;
+    try{{
+      const q=new URL(location.href).searchParams.get("q")||"";
+      if(!/\b(?:free\s+beginner|beginner\s+free)\b/i.test(q)||!/\bcertificate\s+duration\b/i.test(q))return null;
+      const redirect=new URL(el.href);
+      let target=redirect;
+      if(redirect.hostname==="duckduckgo.com"&&redirect.pathname==="/l/"){{
+        const items=redirect.searchParams.getAll("uddg");
+        if(items.length!==1||items[0].length>500)return null;
+        target=new URL(items[0]);
+      }}
+      const host=target.hostname.toLowerCase();
+      if(target.protocol!=="https:"||target.port||target.username||target.password||
+         target.hash||target.pathname.length>400||host.length>100||
+         !host.includes(".")||/^(?:\d{{1,3}}\.){{3}}\d{{1,3}}$/.test(host)||
+         /\.(?:local|localhost|internal|test|invalid|onion|example)$/.test(host)||
+         /(?:^|\.)(?:duckduckgo\.com|google\.com|bing\.com)$/.test(host)||
+         /\/(?:auth|login|signin|sign-in|account|checkout|payment|oauth|token)(?:\/|$)/i.test(target.pathname))return null;
+      return target.origin+target.pathname;
+    }}catch(_e){{return null;}}
+  }}
   function publicSearchProduct(el) {{
     if(!["https://www.google.com","https://search.brave.com"].includes(location.origin)||location.pathname!=="/search"||!isVisible(el)||el.closest('[aria-hidden="true"],[hidden]'))return null;
     try{{
@@ -441,7 +497,7 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
           href: current.tagName === "A"
             ? (() => {{
                 try {{
-                  const discovered=publicSearchProduct(current);
+                  const discovered=publicSearchProduct(current)||publicNamedResearchLink(current)||publicCourseSearchLink(current);
                   if(discovered)return discovered;
                   const address = new URL(current.href);
                   if(/^https?:$/.test(address.protocol)&&address.origin===location.origin&&/(?:\/product\/[^/]+\/?$|\/p\/[^/]+\/?$)/i.test(address.pathname))return sameOriginProduct(current);
@@ -526,6 +582,14 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   // Prioritize real form fields independent of site layout or navigation size.
   for (const field of Array.from(document.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"], [role="searchbox"], [role="option"]')).slice(0, 60)) {{
     if (isVisible(field) && !isSensitiveField(field)) walk(field, true);
+  }}
+  // Reserve actual visible organic results before navigation and search
+  // controls consume the native model's bounded node budget.
+  if(location.origin==="https://html.duckduckgo.com"&&location.pathname==="/html/"){{
+    for(const a of Array.from(document.querySelectorAll('a.result__a[href]')).slice(0,36)){{
+      if(nodes.length>=Math.min(MAX_NODES,55))break;
+      if(publicCourseSearchLink(a))walk(a,true);
+    }}
   }}
   // Direct public retailer result anchors from the public search page. No
   // tracking parameters, redirect unwrapping, or arbitrary cross-origin URLs.
@@ -822,7 +886,22 @@ pub async fn request_live_dom_snapshot(
 }
 
 
-// Only the compiled explicit-link task requests this observation. Ordinary
+/// Scope public search-result link resolution to an explicitly named source.
+/// Never exposes Bing redirect tokens or arbitrary outbound links.
+pub async fn request_named_research_snapshot(
+    app:&tauri::AppHandle,label:&str,name:&str,timeout_ms:u64
+)->Option<DomSnapshot>{
+    if name.len()<2||name.len()>48||!name.chars()
+        .all(|c|c.is_ascii_alphanumeric()||matches!(c,' '|'-'|'&')){return None}
+    let payload=serde_json::to_string(name).ok()?;
+    let script=build_snapshot_script(Uuid::new_v4(),120,24000)
+        .replace("const NAMED_RESEARCH_SOURCE = null;",
+            &format!("const NAMED_RESEARCH_SOURCE = {payload};"));
+    let value=crate::agent::native_eval::eval_json(app,label,script,timeout_ms).await.ok()?;
+    serde_json::from_value(value).ok()
+}
+
+/// Only the compiled explicit-link task requests this observation. Ordinary
 // snapshots continue to suppress cross-origin hrefs.
 pub async fn request_explicit_link_snapshot(app:&tauri::AppHandle,label:&str,source:&str,timeout_ms:u64)->Option<DomSnapshot>{
     let u=super::browser_skills::public_url(source)?;

@@ -128,13 +128,19 @@ pub fn focus_sources(goal:&str,sources:&[SourceEvidence],comparison:bool)->Vec<S
             if score>best.0{best=(score,start);}
         }
         let start=best.1.saturating_sub(120);
-        let end=(start+1450).min(chars.len());
+        let window=if super::course_comparison::count(goal).is_some(){3600}else{1450};
+        let end=(start+window).min(chars.len());
         let title=normalized(&p.title);
         let score=best.0+terms(&title).intersection(&wanted).count() as i32*16
             +if subject.as_ref().is_some_and(|s|title.starts_with(s)){35}else{0}
             +idx as i32;
         (score,idx,SourceEvidence{url:p.url.clone(),title:p.title.clone(),excerpt:chars[start..end].iter().collect()})
     }).collect();
+    // Course comparison requires distinct real provider pages, never search
+    // snippets masquerading as one of the three verified platforms.
+    if super::course_comparison::count(goal).is_some(){
+        ranked.retain(|(_,_,source)|super::course_comparison::site(&source.url).is_some());
+    }
     ranked.sort_by(|a,b|b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
     let mut out=Vec::new();
     let mut hosts=HashSet::new();
@@ -270,7 +276,98 @@ pub fn contrast_terms(goal:&str)->Option<(String,String)>{
     let valid=|s:&str|!s.trim().is_empty()&&s.chars().count()<=60&&s.chars().all(|c|c.is_alphanumeric()||matches!(c,' '|'-'|'_'));
     if valid(a)&&valid(b){Some((normalized(a),normalized(b)))}else{None}
 }
+// Require the requested operation, not merely generic behavioral keywords.
+fn named_comparison(goal:&str)->Option<(String,String)>{
+    let g=goal.to_lowercase();
+    let rest=g.split_once("compare ")?.1;
+    let end=[" using "," based on "," from "," with sources ",". ",";","\n"]
+        .iter().filter_map(|m|rest.find(m)).min().unwrap_or(rest.len());
+    let (a,b)=rest[..end].split_once(" and ").or_else(||rest[..end].split_once(" with ")).or_else(||rest[..end].split_once(" vs "))?;
+    let clean=|v:&str|v.trim_matches(|c:char|c.is_whitespace()||matches!(c,'\u{60}'|'"'|'\'')).to_owned();
+    let (a,b)=(clean(a),clean(b));
+    if a.is_empty()||b.is_empty()||a.len()>100||b.len()>100||a.contains("://")||b.contains("://"){return None;}
+    Some((a,b))
+}
+fn operand_words(text:&str)->Vec<String>{
+    words(text).into_iter().map(|w|if w.chars().count()>4&&w.ends_with('s'){w[..w.len()-1].to_owned()}else{w}).collect()
+}
+fn operand_matches(operand:&str,text:&str)->bool{
+    let wanted=operand_words(operand);
+    let actual=operand_words(text);
+    let has=|v:&[String]|!v.is_empty()&&actual.windows(v.len()).any(|p|p==v);
+    if has(&wanted){return true;}
+    if wanted.len()>=3&&has(&wanted[1..]){return true;}
+    if operand.contains('.'){
+        if let Some(member)=wanted.last(){
+            let t=normalized(text);
+            return t.contains(&format!("{member}("))||has(&[member.clone(),"method".into()])||has(&[member.clone(),"builds".into()])||has(&[member.clone(),"build".into()]);
+        }
+    }
+    false
+}
+/// User-derived anchors used only for rendered DOM retrieval.
+pub fn comparison_focus_terms(goal:&str)->Vec<String>{
+    let Some((a,b))=named_comparison(goal)else{return vec![];};
+    [a,b].into_iter().filter_map(|term|{
+        let parts=operand_words(&term);
+        let value=if term.contains('.') {parts.last()?.clone()}
+            else if parts.len()>=3 {parts[1..].join(" ")}
+            else {parts.join(" ")};
+        (!value.is_empty()&&value.chars().count()<=60).then_some(value)
+    }).collect()
+}
+fn source_operand_scope(goal:&str,source:&SourceEvidence)->u8{
+    let identity=format!("{} {}",source.title,source.url);
+    let exact=operand_mask(goal,&identity);
+    if exact==1||exact==2{return exact;}
+    // A distinct language or vendor qualifier in the observed source identity
+    // disambiguates broad pages mentioning multiple unrelated APIs.
+    if let Some((a,b))=named_comparison(goal){
+        let a=operand_words(&a);let b=operand_words(&b);let id=operand_words(&identity);
+        if a.len()>=3&&b.len()>=3&&a[0]!=b[0]{
+            let mask=u8::from(id.contains(&a[0]))|(u8::from(id.contains(&b[0]))<<1);
+            if mask==1||mask==2{return mask;}
+        }
+    }
+    operand_mask(goal,&source.excerpt)
+}
+fn operand_mask(goal:&str,text:&str)->u8{
+    named_comparison(goal).map_or(0,|(a,b)|u8::from(operand_matches(&a,text))|(u8::from(operand_matches(&b,text))<<1))
+}
+fn subject_bound_facet(goal:&str,facet:&str)->bool{
+    matches!(facet,"output_behavior"|"operational_distinction")&&named_comparison(goal).is_some()
+}
 pub fn facet_supported(goal:&str,facet:&str,text:&str)->bool{facet_score(goal,facet,text)>0}
+pub fn source_facet_supported(goal:&str,facet:&str,source:&SourceEvidence,text:&str)->bool{
+    if !facet_supported(goal,facet,text){return false;}
+    if !subject_bound_facet(goal,facet){return true;}
+    let quote=operand_mask(goal,text);
+    let scope=source_operand_scope(goal,source);
+    (scope==1||scope==2)&&quote==scope
+}
+pub fn fact_capture_quality(goal:&str,source:&SourceEvidence)->(usize,usize){
+    let sets=facet_candidates(goal,source);
+    (sets.iter().filter(|s|!s.candidates.is_empty()).count(),
+     sets.iter().map(|s|s.candidates.len()).sum())
+}
+pub fn validate_comparison_operands(goal:&str,sources:&[SourceEvidence],report:&VerificationReport)->Result<(),String>{
+    let facets=research_facets(goal);
+    if !facets.iter().any(|f|subject_bound_facet(goal,f)){return Ok(());}
+    let mut covered=0u8;
+    for source in comparison_sources(goal,sources){
+        let mut side=0u8;
+        for facet in &facets{
+            let matching=report.findings.iter().filter(|f|web_url(&f.url)==web_url(&source.url)&&source_facet_supported(goal,facet,&source,&f.quote))
+                .fold(0u8,|mask,f|mask|operand_mask(goal,&f.quote));
+            if matching!=1&&matching!=2{return Err(format!("Missing operand-specific {facet} evidence from {}",source.url));}
+            if side!=0&&side!=matching{return Err("Comparison source findings refer to different operands".into());}
+            side=matching;
+        }
+        covered|=side;
+    }
+    if covered!=3{return Err("Comparison did not establish both named operands".into());}
+    Ok(())
+}
 /// Canonicalize typography only for lexical analysis; citation strings
 /// and exact source checks keep their original punctuation.
 fn semantic_text(text:&str)->String{
@@ -312,10 +409,18 @@ fn facet_score(goal:&str,facet:&str,text:&str)->i32{
         return compatibility.iter().filter(|v|t.contains(**v)).count() as i32;
     }
     if matches!(facet,"output_behavior"|"operational_distinction"){
+        if subject_bound_facet(goal,facet)&&operand_mask(goal,text)==0{return 0;}
         let result=["creates a new","create a new","create lists","create arrays","creates lists","creates arrays","creates an","produces a","produces an","returns a","returns an","returns the","return value","generates a","generates an","constructs a","builds a","resulting list","resulting array","yields a","yields an"];
-        let distinction=["only if","only when","only for","not invoked","does not","cannot","must not","should not","do not","not recommended","unless","except","if clause","if clauses","for clause","for clauses","conditional","condition","filtering","filter out","sparse","side effect","side-effect","optional","required","at least","at most","raises","restriction","limitation","not mutate","in place"];
+        let distinction=["only if","only when","only for","only expects","invoked only","without using","anti-pattern","not invoked","does not","cannot","must not","should not","do not","not recommended","unless","except","if clause","if clauses","for clause","for clauses","conditional","condition","filtering","filter out","sparse","side effect","side-effect","optional","required","at least","at most","raises","restriction","limitation","not mutate","in place"];
         let markers=if facet=="output_behavior"{&result[..]}else{&distinction[..]};
-        let count=markers.iter().filter(|m|t.contains(**m)).count() as i32;
+        // An unrelated sentence next to a named heading cannot lend its
+        // behavioral keywords to that heading. Require the same clause window.
+        let count=if subject_bound_facet(goal,facet){
+            t.replace("! ",". ").replace("? ",". ").split(". ")
+                .filter(|sentence|operand_mask(goal,sentence)!=0)
+                .map(|sentence|markers.iter().filter(|m|sentence.contains(**m)).count() as i32)
+                .max().unwrap_or(0)
+        }else{markers.iter().filter(|m|t.contains(**m)).count() as i32};
         if t.starts_with(">>>")||t.starts_with("js const")||t.starts_with("console.log")||t.contains("last modified"){return 0;}
         return count;
     }
@@ -361,7 +466,7 @@ fn quality_tier(goal:&str,facet:&str,text:&str)->u8{
         return if direct.iter().any(|m|t.contains(m)){3}else{1};
     }
     if facet=="operational_distinction"{
-        let direct=["only if","only when","only for","not invoked","does not","cannot","must not","do not","unless","if clause","for clause","filter out","sparse","side effect","side-effect"];
+        let direct=["only if","only when","only for","only expects","invoked only","without using","anti-pattern","not invoked","does not","cannot","must not","do not","unless","if clause","for clause","filter out","sparse","side effect","side-effect"];
         return if direct.iter().any(|m|t.contains(m)){3}else{1};
     }
     if normalized(goal).contains("http client librar"){
@@ -418,6 +523,7 @@ pub fn facet_candidates(goal:&str,source:&SourceEvidence)->Vec<FacetCandidates>{
     research_facets(goal).into_iter().map(|facet|{
         let mut ranked=pieces.iter().enumerate().filter_map(|(i,p)|{
             let score=facet_score(goal,facet,p);
+            if !source_facet_supported(goal,facet,source,p){return None;}
             let n=normalized(p);
             let minimum=if matches!(facet,"installation_command"|"runtime_compatibility"){12}else if facet=="caveat"&&direct_usage_warning(p){20}else{30};
             if score==0||p.chars().count()<minimum||p.chars().count()>240||
@@ -456,7 +562,7 @@ pub fn facet_candidates(goal:&str,source:&SourceEvidence)->Vec<FacetCandidates>{
     }).collect()
 }
 fn valid_facet_choice(goal:&str,source:&SourceEvidence,set:&FacetCandidates,p:&Passage)->bool{
-    if !facet_supported(goal,&set.facet,&p.text)||!super::browser_skills::verification::quote_present(source,&p.text){return false;}
+    if !source_facet_supported(goal,&set.facet,source,&p.text)||!super::browser_skills::verification::quote_present(source,&p.text){return false;}
     let best=facet_candidates(goal,source).into_iter().find(|s|s.facet==set.facet)
         .and_then(|s|s.candidates.iter().map(|p|quality_tier(goal,&set.facet,&p.text)).max()).unwrap_or(0);
     quality_tier(goal,&set.facet,&p.text)>=best
@@ -503,6 +609,132 @@ pub fn facet_findings(goal:&str,source:&SourceEvidence,sets:&[FacetCandidates],r
         out.push(GroundedFinding{claim:p.text.clone(),quote:p.text.clone(),url:source.url.clone()});
     }
     Ok(out)
+}
+/// Compact read-only, named-source comparison. The model selects IDs and a
+/// recommendation from a finite set of names; Rust owns sources and quotes.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamedComparisonSelection {
+    picks: Vec<NamedComparisonPick>,
+    recommended: String,
+    rationale: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamedComparisonPick { name:String, ids:Vec<String> }
+
+pub fn named_comparison_catalog(goal:&str,sources:&[SourceEvidence])->Option<serde_json::Value>{
+    let names=super::deliberation::named_research_entities(goal);
+    if names.len()<2{return None}
+    let mut rows=Vec::new();
+    for name in &names {
+        let source=sources.iter().find(|s|web_url(&s.url).and_then(|u|u.host_str().map(str::to_owned))
+            .is_some_and(|host|host.strip_prefix("www.").unwrap_or(&host)
+                .split('.').next()==Some(name.to_ascii_lowercase().replace([' ','-'],"").as_str())))?;
+        let candidates=candidate_passages(goal,source);
+        if candidates.is_empty(){return None}
+        rows.push(serde_json::json!({"name":name,"title":source.title,
+            "candidates":candidates.into_iter().take(7).collect::<Vec<_>>()}));
+    }
+    Some(serde_json::json!({"original_goal":goal,"sources":rows,
+        "instruction":"Select 1-2 directly relevant passage IDs PER source. Compare free-plan constraints for the requested team size. Recommend only one of the names. If evidence does not establish suitability, leave recommended and rationale empty."}))
+}
+
+pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Result<VerificationReport,String>{
+    let names=super::deliberation::named_research_entities(goal);
+    if names.len()<2{return Err("No named-source research contract".into());}
+    let choice:NamedComparisonSelection=serde_json::from_str(raw.trim())
+        .map_err(|_|"Invalid named comparison selection JSON")?;
+    if choice.picks.len()!=names.len(){return Err("Not every named website has evidence picks".into());}
+    let mut findings=Vec::new();
+    let mut selected=HashSet::new();
+    for name in &names{
+        let row=choice.picks.iter().find(|p|p.name.eq_ignore_ascii_case(name))
+            .ok_or("Named comparison omitted a source")?;
+        if !(1..=2).contains(&row.ids.len()){return Err("Choose one or two passages per source".into());}
+        let page=sources.iter().find(|s|web_url(&s.url).and_then(|u|u.host_str().map(str::to_owned))
+            .is_some_and(|host|host.strip_prefix("www.").unwrap_or(&host)
+                .split('.').next()==Some(name.to_ascii_lowercase().replace([' ','-'],"").as_str())))
+            .ok_or("Named source was not observed")?;
+        let candidates=candidate_passages(goal,page);
+        for id in &row.ids {
+            if !selected.insert((name.to_ascii_lowercase(),id.clone())){return Err("Duplicate passage ID".into())}
+            let passage=candidates.iter().take(7).find(|p|p.id==*id)
+                .ok_or("Selected passage ID is not in the observed source catalog")?;
+            if !page.excerpt.contains(&passage.text){return Err("Quote absent from source".into())}
+            let low=passage.text.to_ascii_lowercase();
+            if !low.contains("free")&&!low.contains("member")&&!low.contains("user")
+                &&!low.contains("collaborat")&&!low.contains("board")&&!low.contains("block"){
+                return Err("Selected quote does not discuss the requested free-plan comparison".into())
+            }
+            findings.push(GroundedFinding{claim:passage.text.clone(),quote:passage.text.clone(),url:page.url.clone()});
+        }
+    }
+    if choice.recommended.trim().is_empty()||!names.iter().any(|n|n.eq_ignore_ascii_case(choice.recommended.trim())){
+        return Err("No verified recommendation from the named alternatives".into())
+    }
+    if choice.rationale.trim().len()<20||choice.rationale.len()>500{
+        return Err("Recommendation rationale is missing or excessive".into())
+    }
+    // A reasoning model cannot claim numeric or capacity details absent from
+    // its selected supporting passages.
+    let quoted=findings.iter().map(|f|f.quote.as_str()).collect::<Vec<_>>().join(" ");
+    if !numbers(&choice.rationale).is_subset(&numbers(&quoted)){
+        return Err("Recommendation cites numerical limits missing from the selected evidence".into())
+    }
+    let draft=serde_json::json!({"status":"verified","findings":findings,
+        "uncertainty":"Comparison uses captured official-site text. Webpage claims are not independently fact-checked."});
+    let mut report=check_model_verification(&draft.to_string(),sources,true)?;
+    let recommended=names.iter().find(|n|n.eq_ignore_ascii_case(choice.recommended.trim()))
+        .ok_or("Unknown recommendation")?;
+    report.summary=format!("Recommendation for the requested team: {}. {}\n\n{}",
+        recommended,choice.rationale.trim(),report.summary);
+    require_named_source_coverage(goal,&report)?;
+    Ok(report)
+}
+#[cfg(test)]
+mod named_comparison_selection_tests{
+    use super::*;
+    const GOAL:&str="Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the most suitable option.";
+    fn sources()->Vec<SourceEvidence>{
+        vec![
+            SourceEvidence{url:"https://www.notion.com/pricing".into(),title:"Notion Free Pricing".into(),
+                excerpt:"Notion Free plan includes pages and limited collaboration for members. For teams, Notion Free plan offers workspace blocks.".into()},
+            SourceEvidence{url:"https://trello.com/en/pricing".into(),title:"Trello Free Pricing".into(),
+                excerpt:"Trello Free plan includes unlimited cards and up to 10 collaborators per workspace. Free workspaces include boards for small teams.".into()},
+            SourceEvidence{url:"https://clickup.com/pricing".into(),title:"ClickUp Free Pricing".into(),
+                excerpt:"ClickUp Free Forever plan includes collaborative tasks for unlimited members. The Free plan offers limited storage.".into()}
+        ]
+    }
+    #[test]
+    fn comparison_selection_requires_every_real_named_source(){
+        let sources=sources();
+        let catalog=named_comparison_catalog(GOAL,&sources).unwrap();
+        assert_eq!(catalog["sources"].as_array().unwrap().len(),3);
+        let names=["Notion","Trello","ClickUp"];
+        let picks=names.iter().map(|name|serde_json::json!({"name":name,"ids":["p1"]})).collect::<Vec<_>>();
+        let valid=serde_json::json!({"picks":picks,"recommended":"Trello",
+            "rationale":"Trello provides free collaborative boards for small teams."}).to_string();
+        assert!(named_comparison_report(GOAL,&sources,&valid).is_ok());
+        let incomplete=serde_json::json!({"picks":[{"name":"Notion","ids":["p1"]}],
+            "recommended":"Trello","rationale":"Missing source evidence cannot support a team comparison."}).to_string();
+        assert!(named_comparison_report(GOAL,&sources,&incomplete).is_err());
+        let invented=valid.replace("Trello provides free collaborative boards for small teams.",
+            "Trello supports 9999 members in the free plan.");
+        assert!(named_comparison_report(GOAL,&sources,&invented).is_err());
+    }
+}
+pub fn require_named_source_coverage(goal:&str,report:&VerificationReport)->Result<(),String>{
+    let names=super::deliberation::named_research_entities(goal);
+    for name in names{
+        let brand=name.to_ascii_lowercase().replace([' ','-'],"");
+        if !report.findings.iter().any(|f|web_url(&f.url).and_then(|u|u.host_str().map(str::to_owned))
+            .is_some_and(|host|host.strip_prefix("www.").unwrap_or(&host)
+                .split('.').next()==Some(brand.as_str()))){
+            return Err(format!("Missing official-site finding for {name}"))
+        }
+    }
+    Ok(())
 }
 pub fn comparison_sources(goal:&str,sources:&[SourceEvidence])->Vec<SourceEvidence>{
     let required=super::deliberation::explicit_research_sources(goal);
@@ -590,13 +822,33 @@ pub fn assemble_compiled_skill_report(goal:&str,sources:&[SourceEvidence],findin
     ledger.validate_report(goal,&scoped,&report)?;
     Ok(report)
 }
+fn comparison_summary(goal:&str,sources:&[SourceEvidence],report:&VerificationReport)->Option<String>{
+    let (left,right)=named_comparison(goal)?;
+    let facets=research_facets(goal);
+    if facets!=vec!["output_behavior","operational_distinction"]{return None;}
+    let mut rows=String::from("Verified comparison from observed documentation:\n");
+    for source in comparison_sources(goal,sources){
+        let subject=match source_operand_scope(goal,&source){1=>&left,2=>&right,_=>return None};
+        let mut choices=Vec::new();
+        for facet in &facets{
+            choices.push(report.findings.iter().enumerate().filter(|(_,f)|web_url(&f.url)==web_url(&source.url)&&source_facet_supported(goal,facet,&source,&f.quote)).collect::<Vec<_>>());
+        }
+        let (a,b)=choices[0].iter().find_map(|a|choices[1].iter().find(|b|normalized(&a.1.quote)!=normalized(&b.1.quote)).map(|b|(a,b)))?;
+        rows.push_str(&format!("\n{subject}\n- Output: {} [Source {}]\n- Distinction: {} [Source {}]\n",a.1.quote,a.0+1,b.1.quote,b.0+1));
+    }
+    rows.push_str("\nSources and supporting excerpts:\n");
+    for (i,f) in report.findings.iter().enumerate(){rows.push_str(&format!("[Source {}] {}\n  Quote: {}\n",i+1,f.url,f.quote));}
+    rows.push_str(&format!("\nLimitations: {}",report.limitations));
+    Some(rows)
+}
 pub fn assemble_extractive_comparison(goal:&str,sources:&[SourceEvidence],findings:Vec<GroundedFinding>)->Result<VerificationReport,String>{
     // Reuse the existing native verifier, including URL, exact quote, number
     // and distinct-host checks. Each finding is an extract, not an inference.
     let draft=serde_json::json!({"status":"verified","findings":findings,
         "uncertainty":"Extractive comparison of selected source passages. The passages are attributed, not independently fact-checked; unsupported conclusions are not inferred."});
-    let report=check_model_verification(&draft.to_string(),sources,true)?;
+    let mut report=check_model_verification(&draft.to_string(),sources,true)?;
     require_source_coverage(goal,&report)?;
+    validate_comparison_operands(goal,sources,&report)?;
     let facets=research_facets(goal);
     if !facets.is_empty(){
         for source in comparison_sources(goal,sources){
@@ -613,6 +865,7 @@ pub fn assemble_extractive_comparison(goal:&str,sources:&[SourceEvidence],findin
         let mut ledger=super::requirements::Ledger::compile(goal);
         ledger.validate_report(goal,sources,&report)?;
     }
+    if let Some(summary)=comparison_summary(goal,sources,&report){report.summary=summary;}
     Ok(report)
 }
 
@@ -1424,6 +1677,36 @@ mod explicit_source_tests {
 #[cfg(test)]
 mod extractive_comparison_tests{
     use super::*;
+    #[test]
+    fn named_comparison_rejects_authentic_but_unrelated_evidence(){
+        let goal="Research and compare Python list comprehensions and JavaScript Array.map using the official documentation pages https://docs.python.org/3/tutorial/datastructures.html and https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/map . Read both sources. Explain what each produces and one limitation or distinction of each. Cite exact supporting excerpts from both pages.";
+        let output="List comprehensions provide a concise way to create lists.";
+        let distinction="A list comprehension consists of brackets containing an expression followed by a for clause, then zero or more for or if clauses.";
+        let distractor="The sorted function returns a new list containing all the items.";
+        let other="The remove method raises an error if the value does not appear.";
+        let a=SourceEvidence{url:"https://docs.python.org/3/tutorial/datastructures.html".into(),title:"Data Structures".into(),excerpt:format!("{distractor} {other} The built-in map() can be used with other functions. {output} {distinction}")};
+        let b=SourceEvidence{url:"https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/map".into(),title:"Array.prototype.map()".into(),excerpt:"The map() method creates a new array populated with the results of calling a provided function. Since map builds a new array, calling it without using the returned array is an anti-pattern.".into()};
+        assert!(!facet_supported(goal,"output_behavior",distractor));
+        assert!(!facet_supported(goal,"operational_distinction",other));
+        assert!(!facet_supported(goal,"output_behavior",&format!("{distractor} A list comprehension is shown below.")));
+        assert!(!facet_supported(goal,"operational_distinction",&format!("{other} List comprehensions are described below.")));
+        let sets=facet_candidates(goal,&a);
+        assert!(sets.iter().all(|s|!s.candidates.is_empty()),"{sets:?}");
+        assert!(sets.iter().all(|s|s.candidates.iter().all(|p|operand_mask(goal,&p.text)==1)));
+        let make=|source:&SourceEvidence,q:&str|GroundedFinding{url:source.url.clone(),claim:q.into(),quote:q.into()};
+        let js_output="The map() method creates a new array populated with the results of calling a provided function.";
+        let js_distinction="Since map builds a new array, calling it without using the returned array is an anti-pattern.";
+        let wrong=vec![make(&a,distractor),make(&a,other),make(&b,js_output),make(&b,js_distinction)];
+        assert!(assemble_extractive_comparison(goal,&[a.clone(),b.clone()],wrong).is_err());
+        let correct=vec![make(&a,output),make(&a,distinction),make(&b,js_output),make(&b,js_distinction)];
+        let report=assemble_extractive_comparison(goal,&[a,b],correct).unwrap();
+        assert!(report.summary.contains("python list comprehensions"));
+        assert!(report.summary.contains("javascript array.map"));
+        assert!(report.summary.contains("- Output:"));
+        assert!(report.summary.contains("- Distinction:"));
+        assert_eq!(comparison_focus_terms(goal),vec!["list comprehension","map"]);
+    }
+
     #[test]
     fn contrast_retains_complete_literal_behavior_clauses_after_chunk_boundary(){
         let goal="Find the SQL INSERT command reference. Locate the ON CONFLICT clause and explain the difference between DO NOTHING and DO UPDATE. Cite observed source evidence for each behavior.";
