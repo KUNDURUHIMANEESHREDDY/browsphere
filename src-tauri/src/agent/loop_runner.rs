@@ -543,6 +543,30 @@ fn delayed_navigation_is_verified(expected: &str, observed: &DomSnapshot) -> boo
 /// or observing a results list is not enough to hand off to verification.
 /// Require a non-submitting click and an independently observed destination
 /// URL change. The final evidence verifier still checks the actual goal.
+/// An LLM proposal never creates permission to fetch a file. The original
+/// request must explicitly ask for a download, and its URL must be present
+/// verbatim in that request or on a freshly observed public link.
+fn download_authorized_by_goal(goal:&str, page:&DomSnapshot, url:&str)->bool{
+    let lower=goal.trim().to_ascii_lowercase();
+    let explicit=(lower.starts_with("download ")
+        || lower.starts_with("download:")
+        || lower.starts_with("save file ")
+        || lower.starts_with("save the file ")
+        || lower.starts_with("export ")
+        || lower.contains(" and download ")
+        || lower.contains(" then download "))
+        && !lower.starts_with("how ")
+        && !lower.starts_with("why ")
+        && !lower.starts_with("what ");
+    if !explicit{return false;}
+    let Ok(target)=url::Url::parse(url)else{return false};
+    if target.scheme()!="https"||target.username()!=""||target.password().is_some(){
+        return false;
+    }
+    goal.contains(url)||page.interactive_nodes.iter().any(|n|
+        !n.is_sensitive&&!n.is_submit&&n.href.as_deref()==Some(url))
+}
+
 fn requested_open_result(goal: &str) -> bool {
     let lower = goal.to_ascii_lowercase();
     (lower.contains("open ") || lower.contains("click ") || lower.contains("select "))
@@ -2997,6 +3021,16 @@ async fn run_browser_loop(
                 reason: format!("Live DOM action validation failed: {reason}"),
             };
         }
+        // Download permission cannot be introduced by a planner, supervisor
+        // or downloaded page. Block proposals without the user's request
+        // and a matching live link or exact URL they explicitly supplied.
+        if let BrowserAction::Download{url,..}=&action {
+            if !download_authorized_by_goal(&goal,&snapshot,url){
+                decision=PolicyDecision::Deny{
+                    reason:"The user did not request a download from this observed link".into(),
+                };
+            }
+        }
         if let BrowserAction::Complete { .. } = &action {
             if let Err(reason) = orchestrator.can_complete(&snapshot) {
                 decision = PolicyDecision::Deny {
@@ -3797,6 +3831,26 @@ mod production_safety_tests {
             goal, &before.origin, &before, &wrong, &observed).is_err());
     }
 
+    #[test]
+    fn casual_conversation_never_authorizes_a_download(){
+        let page=DomSnapshot{structure:Default::default(),origin:"about:blank".into(),
+            title:"New Tab".into(),text_excerpt:String::new(),interactive_nodes:vec![]};
+        for message in ["whats up","hi","what's up?","how do I download a PDF?",
+            "Summarize downloading files","check for open tabs"]{
+            assert!(!download_authorized_by_goal(message,&page,"https://example.org/file.pdf"));
+        }
+        assert!(!download_authorized_by_goal("download the report",&page,
+            "https://example.org/file.pdf"),"Unobserved file target must not be guessed");
+        assert!(download_authorized_by_goal(
+            "download https://example.org/file.pdf",&page,
+            "https://example.org/file.pdf"));
+        assert!(!download_authorized_by_goal(
+            "download https://example.org/file.pdf",&page,
+            "https://unrelated.example/file.pdf"));
+        assert!(!download_authorized_by_goal(
+            "download https://example.org/file.pdf",&page,
+            "http://example.org/file.pdf"));
+    }
     #[test]
     fn first_google_result_is_selected_from_verified_live_links_only(){
         use crate::agent::dom_extractor::DomNodeSummary;
