@@ -623,26 +623,63 @@ struct NamedComparisonSelection {
 #[serde(deny_unknown_fields)]
 struct NamedComparisonPick { name:String, ids:Vec<String> }
 
+/// A rationale-only correction must not switch the recommendation or the
+/// immutable passage IDs after seeing a verifier rejection.
+pub fn named_comparison_rationale_only_repair(original:&str,repaired:&str)->Result<String,String>{
+    let before:NamedComparisonSelection=serde_json::from_str(original.trim())
+        .map_err(|_|"Original named comparison selection JSON is invalid")?;
+    let after:NamedComparisonSelection=serde_json::from_str(repaired.trim())
+        .map_err(|_|"Corrected named comparison selection JSON is invalid")?;
+    let signature=|choice:&NamedComparisonSelection|{
+        let mut names=choice.picks.iter().map(|pick|{
+            let mut ids=pick.ids.clone();
+            ids.sort();
+            (pick.name.to_ascii_lowercase(),ids)
+        }).collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    if before.recommended!=after.recommended||signature(&before)!=signature(&after){
+        return Err("Rationale correction changed the recommended option or evidence passage IDs".into());
+    }
+    Ok(repaired.to_string())
+}
+
 fn named_free_candidates(goal:&str,source:&SourceEvidence)->Vec<Passage>{
-    candidate_passages(goal,source).into_iter().filter(|p|{
+    let mut candidates=candidate_passages(goal,source).into_iter().filter(|p|{
         let lower=p.text.to_ascii_lowercase();
         !["everything in free, and","everything in free forever, plus",
           "everything in free, plus","regular price","billed yearly",
           "billed annually","per user per month"].iter().any(|x|lower.contains(x))
-    }).take(7).collect()
+    }).collect::<Vec<_>>();
+    // Show explicitly free-tier evidence first. Small local selectors may
+    // otherwise spend their limited IDs on unrelated feature passages.
+    // Original passage IDs and full captured text remain unchanged.
+    candidates.sort_by_key(|p|!p.text.to_ascii_lowercase().contains("free"));
+    candidates.truncate(7);
+    candidates
+}
+fn best_named_free_source<'a>(goal:&str,sources:&'a [SourceEvidence],name:&str)->Option<&'a SourceEvidence>{
+    let brand=name.to_ascii_lowercase().replace([' ','-'],"");
+    sources.iter().filter(|s|web_url(&s.url).and_then(|u|u.host_str().map(str::to_owned))
+        .is_some_and(|host|host.strip_prefix("www.").unwrap_or(&host)
+            .split('.').next()==Some(brand.as_str())))
+        .max_by_key(|s|{
+            let has_free=named_free_candidates(goal,s).iter()
+                .any(|p|p.text.to_ascii_lowercase().contains("free"));
+            (has_free,s.url.to_ascii_lowercase().contains("pricing"),s.excerpt.len())
+        })
 }
 pub fn named_comparison_catalog(goal:&str,sources:&[SourceEvidence])->Option<serde_json::Value>{
     let names=super::deliberation::named_research_entities(goal);
     if names.len()<2{return None}
     let mut rows=Vec::new();
     for name in &names {
-        let source=sources.iter().find(|s|web_url(&s.url).and_then(|u|u.host_str().map(str::to_owned))
-            .is_some_and(|host|host.strip_prefix("www.").unwrap_or(&host)
-                .split('.').next()==Some(name.to_ascii_lowercase().replace([' ','-'],"").as_str())))?;
-        let candidates=candidate_passages(goal,source);
+        let source=best_named_free_source(goal,sources,name)?;
+        let candidates=named_free_candidates(goal,source);
         if candidates.is_empty(){return None}
         rows.push(serde_json::json!({"name":name,"title":source.title,
-            "candidates":candidates.into_iter().take(7).collect::<Vec<_>>()}));
+            "candidates":candidates}));
     }
     Some(serde_json::json!({"original_goal":goal,"sources":rows,
         "instruction":"Select 1-2 directly relevant passage IDs PER source. Compare free-plan constraints for the requested team size. Recommend only one of the names. If evidence does not establish suitability, leave recommended and rationale empty."}))
@@ -660,9 +697,7 @@ pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Re
         let row=choice.picks.iter().find(|p|p.name.eq_ignore_ascii_case(name))
             .ok_or("Named comparison omitted a source")?;
         if !(1..=2).contains(&row.ids.len()){return Err("Choose one or two passages per source".into());}
-        let page=sources.iter().find(|s|web_url(&s.url).and_then(|u|u.host_str().map(str::to_owned))
-            .is_some_and(|host|host.strip_prefix("www.").unwrap_or(&host)
-                .split('.').next()==Some(name.to_ascii_lowercase().replace([' ','-'],"").as_str())))
+        let page=best_named_free_source(goal,sources,name)
             .ok_or("Named source was not observed")?;
         let candidates=named_free_candidates(goal,page);
         let mut free_tier_quote=false;
@@ -684,6 +719,23 @@ pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Re
             }
             findings.push(GroundedFinding{claim:passage.text.clone(),quote:passage.text.clone(),url:page.url.clone()});
         }
+        if !free_tier_quote {
+            // A small model may choose a valid team-related quote but omit
+            // the explicit FREE-tier passage in the same captured catalog.
+            // Recover only by copying an original, source-exact, non-upgrade
+            // passage. Never synthesize missing source evidence.
+            let observed_free=candidates.iter().find(|p| {
+                let low=p.text.to_ascii_lowercase();
+                low.contains("free") && page.excerpt.contains(&p.text)
+                    && !["everything in free, and","everything in free forever, plus",
+                        "everything in free, plus","regular price","per user per month",
+                        "billed yearly","billed annually"].iter().any(|paid|low.contains(paid))
+            }).ok_or_else(||format!("No explicitly free-tier passage selected for {name}"))?;
+            if !findings.iter().any(|f|f.url==page.url&&f.quote==observed_free.text){
+                findings.push(GroundedFinding{claim:observed_free.text.clone(),
+                    quote:observed_free.text.clone(),url:page.url.clone()});
+            }
+        }
     }
     if choice.recommended.trim().is_empty()||!names.iter().any(|n|n.eq_ignore_ascii_case(choice.recommended.trim())){
         return Err("No verified recommendation from the named alternatives".into())
@@ -696,6 +748,19 @@ pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Re
     let quoted=findings.iter().map(|f|f.quote.as_str()).collect::<Vec<_>>().join(" ");
     if !numbers(&choice.rationale).is_subset(&numbers(&quoted)){
         return Err("Recommendation cites numerical limits missing from the selected evidence".into())
+    }
+    let chosen=choice.recommended.trim();
+    let winning_quotes=findings.iter().filter(|f|web_url(&f.url).and_then(|u|u.host_str().map(str::to_owned))
+        .is_some_and(|host|host.strip_prefix("www.").unwrap_or(&host)
+            .split('.').next()==Some(chosen.to_ascii_lowercase().replace([' ','-'],"").as_str())))
+        .map(|f|f.quote.to_ascii_lowercase()).collect::<Vec<_>>().join(" ");
+    let rationale=choice.rationale.to_ascii_lowercase();
+    let rationale_words=rationale.split(|c:char|!c.is_alphanumeric()).filter(|w|!w.is_empty())
+        .collect::<Vec<_>>();
+    for pair in rationale_words.windows(2){
+        if pair[0]=="unlimited" && !winning_quotes.contains(&format!("unlimited {}",pair[1])){
+            return Err("Recommendation asserts an unlimited feature absent from its cited source".into())
+        }
     }
     let draft=serde_json::json!({"status":"verified","findings":findings,
         "uncertainty":"Comparison uses captured official-site text. Webpage claims are not independently fact-checked."});
@@ -720,6 +785,47 @@ mod named_comparison_selection_tests{
             SourceEvidence{url:"https://clickup.com/pricing".into(),title:"ClickUp Free Pricing".into(),
                 excerpt:"ClickUp Free Forever plan includes collaborative tasks for unlimited members. The Free plan offers limited storage.".into()}
         ]
+    }
+    #[test]
+    fn prefers_observed_free_tier_pricing_page_over_generic_brand_homepage(){
+        let mut pages=sources();
+        pages.insert(1,SourceEvidence{url:"https://trello.com/".into(),
+            title:"Trello Homepage".into(),excerpt:
+                "Trello helps teams organize collaborative boards and project tasks.".into()});
+        let selected=best_named_free_source(GOAL,&pages,"Trello").unwrap();
+        assert_eq!(selected.url,"https://trello.com/en/pricing");
+        let catalog=named_comparison_catalog(GOAL,&pages).unwrap();
+        assert!(catalog["sources"].as_array().unwrap().iter().any(|row|
+            row["name"]=="Trello"&&row["title"]=="Trello Free Pricing"));
+    }
+    #[test]
+    fn rationale_correction_cannot_change_passage_ids_or_winner(){
+        let source=sources();
+        let initial=serde_json::json!({
+            "picks":[
+                {"name":"Notion","ids":["p1"]},
+                {"name":"Trello","ids":["p1"]},
+                {"name":"ClickUp","ids":["p1"]}
+            ],
+            "recommended":"Trello",
+            "rationale":"Trello gives unlimited storage for every member of the team."
+        });
+        assert!(named_comparison_report(GOAL,&source,&initial.to_string())
+            .unwrap_err().contains("unlimited feature absent"));
+        let mut edited=initial.clone();
+        edited["rationale"]=serde_json::json!(
+            "Trello Free plan includes unlimited cards and up to 10 collaborators per workspace."
+        );
+        let corrected=named_comparison_rationale_only_repair(
+            &initial.to_string(),&edited.to_string()).unwrap();
+        assert!(named_comparison_report(GOAL,&source,&corrected).is_ok());
+        edited["recommended"]=serde_json::json!("ClickUp");
+        assert!(named_comparison_rationale_only_repair(
+            &initial.to_string(),&edited.to_string()).is_err());
+        edited["recommended"]=serde_json::json!("Trello");
+        edited["picks"][1]["ids"]=serde_json::json!(["p2"]);
+        assert!(named_comparison_rationale_only_repair(
+            &initial.to_string(),&edited.to_string()).is_err());
     }
     #[test]
     fn comparison_selection_requires_every_real_named_source(){

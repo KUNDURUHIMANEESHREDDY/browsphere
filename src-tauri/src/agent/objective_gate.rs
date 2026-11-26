@@ -105,6 +105,8 @@ fn relevant_navigation(goal:&str,page:&DomSnapshot,url:&str)->bool{
     if super::policy::requested_navigation_url(goal).is_some_and(|u|u.as_str()==url){return true;}
     if super::policy::course_search_matches_source(goal,&page.origin,url){return true;}
     if super::policy::public_research_bootstrap(goal,&page.origin).is_some_and(|u|u.as_str()==url){return true;}
+    if super::policy::public_research_fallback(goal,&page.origin).is_some_and(|u|u.as_str()==url){return true;}
+    if super::policy::public_offtopic_search(goal,page).is_some_and(|u|u.as_str()==url){return true;}
     if super::deliberation::named_research_entities(goal).iter().enumerate()
        .any(|(stage,_)|super::policy::named_research_waypoint(goal,stage).is_some_and(|u|u.as_str()==url)){return true;}
     if super::policy::requested_search_entry_url(goal).is_some_and(|u|u.as_str()==url){return true;}

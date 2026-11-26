@@ -124,6 +124,17 @@ async function main(){
     litellm_url:endpoint,litellm_model:model,domain_overrides:{}};
   try{
     await evaluate("(async()=>{const c=await window.__TAURI__.core.invoke('get_router_config');Object.assign(c,"+JSON.stringify(config)+");await window.__TAURI__.core.invoke('update_router_config',{config:c});window.__siteEvents=[];for(const n of ['agent:trace','agent:run_status','agent:run_error','agent:verification_report','agent:approval_required','agent:stage'])await window.__TAURI__.event.listen(n,e=>window.__siteEvents.push({kind:n,payload:e.payload}));return true})()");
+    if(process.env.LUCIA_CLOUD_PROBE_ONLY==='1'){
+      try{
+        const outcome=await evaluate("(async()=>{try{return {ok:true,message:await window.__TAURI__.core.invoke('test_model_connection',{backend:'cloud-agent'})}}catch(e){return {ok:false,error:String(e)}}})()");
+        console.log('CLOUD_AGENT_PROBE',JSON.stringify({passed:outcome.ok,model,message:String(outcome.message||'').slice(0,140),error:String(outcome.error||'').slice(0,500)}));
+        if(!outcome.ok)process.exitCode=1;
+      }catch(e){
+        console.log('CLOUD_AGENT_PROBE',JSON.stringify({passed:false,model,error:String(e).slice(0,250)}));
+        process.exitCode=1;
+      }
+      return;
+    }
     async function state(){
       return evaluate("(async()=>{const s=await window.__TAURI__.core.invoke('capture_live_snapshot');return {url:s?.origin||'',title:(s?.title||'').slice(0,150),controls:s?.interactive_nodes?.length||0,excerptLength:s?.text_excerpt?.length||0,tabUrl:window.browsphereApp.activeTab()?.url}})()");
     }

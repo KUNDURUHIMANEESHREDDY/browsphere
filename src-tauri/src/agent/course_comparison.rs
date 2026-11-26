@@ -112,11 +112,16 @@ pub fn source_hosts(goal:&str,sources:&[SourceEvidence])->Vec<String>{
 /// never as verified; the final ledger preserves the stronger fact checks.
 pub fn next_search(goal:&str,sources:&[SourceEvidence],current:&str)->Option<Url>{
     let required=count(goal)?;
-    let hosts=sources.iter().filter_map(|s|{
-        course_page(goal,s).then(||site(&s.url)).flatten()
-    }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
-    if hosts.is_empty()||hosts.len()>=required{return None;}
-    if !site(current).is_some_and(|h|hosts.contains(&h)){return None;}
+    // A live search-result click may land on a readable but irrelevant
+    // article. Record that actually visited public site for exclusion, even
+    // though it contributes ZERO evidence toward the required course facts.
+    // Keep the number of alternate-site searches bounded.
+    let visited=sources.iter().filter_map(|s|site(&s.url))
+        .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+    let current_host=site(current)?;
+    if !visited.contains(&current_host)||visited.len()>=required+2{return None;}
+    if source_hosts(goal,sources).len()>=required{return None;}
+    let hosts=visited;
     let mut query=String::from("beginner free programming course certificate duration");
     if goal.to_ascii_lowercase().contains("python"){query=String::from("beginner free Python course certificate duration");}
     for host in hosts.iter().take(5){
@@ -283,6 +288,24 @@ mod tests{
         let next=next_search(GOAL,&[s],"https://course.school.edu/python").expect("new source search");
         assert_eq!(next.host_str(),Some("html.duckduckgo.com"));
         assert!(next.query_pairs().any(|(k,v)|k=="q"&&v.contains("-site:school.edu")));
+    }
+    #[test]fn irrelevant_observed_article_recovers_search_without_becoming_evidence(){
+        let wrong=SourceEvidence{url:"https://example.org/articles/python-career-tips".into(),
+            title:"Career advice for programmers".into(),
+            excerpt:"General technology careers and unrelated news.".into()};
+        assert!(source_hosts(GOAL,&[wrong.clone()]).is_empty());
+        let next=next_search(GOAL,&[wrong.clone()],&wrong.url)
+            .expect("actually visited irrelevant article should permit a new research search");
+        assert_eq!(next.host_str(),Some("html.duckduckgo.com"));
+        assert!(next.query_pairs().any(|(k,q)|k=="q"&&q.contains("-site:example.org")));
+        assert!(next_search(GOAL,&[wrong.clone()],"https://unvisited.edu/course/python").is_none());
+        let mut many=vec![wrong];
+        for host in ["one.edu","two.org","three.net","four.com"]{
+            many.push(SourceEvidence{url:format!("https://{host}/article"),
+                title:"Unrelated article".into(),excerpt:"No course information".into()});
+        }
+        assert!(next_search(GOAL,&many,"https://four.com/article").is_none());
+        assert!(source_report(GOAL,&many).is_none());
     }
     #[test]fn search_results_and_unrelated_domains_are_not_evidence(){
         let a=source("www.bing.com");let b=source("alpha.edu");

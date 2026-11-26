@@ -2610,11 +2610,19 @@ async fn start_agent_run(
         return Err("Lucia could not attach to the active browser WebView2 tab.".into());
     }
 
+    let run_id = Uuid::new_v4();
+    // Persist the new run before replacing the active cancellation/target
+    // handles. A database error must not orphan an old live run or leave
+    // a partially installed target pointing at an unrecorded task.
+    if !private_mode {
+        let mut db = state.db.lock().await;
+        db.create_agent_run(&run_id.to_string(), &goal)
+            .map_err(|e| e.to_string())?;
+    }
     if let Some(prev) = state.active_cancel.lock().await.take() {
         prev.cancel();
     }
 
-    let run_id = Uuid::new_v4();
     if !private_mode {
         diagnostics::record("agent", "run_started", serde_json::json!({
             "run_id": run_id.to_string(), "count": max_steps.unwrap_or(20)
@@ -2629,12 +2637,6 @@ async fn start_agent_run(
 
     let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalRequest>(16);
     let (trace_tx, mut trace_rx) = mpsc::channel::<TraceEntry>(64);
-
-    if !private_mode {
-        let mut db = state.db.lock().await;
-        db.create_agent_run(&run_id.to_string(), &goal)
-            .map_err(|e| e.to_string())?;
-    }
 
     let pending_map = state.pending_approvals.clone();
     let app_for_approval = app.clone();

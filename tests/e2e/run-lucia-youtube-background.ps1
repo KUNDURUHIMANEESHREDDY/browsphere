@@ -1,7 +1,7 @@
 # Manual public-site Windows WebView2 regression using the installed local Ollama model.
 # Tests native YouTube search -> first observed watch link in a background Lucia tab.
 # Uses a temporary browser profile, not the user's saved browsing state.
-param([string]$ExecutablePath = "")
+param([string]$ExecutablePath = "", [switch]$OnlyBackground, [switch]$BasicBackground)
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -36,15 +36,21 @@ try {
         Start-Sleep -Milliseconds 450
     }
     if (-not $ready) { throw 'Isolated native browser WebView2 did not become ready.' }
-    & node (Join-Path $root 'tests\e2e\lucia-local-fallback-ui.cjs')
-    if ($LASTEXITCODE -ne 0) {
-        throw "Local Lucia model recovery UI test failed (exit $LASTEXITCODE)."
+    if (-not $OnlyBackground) {
+        & node (Join-Path $root 'tests\e2e\lucia-local-fallback-ui.cjs')
+        if ($LASTEXITCODE -ne 0) {
+            throw "Local Lucia model recovery UI test failed (exit $LASTEXITCODE)."
+        }
     }
-    & node (Join-Path $root 'tests\e2e\lucia-youtube-search.cjs')
-    if ($LASTEXITCODE -ne 0) {
-        throw "Live YouTube background navigation test failed (exit $LASTEXITCODE)."
+    if ($BasicBackground) {
+        & node (Join-Path $root 'tests\e2e\lucia-background-basic.cjs')
+    } else {
+        & node (Join-Path $root 'tests\e2e\lucia-youtube-search.cjs')
     }
-    Write-Host 'PASS: live YouTube search -> first video -> observed watch page in background tab'
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native Lucia background-tab test failed (exit $LASTEXITCODE)."
+    }
+    Write-Host 'PASS: Native Lucia task executed and verified in a background tab'
 } finally {
     if ($appProcess) { Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue }
     Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue

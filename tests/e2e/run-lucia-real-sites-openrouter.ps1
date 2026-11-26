@@ -7,7 +7,8 @@ param(
     [ValidateRange(1,5)][int]$Repeats = 1,
     [string]$ExecutablePath = "",
     [string]$Model = 'inclusionai/ling-3.2-flash:free',
-    [switch]$CheckCatalogOnly
+    [switch]$CheckCatalogOnly,
+    [switch]$CloudProbeOnly
 )
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -58,6 +59,7 @@ $env:LUCIA_TEST_CLOUD_ENDPOINT = $endpoint
 $env:LUCIA_TEST_CLOUD_MODEL = $model
 $env:LUCIA_REAL_SITE = $Site
 $env:LUCIA_REAL_REPEATS = "$Repeats"
+if ($CloudProbeOnly) { $env:LUCIA_CLOUD_PROBE_ONLY = '1' }
 
 $app = $null
 try {
@@ -85,5 +87,6 @@ try {
     foreach ($name in $names) {
         [Environment]::SetEnvironmentVariable($name,$previous[$name],'Process')
     }
+    Remove-Item Env:LUCIA_CLOUD_PROBE_ONLY -ErrorAction SilentlyContinue
     Write-Host 'Closed isolated OpenRouter native test app'
 }

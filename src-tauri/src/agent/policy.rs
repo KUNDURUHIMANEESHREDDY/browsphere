@@ -253,6 +253,58 @@ pub fn public_research_bootstrap(goal: &str, origin: &str) -> Option<Url> {
     Some(url)
 }
 
+/// Recover a public research query if the initial search service redirected
+/// to its unqueried home page. This is a one-way, native, read-only fallback:
+/// the caller must bound attempts and normal policy still applies.
+pub fn public_research_fallback(goal:&str,origin:&str)->Option<Url>{
+    public_research_bootstrap(goal,"about:blank")?;
+    let current=Url::parse(origin).ok()?;
+    if current.scheme()!="https" ||current.host_str()!=Some("html.duckduckgo.com")
+        || !matches!(current.path(),"/"|"/html/"){return None;}
+    if current.query_pairs().any(|(key,_)|key!="q"){return None;}
+    let expected_query=super::course_comparison::discovery_terms(goal)
+        .unwrap_or_else(||goal.trim().to_string());
+    if current.query_pairs().filter(|(key,_)|key=="q")
+        .any(|(_,query)|query.as_ref()!=expected_query){return None;}
+    let mut target=Url::parse("https://www.bing.com/search").ok()?;
+    target.query_pairs_mut().append_pair("q",&expected_query);
+    Some(target)
+}
+
+/// A bounded return to the original user research query from a live,
+/// clearly off-topic public page. The caller must permit this once only;
+/// this helper never authorizes a result or an inferred destination.
+pub fn public_offtopic_search(goal:&str,page:&super::dom_extractor::DomSnapshot)->Option<Url>{
+    if super::course_comparison::count(goal).is_some()
+        ||!super::deliberation::named_research_entities(goal).is_empty(){return None;}
+    public_research_bootstrap(goal,"about:blank")?;
+    let current=Url::parse(&page.origin).ok()?;
+    if current.scheme()!="https"||current.port().is_some()
+        ||!current.username().is_empty()||current.password().is_some(){return None;}
+    let host=current.host_str()?;
+    if ["bing.com","google.com","duckduckgo.com","yahoo.com"].iter()
+        .any(|s|host==*s||host.ends_with(&format!(".{s}"))){return None;}
+    if super::semantic_core::relevance(goal,&format!("{} {}",page.title,
+        page.text_excerpt.chars().take(2500).collect::<String>()))>0{return None;}
+    let mut target=Url::parse("https://www.bing.com/search").ok()?;
+    target.query_pairs_mut().append_pair("q",goal.trim());
+    Some(target)
+}
+/// Permit only the exactly computed user-query recovery on the observed page;
+/// retain approval for every other cross-origin navigation.
+pub fn evaluate_observed_offtopic_search_policy(goal:&str,
+    page:&super::dom_extractor::DomSnapshot,action:&BrowserAction,
+    allowed_domains:&[String])->(RiskLevel,PolicyDecision){
+    let base=evaluate_user_navigation_policy(&page.origin,action,allowed_domains,goal);
+    let (BrowserAction::Navigate{url},PolicyDecision::RequireApproval{..})=(action,&base.1)
+        else{return base};
+    let Some(expected)=public_offtopic_search(goal,page)else{return base};
+    let Ok(actual)=Url::parse(url)else{return base};
+    if actual==expected && actual.host_str().is_some_and(|host|
+        host_matches_allowlist(host,allowed_domains)){
+        (RiskLevel::Low,PolicyDecision::Allow)
+    }else{base}
+}
 /// Check only a read-only query scoped to the current observed course domain.
 pub fn course_search_matches_source(goal:&str,origin:&str,target:&str)->bool{
     if super::course_comparison::count(goal).is_none(){return false;}
@@ -356,6 +408,11 @@ pub fn evaluate_user_navigation_policy(
     let Ok(actual) = Url::parse(url) else { return base };
     if course_search_matches_source(goal,active_origin,url)
         && actual.host_str().is_some_and(|host|host_matches_allowlist(host,allowed_domains)){
+        return (RiskLevel::Low,PolicyDecision::Allow);
+    }
+    let public_fallback=public_research_fallback(goal,active_origin)
+        .is_some_and(|expected|actual==expected);
+    if public_fallback && actual.host_str().is_some_and(|host|host_matches_allowlist(host,allowed_domains)){
         return (RiskLevel::Low,PolicyDecision::Allow);
     }
     let research_bootstrap = public_research_bootstrap(goal,active_origin)
@@ -907,6 +964,51 @@ mod research_bootstrap_tests {
         let url=public_research_bootstrap(goal,"about:blank").expect("read-only visit needs a safe bootstrap");
         assert_eq!(url.host_str(),Some("html.duckduckgo.com"));
         assert!(public_research_bootstrap(goal,"https://example.org").is_none());
+    }
+    #[test] fn course_discovery_fallback_preserves_compact_query(){
+        let goal="Find three free Python courses suitable for beginners from different learning platforms. Check whether they provide free certificates, compare their duration and recommend the best one.";
+        let original=public_research_bootstrap(goal,"about:blank").unwrap();
+        let original_query=original.query_pairs().find(|(k,_)|k=="q").unwrap().1.to_string();
+        assert_ne!(original_query,goal);
+        let fallback=public_research_fallback(goal,original.as_str()).expect("recognized query should permit fallback");
+        assert_eq!(fallback.host_str(),Some("www.bing.com"));
+        assert_eq!(fallback.query_pairs().find(|(k,_)|k=="q").unwrap().1,original_query);
+        assert!(public_research_fallback(goal,"https://html.duckduckgo.com/html/?q=unrelated").is_none());
+        assert!(matches!(evaluate_user_navigation_policy(original.as_str(),
+            &BrowserAction::Navigate{url:fallback.to_string()},&[],goal).1,PolicyDecision::Allow));
+    }
+    #[test] fn off_topic_public_article_only_recovers_exact_original_read_only_search(){
+        let goal="Plan a Sunday outing in Bengaluru for a family of four under INR 2000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary.";
+        let mut page=super::super::dom_extractor::DomSnapshot{
+            origin:"https://www.iana.org/help/example-domains".into(),
+            title:"Example Domains".into(),text_excerpt:"These domains are for documentation examples.".into(),
+            structure:Default::default(),interactive_nodes:vec![]};
+        let target=public_offtopic_search(goal,&page).expect("unrelated article needs recovery");
+        assert_eq!(target.host_str(),Some("www.bing.com"));
+        let action=BrowserAction::Navigate{url:target.to_string()};
+        assert!(matches!(evaluate_observed_offtopic_search_policy(goal,&page,&action,&[]).1,
+            PolicyDecision::Allow));
+        assert!(!matches!(evaluate_observed_offtopic_search_policy(goal,&page,
+            &BrowserAction::Navigate{url:"https://other.example.org".into()},&[]).1,
+            PolicyDecision::Allow));
+        page.title="Bengaluru family attractions and prices".into();
+        assert!(public_offtopic_search(goal,&page).is_none());
+        assert!(public_offtopic_search("Purchase family tickets",&page).is_none());
+        page.origin="https://www.bing.com/search?q=family".into();
+        page.title="Example Domains".into();
+        assert!(public_offtopic_search(goal,&page).is_none());
+    }
+    #[test] fn lost_public_search_query_has_bounded_read_only_fallback(){
+        let g="Plan a Sunday outing in Bengaluru for a family of four under INR 2000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary.";
+        let target=public_research_fallback(g,"https://html.duckduckgo.com/").expect("missing search query should recover");
+        assert_eq!(target.host_str(),Some("www.bing.com"));
+        assert_eq!(target.query_pairs().find(|(k,_)|k=="q").unwrap().1,g);
+        assert!(matches!(evaluate_user_navigation_policy("https://html.duckduckgo.com/",&BrowserAction::Navigate{url:target.into()},&[],g).1,PolicyDecision::Allow));
+        let query_url=public_research_bootstrap(g,"about:blank").unwrap();
+        assert!(public_research_fallback(g,query_url.as_str()).is_some());
+        assert!(public_research_fallback(g,"https://html.duckduckgo.com/html/?q=unrelated").is_none());
+        assert!(public_research_fallback(g,"https://www.bing.com/search").is_none());
+        assert!(public_research_fallback("Buy tickets now","https://html.duckduckgo.com/").is_none());
     }
     #[test] fn planning_with_public_research_bootstraps_without_authorizing_transactions() {
         let goal="Plan a Sunday outing in Bengaluru for a family of four under INR 2,000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary.";

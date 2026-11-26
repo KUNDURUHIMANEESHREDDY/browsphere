@@ -1257,6 +1257,8 @@ async fn run_browser_loop(
     // Never force the same deterministic navigation after it fails. The
     // specialist model must inspect the fresh state and choose recovery.
     let mut direct_navigation_attempted = false;
+    let mut public_research_fallback_attempted = false;
+    let mut public_offtopic_search_attempted = false;
     let mut named_waypoints_attempted=std::collections::HashSet::<usize>::new();
     let mut objectives=crate::agent::semantic_core::ObjectiveLedger::new(&goal);
     // WebView2 may acknowledge navigation before a slow site yields a loaded DOM.
@@ -2207,7 +2209,13 @@ async fn run_browser_loop(
                 if crate::agent::prerequisites::stage_title_matches(&label,&snapshot){None}
                 else{crate::agent::prerequisites::stage_named_link(&label,&snapshot)}
             });
-            let candidate = if let Some(action)=stage_link{
+            let official_plan_link=if orchestrator.specialist()==Specialist::Research {
+                crate::agent::action_intelligence::observed_official_plan_link(
+                    &goal,&snapshot,orchestrator.current)
+            }else{None};
+            let candidate = if let Some(action)=official_plan_link{
+                Some((action,"research:observed_official_plan_link"))
+            }else if let Some(action)=stage_link{
                 Some((action,"semantic_stage_named_link"))
             }else if let Some(url)=next_source {
                 objectives.attempted(&url);
@@ -2301,6 +2309,26 @@ async fn run_browser_loop(
                     .expect("checked above");
                 ("Discover another independent course platform".into(),
                  BrowserAction::Navigate{url:url.to_string()},"course:next_platform".into())
+            } else if !public_research_fallback_attempted
+                && orchestrator.specialist()==Specialist::Research
+                && crate::agent::policy::public_research_fallback(&goal,&snapshot.origin).is_some()
+                && !matches!(crate::agent::page_understanding::classify(&snapshot).kind,
+                    crate::agent::page_understanding::PageKind::SearchResults)
+            {
+                public_research_fallback_attempted=true;
+                let url=crate::agent::policy::public_research_fallback(&goal,&snapshot.origin)
+                    .expect("read-only public search fallback validated");
+                ("Recover the original research query on a second public search provider".into(),
+                    BrowserAction::Navigate{url:url.to_string()},"research:lost_query_fallback".into())
+            } else if !public_offtopic_search_attempted && freshly_observed
+                && orchestrator.specialist()==Specialist::Research
+                && crate::agent::policy::public_offtopic_search(&goal,&snapshot).is_some()
+            {
+                public_offtopic_search_attempted=true;
+                let url=crate::agent::policy::public_offtopic_search(&goal,&snapshot)
+                    .expect("bounded off-topic research fallback validated");
+                ("Return from an unrelated observed page to the user's public research query".into(),
+                    BrowserAction::Navigate{url:url.to_string()},"research:offtopic_public_search_fallback".into())
             } else if freshly_observed
                 && crate::agent::deliberation::named_research_entities(&goal).is_empty()
                 && crate::agent::policy::public_research_bootstrap(&goal,&initial_origin).is_some()
@@ -2636,7 +2664,27 @@ async fn run_browser_loop(
                             }
                         } else { None };
                         if let Some(proposal) = reviewed { proposal }
-                        else if let Some(Err(error)) = primary_error { return Err(error); }
+                        else if let Some(Err(error)) = primary_error {
+                            // Invalid local-model JSON is not itself a reason
+                            // to abandon a read-only course research run when
+                            // a real observed source or search result gives us
+                            // a bounded, native alternative. The ordinary DOM
+                            // binder, route ledger, objective and policy gates
+                            // below still decide whether it can be executed.
+                            let grounded=if freshly_observed
+                                && orchestrator.specialist()==Specialist::Research
+                                && crate::agent::course_comparison::count(&goal).is_some(){
+                                crate::agent::course_comparison::next_search(
+                                    &goal,&orchestrator.evidence,&snapshot.origin)
+                                    .map(|url|BrowserAction::Navigate{url:url.to_string()})
+                                    .or_else(||crate::agent::action_intelligence::grounded_search_result(
+                                        &goal,&snapshot))
+                            } else {None};
+                            if let Some(action)=grounded {
+                                ("Recover an invalid model action with a live observed research route".into(),
+                                    action,"course:invalid_model_action_native_fallback".into())
+                            }else{return Err(error)}
+                        }
                         else {
                             tokio::select! {
                                 _ = cancel.cancelled() => return Ok("cancelled".into()),
@@ -2795,6 +2843,12 @@ async fn run_browser_loop(
             && orchestrator.specialist()!=Specialist::Verification
             && !model_route.contains("research:observed_named_site_navigation")
             && !model_route.contains("named_research_waypoint:user_source")
+            // The native, bounded source-recovery query must not be replaced
+            // by another superficially relevant link on the wrong page.
+            && !model_route.contains("course:next_platform")
+            && !model_route.contains("course:invalid_model_action_native_fallback")
+            && !model_route.contains("research:lost_query_fallback")
+            && !model_route.contains("research:offtopic_public_search_fallback")
             && !(orchestrator.specialist()==Specialist::Research
                 && !crate::agent::deliberation::named_research_entities(&goal).is_empty()) {
             if let Some(mut candidate)=crate::agent::action_intelligence::better_observed_link(
@@ -2905,10 +2959,14 @@ async fn run_browser_loop(
         let (mut risk, mut decision) = if matches!(action, BrowserAction::Navigate { .. }) {
             let named=crate::agent::policy::evaluate_observed_named_site_policy(
                 &snapshot.origin,&action,&allowed_domains,&goal,&snapshot,orchestrator.current);
-            if matches!(named.1,PolicyDecision::RequireApproval{..}){
+            let course=if matches!(named.1,PolicyDecision::RequireApproval{..}){
                 crate::agent::policy::evaluate_observed_course_result_policy(
                     &snapshot.origin,&action,&allowed_domains,&goal,&snapshot)
-            }else{named}
+            }else{named};
+            if matches!(course.1,PolicyDecision::RequireApproval{..}){
+                crate::agent::policy::evaluate_observed_offtopic_search_policy(
+                    &goal,&snapshot,&action,&allowed_domains)
+            }else{course}
         } else {
             evaluate_live_action_policy(&snapshot.origin, &action, &allowed_domains, &snapshot)
         };

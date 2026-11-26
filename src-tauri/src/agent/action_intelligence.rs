@@ -101,6 +101,46 @@ pub fn observed_named_site_result(goal:&str,page:&DomSnapshot,stage:usize)->Opti
     Some(BrowserAction::Navigate{url})
 }
 
+/// Navigate to a pricing/free-plan page only when an official named source
+/// actually exposes that HTTPS link. Do not construct guessed URLs, change
+/// origins, or cross an authentication/checkout boundary.
+pub fn observed_official_plan_link(goal:&str,page:&DomSnapshot,stage:usize)->Option<BrowserAction>{
+    let lower=goal.to_ascii_lowercase();
+    if !super::deliberation::read_only(goal)
+        || !["free plan","free tier","pricing","plans"].iter().any(|s|lower.contains(s))
+        || page.text_excerpt.starts_with("Active dialog:"){return None;}
+    let brand=super::deliberation::named_research_entities(goal)
+        .get(stage)?.to_ascii_lowercase().replace([' ','-'],"");
+    let current=url::Url::parse(&page.origin).ok()?;
+    if current.scheme()!="https"||current.port().is_some(){return None;}
+    let bare=current.host_str()?.strip_prefix("www.").unwrap_or(current.host_str()?);
+    let parts=bare.split('.').collect::<Vec<_>>();
+    if parts.len()!=2||parts[0]!=brand{return None;}
+    if current.path().to_ascii_lowercase().contains("pricing")
+        || current.path().to_ascii_lowercase().contains("/plans"){return None;}
+    let mut candidates=Vec::new();
+    for n in &page.interactive_nodes{
+        if n.is_sensitive||n.is_submit||!(n.role=="link"||n.tag=="a"){continue;}
+        let Some(target)=n.href.as_deref().and_then(|h|url::Url::parse(h).ok())else{continue;};
+        if target.scheme()!="https"||target.origin()!=current.origin()
+            ||target==current||target.fragment().is_some()||!target.username().is_empty()
+            ||target.password().is_some(){continue;}
+        let path=target.path().to_ascii_lowercase();
+        let label=n.label.to_ascii_lowercase();
+        if ["checkout","sign in","sign up","contact sales","billing"].iter()
+            .any(|s|path.contains(&s.replace(' ',""))||label.contains(s)){continue;}
+        let score=if path.contains("pricing"){3}
+            else if path.contains("/plans")||path.contains("/plan/"){2}
+            else if label.contains("pricing")||label=="plans"||label=="free plan"{1}
+            else{0};
+        if score>0{candidates.push((score,target.to_string()));}
+    }
+    candidates.sort_by(|a,b|b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let (score,url)=candidates.first()?.clone();
+    if candidates.iter().any(|(other_score,other_url)|*other_score==score&&*other_url!=url){return None;}
+    Some(BrowserAction::Navigate{url})
+}
+
 /// Decode only a documented read-only public search result redirect.
 pub fn observed_search_destination(origin:&str,href:&str)->Option<String>{
     let base=url::Url::parse(origin).ok()?;
@@ -133,10 +173,19 @@ pub fn grounded_search_result(goal:&str,page:&DomSnapshot)->Option<BrowserAction
         if n.is_sensitive||n.is_submit||(n.role!="link"&&n.tag!="a")||n.label.len()<12
             || unrelated_control(goal,&n.label){continue;}
         let Some(href)=n.href.as_deref()else{continue};
-        let Some(destination)=observed_search_destination(&page.origin,href)else{continue;};
+        let destination=observed_search_destination(&page.origin,href);
+        // Bing wraps ordinary public result links in /ck/a tracking redirects.
+        // Clicking a live topical node is allowed by normal click policy;
+        // never turn the redirect into a trusted factual source URL.
+        let bing_result_redirect=destination.is_none()
+            && host=="www.bing.com"
+            && super::course_comparison::count(goal).is_none()
+            && url::Url::parse(href).ok().is_some_and(|u|
+                u.scheme()=="https"&&u.host_str()==Some("www.bing.com")&&u.path()=="/ck/a");
+        if destination.is_none()&&!bing_result_redirect{continue;}
         if unrelated_search_vertical(goal,href){continue;}
         if super::course_comparison::count(goal).is_some(){
-            let Some(provider)=super::course_comparison::site(&destination)else{continue;};
+            let Some(provider)=destination.as_deref().and_then(super::course_comparison::site)else{continue;};
             if current.query_pairs().any(|(k,q)|k=="q"
                 &&q.contains(&format!("-site:{provider}"))){continue;}
         }
@@ -146,7 +195,7 @@ pub fn grounded_search_result(goal:&str,page:&DomSnapshot)->Option<BrowserAction
         // Require at least two independent task-related terms. Search
         // snippets and advertising labels must not stand in for evidence.
         if matches<2{continue;}
-        let path=url::Url::parse(&destination).ok().map(|u|u.path().to_ascii_lowercase()).unwrap_or_default();
+        let path=url::Url::parse(destination.as_deref().unwrap_or(href)).ok().map(|u|u.path().to_ascii_lowercase()).unwrap_or_default();
         if super::course_comparison::count(goal).is_some()
             && (["/search","/courses","/catalog","/collections","/all-courses"].contains(&path.as_str())
                || ["/blog/","/articles/","/news/","best-free-","best-python-courses","top-python-courses"].iter().any(|p|path.contains(p))
@@ -167,7 +216,7 @@ pub fn grounded_search_result(goal:&str,page:&DomSnapshot)->Option<BrowserAction
             }
             if label.contains("top 10")||label.contains("best courses") {score-=12;}
         }
-        candidates.push((score,n.node_id.clone(),n.label.clone(),destination));
+        candidates.push((score,n.node_id.clone(),n.label.clone(),destination.unwrap_or_else(||href.to_string())));
     }
     candidates.sort_by(|a,b|b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     let (_,node_id,label,url)=candidates.into_iter().next()?;
@@ -364,6 +413,43 @@ mod tests{
         assert!(irrelevant_control(goal,&p,&BrowserAction::Scroll{delta_y:0}));
         assert!(irrelevant_control(goal,&p,&BrowserAction::Click{node_id:"map".into(),element_label:"Attractions map".into(),is_submit:false}));
         assert!(!irrelevant_control("Find attractions on a map",&p,&action));
+    }
+    #[test]
+    fn search_result_redirect_requires_observed_topical_link(){
+        let goal="Plan a Sunday outing in Bengaluru. Find family friendly attractions and ticket prices.";
+        let p=DomSnapshot{
+            origin:"https://www.bing.com/search?q=Bengaluru+family+attractions".into(),
+            title:"Bengaluru family attractions - Search results".into(),
+            text_excerpt:"Search results for family attractions in Bengaluru including sites and ticket information.".into(),
+            structure:Default::default(),
+            interactive_nodes:vec![
+                node("unrelated","Microsoft account",Some("https://www.bing.com/ck/a?p=1")),
+                node("attraction","Family attractions Bengaluru opening hours and ticket prices",Some("https://www.bing.com/ck/a?p=2")),
+            ]
+        };
+        assert!(matches!(grounded_search_result(goal,&p),Some(BrowserAction::Click{node_id,..}) if node_id=="attraction"));
+    }
+    #[test]
+    fn official_free_plan_research_uses_only_observed_safe_pricing_links(){
+        let goal="Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team.";
+        let mut p=page(vec![
+            node("pricing","Pricing",Some("https://www.notion.so/pricing")),
+            node("evil","Pricing",Some("https://notion.evil.com/pricing")),
+            node("login","Sign in",Some("https://www.notion.so/login")),
+        ]);
+        p.origin="https://www.notion.so/".into();
+        p.title="Notion".into();
+        assert!(matches!(observed_official_plan_link(goal,&p,0),
+            Some(BrowserAction::Navigate{url}) if url=="https://www.notion.so/pricing"));
+        assert!(observed_official_plan_link(goal,&p,1).is_none());
+        p.origin="https://www.notion.so/pricing".into();
+        assert!(observed_official_plan_link(goal,&p,0).is_none());
+        p.origin="https://notion.evil.com/".into();
+        assert!(observed_official_plan_link(goal,&p,0).is_none());
+        p.origin="https://www.notion.so/".into();
+        p.interactive_nodes.push(node("alternate","Plans",Some("https://www.notion.so/other-pricing")));
+        assert!(observed_official_plan_link(goal,&p,0).is_none(),
+            "Equally scored distinct official pricing links require disambiguation");
     }
     const GOAL:&str="Find the SQL INSERT command documentation and report its syntax";
     #[test]
