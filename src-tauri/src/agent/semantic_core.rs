@@ -247,7 +247,15 @@ impl RunCore{
     // A different observed state or a different unfinished stage can recover
     // again. An identical stalled state cannot consume another replan.
     pub fn can_replan(&self,page:&DomSnapshot,stage:usize,remaining_steps:u32)->bool{
-        self.escalate()&&remaining_steps>=4&&!self.replanned.contains(&state(page,stage))
+        self.can_replan_with_goal_signal(page,stage,remaining_steps,false)
+    }
+    /// A native requirement plateau may justify replanning even if changing
+    /// page chrome repeatedly caused action-level stalls to reset. Both
+    /// signals share the existing per-state replan budget and permissions.
+    pub fn can_replan_with_goal_signal(&self,page:&DomSnapshot,stage:usize,
+        remaining_steps:u32,goal_plateau:bool)->bool{
+        (self.escalate()||goal_plateau)&&remaining_steps>=4
+            &&!self.replanned.contains(&state(page,stage))
     }
     pub fn mark_replanned(&mut self,page:&DomSnapshot,stage:usize){
         self.replanned.insert(state(page,stage));

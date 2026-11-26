@@ -1080,7 +1080,11 @@ User text: <text>{}</text>"#,
         // duration passages, use Rust-validated extracts rather than an
         // LLM-selected unrelated snippet. Failure falls through to the normal
         // independent reviewer; no evidence or provider is fabricated.
-        if let Some(payload)=crate::agent::evidence_verifier::named_comparison_catalog(goal,sources){
+        let named_free_contract=crate::agent::evidence_verifier::requires_named_free_evidence(goal);
+        let named_catalog=crate::agent::evidence_verifier::named_comparison_catalog(goal,sources);
+        anyhow::ensure!(!named_free_contract||named_catalog.is_some(),
+            "Insufficient observed FREE-tier evidence from every named source; cannot verify a free-plan recommendation");
+        if let Some(payload)=named_catalog{
             // One bounded model selection across all requested official pages.
             // Rust resolves every ID to the immutable WebView evidence; the
             // separate semantic reviewer below still checks overall relevance.

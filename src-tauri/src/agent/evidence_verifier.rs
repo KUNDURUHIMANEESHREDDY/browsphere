@@ -837,6 +837,15 @@ fn best_named_free_source<'a>(goal:&str,sources:&'a [SourceEvidence],name:&str)-
             (has_free,s.url.to_ascii_lowercase().contains("pricing"),s.excerpt.len())
         })
 }
+/// A named-source comparison explicitly requesting FREE tiers must not
+/// fall back to a generic multi-page summary when one provider lacks a real
+/// free-plan passage. That fallback can otherwise cite paid upgrades and
+/// falsely claim a verified free-plan recommendation.
+pub fn requires_named_free_evidence(goal:&str)->bool{
+    super::deliberation::named_research_entities(goal).len()>=2
+        &&goal.split(|c:char|!c.is_ascii_alphanumeric())
+            .any(|word|word.eq_ignore_ascii_case("free"))
+}
 pub fn named_comparison_catalog(goal:&str,sources:&[SourceEvidence])->Option<serde_json::Value>{
     let names=super::deliberation::named_research_entities(goal);
     if names.len()<2{return None}
@@ -998,6 +1007,12 @@ pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Re
     if choice.rationale.trim().len()<20||choice.rationale.len()>500{
         return Err("Recommendation rationale is missing or excessive".into())
     }
+    let rationale_lower=choice.rationale.to_ascii_lowercase();
+    if ["need to compare","still need to compare","needs further research",
+        "not enough evidence","insufficient evidence","cannot determine",
+        "could not verify","unclear whether"].iter().any(|phrase|rationale_lower.contains(phrase)){
+        return Err("Recommendation acknowledges that the required comparison is incomplete".into());
+    }
     // A reasoning model cannot claim numeric or capacity details absent from
     // its selected supporting passages.
     let quoted=findings.iter().map(|f|f.quote.as_str()).collect::<Vec<_>>().join(" ");
@@ -1040,6 +1055,33 @@ mod named_comparison_selection_tests{
             SourceEvidence{url:"https://clickup.com/pricing".into(),title:"ClickUp Free Pricing".into(),
                 excerpt:"ClickUp Free Forever plan includes collaborative tasks for unlimited members. The Free plan offers limited storage.".into()}
         ]
+    }
+    #[test]
+    fn named_free_comparison_cannot_fall_back_to_paid_only_sources(){
+        let goal="Visit the official websites of Alpha, Beta and Gamma. Compare their free repository collaboration limits for a team of four and recommend a suitable platform.";
+        assert!(requires_named_free_evidence(goal));
+        let paid=SourceEvidence{
+            url:"https://alpha.com/pricing".into(),title:"Alpha paid plans".into(),
+            excerpt:"Team Advanced collaboration for organizations $ 4 USD per user per month. Everything in Free, plus paid enterprise features.".into()
+        };
+        let sources=vec![paid,
+            SourceEvidence{url:"https://beta.com/pricing".into(),title:"Beta pricing".into(),
+                excerpt:"Beta Free plan includes up to 10 members per team with shared repositories.".into()},
+            SourceEvidence{url:"https://gamma.com/pricing".into(),title:"Gamma pricing".into(),
+                excerpt:"Gamma Free plan supports collaboration for 5 users in a workspace.".into()}];
+        assert!(named_comparison_catalog(goal,&sources).is_none(),
+            "An upgrade passage cannot substitute for a missing FREE tier");
+        assert!(!requires_named_free_evidence("Explain how repository collaboration works"));
+    }
+    #[test]
+    fn incomplete_recommendation_language_cannot_be_verified(){
+        let sources=sources();
+        let catalog=grounded_named_comparison_catalog(GOAL,&sources).unwrap();
+        let raw=serde_json::json!({"picks":catalog["picks"],
+            "recommended":"Trello",
+            "rationale":"We need to compare the free plans before selecting any option for the team."});
+        assert_eq!(named_comparison_report(GOAL,&sources,&raw.to_string()).unwrap_err(),
+            "Recommendation acknowledges that the required comparison is incomplete");
     }
     #[test]
     fn free_tier_candidates_exclude_paid_upgrade_and_cancellation_snippets(){

@@ -1,0 +1,126 @@
+'use strict';
+// Unfamiliar-site acceptance: the REAL home chatbox dispatches the REAL native
+// task. Neither the browser action nor the independent verifier is mocked.
+// Requires an isolated Browsphere instance with remote debugging enabled.
+// LUCIA_TEST_GOAL and LUCIA_EXPECTED_HOSTS configure the task under test.
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const goal=process.env.LUCIA_TEST_GOAL;
+if(!goal || goal.length>1300)throw Error('Supply a bounded LUCIA_TEST_GOAL');
+const expected=(process.env.LUCIA_EXPECTED_HOSTS||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
+const port=Number(process.env.LUCIA_CDP_PORT||9696);
+const now=()=>new Date().toISOString();
+async function main(){
+ let target;
+ for(let i=0;i<100;i++){
+   try{
+     const pages=await(await fetch('http://127.0.0.1:'+port+'/json',{signal:AbortSignal.timeout(3500)})).json();
+     target=pages.find(p=>p.type==='page'&&p.url?.includes('tauri.localhost'));
+     if(target)break;
+   }catch{}
+   await sleep(300);
+ }
+ if(!target)throw Error('No native app UI exposed over CDP');
+ const ws=new WebSocket(target.webSocketDebuggerUrl);
+ await new Promise((resolve,reject)=>{ws.onopen=resolve;ws.onerror=reject});
+ let seq=0;const pending=new Map();
+ ws.onmessage=e=>{
+   const d=JSON.parse(e.data),p=pending.get(d.id);
+   if(p){pending.delete(d.id);d.error?p.reject(Error(JSON.stringify(d.error))):p.resolve(d.result);}
+ };
+ async function evaluate(expression){
+   const id=++seq;
+   const value=await Promise.race([
+     new Promise((resolve,reject)=>{pending.set(id,{resolve,reject});
+       ws.send(JSON.stringify({id,method:'Runtime.evaluate',
+         params:{expression,awaitPromise:true,returnByValue:true,userGesture:true}}));}),
+     sleep(17000).then(()=>{if(pending.has(id)){pending.delete(id);throw Error('CDP evaluation timeout');}})
+   ]);
+   if(value.exceptionDetails)throw Error(JSON.stringify(value.exceptionDetails));
+   return value.result?.value;
+ }
+ let taskTab;
+ try{
+   let ready=false;
+   for(let i=0;i<55;i++){
+     ready=await evaluate("Boolean(window.aetherBridge?.startLuciaSpecialistTask&&window.__TAURI__?.core?.invoke&&document.getElementById('newTabChatInput'))").catch(()=>false);
+     if(ready)break;await sleep(300);
+   }
+   if(!ready)throw Error('Native chat input is not ready');
+   await evaluate(`(async()=>{
+     window.__orchestratorProbe={launches:[],events:[]};
+     const original=window.aetherBridge.startLuciaSpecialistTask;
+     window.aetherBridge.startLuciaSpecialistTask=function(...args){
+       const entry={goal:args[0],tab:args[3],runId:null};window.__orchestratorProbe.launches.push(entry);
+       return Promise.resolve(original.apply(this,args)).then(runId=>{entry.runId=runId;return runId},error=>{entry.error=String(error);throw error});
+     };
+     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan'])
+       await window.__TAURI__.event.listen(kind,event=>
+         window.__orchestratorProbe.events.push({kind,payload:event.payload}));
+     const config=await window.__TAURI__.core.invoke('get_router_config');
+     config.prefer_local_for_simple=true;config.lucia_cloud_only=false;
+     config.ollama_url='http://127.0.0.1:11434';
+     config.ollama_model='qwen2.5:3b-instruct';
+     config.planner_model='qwen2.5:3b-instruct';
+     config.supervisor_model='lfm3:1.7b';
+     await window.__TAURI__.core.invoke('update_router_config',{config});
+     return true;
+   })()`);
+   await evaluate(`(()=>{
+     const input=document.getElementById('newTabChatInput');
+     input.value=${JSON.stringify(goal)};
+     input.dispatchEvent(new Event('input',{bubbles:true}));
+     input.dispatchEvent(new KeyboardEvent('keydown',
+       {key:'Enter',code:'Enter',bubbles:true,cancelable:true}));
+     return true;
+   })()`);
+   const started=Date.now();
+   let runId=null,finalStatus=null,lastCount=0;
+   while(Date.now()-started<280000){
+     await sleep(1100);
+     const d=await evaluate('({launches:window.__orchestratorProbe.launches,events:window.__orchestratorProbe.events.slice(-160)})');
+     if(d.launches.length){runId=d.launches[0].runId;taskTab=d.launches[0].tab;}
+     const evs=d.events.filter(e=>e.payload?.run_id===runId);
+     const traces=evs.filter(e=>e.kind==='agent:trace');
+     if(traces.length>lastCount){
+       lastCount=traces.length;const e=traces.at(-1).payload;
+       console.log('LIVE_ACTION',JSON.stringify({at:now(),action:e.action?.type,outcome:e.outcome,decision:e.decision}).slice(0,460));
+     }
+     const ended=evs.find(e=>e.kind==='agent:run_status');
+     if(ended){finalStatus=ended.payload.status;break;}
+     if(!runId&&Date.now()-started>40000){
+       const diagnostic=await evaluate("({launches:window.__orchestratorProbe.launches,visible:document.body.innerText.slice(-1800)})");
+       console.log('ADMISSION_DIAGNOSTIC',JSON.stringify(diagnostic).slice(0,2600));
+       throw Error('No native task ID after 40 seconds');
+     }
+   }
+   // Give the independent report channel a bounded chance to arrive after status.
+   await sleep(800);
+   const final=await evaluate('window.__orchestratorProbe');
+   const evs=final.events.filter(e=>e.payload?.run_id===runId);
+   const report=evs.filter(e=>e.kind==='agent:verification_report'&&e.payload.report?.status==='evidence_checked').at(-1)?.payload?.report;
+   const errors=evs.filter(e=>e.kind==='agent:run_error').map(e=>e.payload.message);
+   const replanCount=evs.filter(e=>e.kind==='agent:objective_replan').length;
+   const progress=evs.filter(e=>e.kind==='agent:goal_progress').map(e=>e.payload.progress).at(-1);
+   const hosts=[...new Set((report?.findings||[]).map(f=>{try{return new URL(f.url).hostname.toLowerCase().replace(/^www[.]/,'')}catch{return null}}).filter(Boolean))];
+   const missingHosts=expected.filter(h=>!hosts.some(observed=>observed===h||observed.endsWith('.'+h)));
+   const findings=report?.findings||[];
+   const requiresFree=goal.split(/[^A-Za-z0-9]+/).some(w=>w.toLowerCase()==='free');
+   const paidUpgradeQuote=requiresFree&&findings.some(f=>
+     /everything in free,\s*(?:plus|and)|per user per month|billed annually|billed yearly/i.test(f.quote||''));
+   const missingFreeProof=requiresFree?expected.filter(host=>!findings.some(f=>{
+     try{const actual=new URL(f.url).hostname.toLowerCase();return (actual===host||actual.endsWith('.'+host))&&/\bfree\b/i.test(f.quote)}catch{return false}
+   })):[];
+   const incompleteSummary=/need to compare|still need to compare|cannot determine|insufficient evidence|unclear whether/i.test(report?.summary||'');
+   const passed=final.launches.length===1&&final.launches[0].goal===goal&&Boolean(runId)
+     &&finalStatus==='completed'&&Boolean(report)&&!missingHosts.length
+     &&!paidUpgradeQuote&&!missingFreeProof.length&&!incompleteSummary
+     &&findings.every(f=>f.url&&f.quote&&f.claim);
+   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,progress,findings:findings.length,hosts,missingHosts,paidUpgradeQuote,missingFreeProof,incompleteSummary,summary:report?.summary?.slice(0,500)}));
+   if(!passed)throw Error('Native task failed one or more end-to-end criteria');
+ }finally{
+   try{await evaluate("window.__TAURI__.core.invoke('cancel_agent_run')")}catch{}
+   if(taskTab)try{await evaluate('window.browsphereApp.closeTab('+JSON.stringify(taskTab)+')')}catch{}
+   ws.close();
+ }
+}
+main().catch(e=>{console.error('ORCHESTRATOR_LIVE_FAIL',e.stack||String(e));process.exitCode=1});

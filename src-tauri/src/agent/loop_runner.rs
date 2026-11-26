@@ -1531,6 +1531,7 @@ async fn run_browser_loop(
     let mut auth_recovery_attempts: u8 = 0;
     let mut supervisor_reviews: u8 = 0;
     let mut run_core=crate::agent::semantic_core::RunCore::default();
+    let mut goal_progress=crate::agent::goal_progress::Tracker::default();
     let mut route_ledger=crate::agent::semantic_core::RouteLedger::default();
     let mut review_budget=4u8;
     let mut last_review_step=0u32;
@@ -1633,6 +1634,9 @@ async fn run_browser_loop(
     let mut verification_recoveries=0u8;
     let mut recovery_observation:Option<usize>=None;
     let mut recovery_strategy:Option<crate::agent::replan::RecoveryPlan>=None;
+    // A recovery entered because of missing goal evidence must not be closed
+    // merely because a page changed; require a new native evidence gain.
+    let mut goal_recovery_pending=false;
     publish_graph!(&graph);
     orchestrator.begin();
     let _ = app.emit("agent:plan", serde_json::json!({
@@ -2441,7 +2445,21 @@ async fn run_browser_loop(
         route_ledger.observe(orchestrator.current,&snapshot.origin);
         replacement.set_stage(orchestrator.current);
         let changed=run_core.observe(&snapshot,orchestrator.current);
+        let evidence_gain=goal_progress.observe(orchestrator.current,&requirements);
+        if goal_recovery_pending && evidence_gain {
+            if let Some(id)=recovery_node.take(){
+                graph.complete(id,GraphReceipt::ObservedProgress)?;
+                graph.start(stage_nodes[orchestrator.current])?;
+                recovery_strategy=None;
+                goal_recovery_pending=false;
+                publish_graph!(&graph);
+            }
+        }
         if freshly_observed {objectives.observe(&orchestrator.evidence);}
+        let _=app.emit("agent:goal_progress",serde_json::json!({
+            "run_id":run_id,"step_index":step,"stage":orchestrator.current,
+            "evidence_gain":evidence_gain,"progress":goal_progress.telemetry()
+        }));
         if changed {advisory=None;}
         let (observed_sources,total_sources)=objectives.counts();
         let _=app.emit("agent:objective_state",serde_json::json!({"run_id":run_id,"revision":crate::agent::objective_gate::REVISION,
@@ -2482,7 +2500,7 @@ async fn run_browser_loop(
         if let Some(s)=skill.as_mut(){s.observe(&snapshot);
             let _=app.emit("agent:skill_state",serde_json::json!({"run_id":run_id,"step_index":step,"phase":s.phase,"diagnosis":s.diagnosis,"recovery_strategy":s.recovery_strategy()}));
         }
-        let task_state=format!("{} {} {} {} {} Next objective: {}",run_core.hint(&snapshot,orchestrator.current,orchestrator.plan.stages.len()),objectives.hint(),skill.as_ref().map(|s|s.hint()).unwrap_or_default(),if intelligence.managed(){intelligence.hint()}else{String::new()},requirements.hint(),requirements.next_research_objective().unwrap_or("Independent final verification"));
+        let task_state=format!("{} {} {} {} {} {} Next objective: {}",run_core.hint(&snapshot,orchestrator.current,orchestrator.plan.stages.len()),objectives.hint(),skill.as_ref().map(|s|s.hint()).unwrap_or_default(),if intelligence.managed(){intelligence.hint()}else{String::new()},requirements.hint(),goal_progress.hint(),requirements.next_research_objective().unwrap_or("Independent final verification"));
         let failed_choices=run_core.blocked(&snapshot,orchestrator.current);
         let _=app.emit("agent:orchestration",serde_json::json!({"run_id":run_id,"step_index":step,"page_changed":changed,"stage":orchestrator.current,"stalled":run_core.stalled(),"excluded_choices":failed_choices.len()}));
         // Keep unsupported completion out of the action proposer's choices.
@@ -2525,9 +2543,16 @@ async fn run_browser_loop(
         } else {
             "eligible for independent verification only; never proof of success".to_string()
         };
+        // Stage-scoped coverage: do not replan an already-observed named
+        // source merely because future research stages remain outstanding.
+        let goal_plateau=goal_progress.stalled_for_stage(&requirements,
+            orchestrator.current,
+            orchestrator.specialist()==Specialist::Research);
         // Replan only the unfinished objective after repeated lack of progress.
         if native_objective_action.is_none()&&freshly_observed&&
-            run_core.can_replan(&snapshot,orchestrator.current,step_budget.max(orchestrator.plan.stages.len() as u32*4).saturating_sub(step))&&
+            run_core.can_replan_with_goal_signal(&snapshot,orchestrator.current,
+                step_budget.max(orchestrator.plan.stages.len() as u32*4).saturating_sub(step),
+                goal_plateau)&&
             recovery_node.is_none()&&orchestrator.specialist()!=Specialist::Verification&&
             catalog.is_none()&&!authentication_blocked&&!private_mode&&
             crate::agent::multimodal_perception::independent_discovery_allowed(&snapshot)&&
@@ -2560,6 +2585,10 @@ async fn run_browser_loop(
                 if let Some(plan)=plan{
                 if let Ok((observation,recovery))=graph.replan_with(stage_nodes[orchestrator.current],&plan){
                     run_core.mark_replanned(&snapshot,orchestrator.current);
+                    if goal_plateau{
+                        goal_progress.record_replan();
+                        goal_recovery_pending=true;
+                    }
                     recovery_observation=Some(observation);recovery_node=Some(recovery);recovery_strategy=Some(plan.clone());
                     let _=app.emit("agent:objective_replan",serde_json::json!({"run_id":run_id,"step_index":step,"stage":orchestrator.current,"strategy":strategy,"objective":plan.objective(),"basis":plan.basis(),"revision":graph.revision}));
                     publish_graph!(&graph);
@@ -4122,7 +4151,7 @@ async fn run_browser_loop(
         let stage_acknowledged =
             (ok && matches!(action, BrowserAction::Complete { .. })) || confirmed_submit
                 || (confirmed_navigation && orchestrator.can_complete(&snapshot).is_ok());
-        let is_complete = stage_acknowledged && !cancel.is_cancelled()
+        let is_complete = stage_acknowledged && !goal_recovery_pending && !cancel.is_cancelled()
             && (orchestrator.specialist()!=Specialist::Verification
                 || (matches!(action,BrowserAction::Complete{..})
                     && final_completion_allowed(cancel.is_cancelled(),freshly_observed,true,verified_report.as_ref())));
@@ -4178,7 +4207,8 @@ async fn run_browser_loop(
                 route_ledger.failed_transition(&navigation_from,url);
             }
         }
-        if ok&&progress=="executed"&&(!matches!(action,BrowserAction::Complete{..})||is_complete){
+        if ok&&progress=="executed"&&!goal_recovery_pending&&
+            (!matches!(action,BrowserAction::Complete{..})||is_complete){
             if let Some(id)=recovery_node.take(){
                 graph.complete(id,GraphReceipt::ObservedProgress)?;
                 graph.start(stage_nodes[orchestrator.current])?;
@@ -4187,6 +4217,7 @@ async fn run_browser_loop(
             }
         }
         run_core.record(semantic_attempt,ok && progress=="executed");
+        goal_progress.action_attempted(!matches!(&action,BrowserAction::Complete{..}));
         recent_outcomes.push(format!("{action_kind}: {progress} | {}",
             sanitize_untrusted_page_text(&outcome, 200)));
         if recent_outcomes.len() > 5 {

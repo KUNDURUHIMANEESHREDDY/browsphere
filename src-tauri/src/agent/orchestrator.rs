@@ -465,7 +465,14 @@ impl Orchestrator {
             return Err("Compiled target acquisition objective has not been independently observed".into());
         }
         let mut requirements=super::requirements::Ledger::compile(&self.plan.goal);
-        if requirements.supported{
+        // A multi-source research plan acquires ONE named site per specialist
+        // stage. Requiring the global source ledger to be complete in stage 1
+        // deadlocks the plan before stages 2 and 3 can run. Each acquisition
+        // stage still needs its own observed site (checked below); only the
+        // comparison/verification stages require all source requirements.
+        let staged_named_research=self.specialist()==Specialist::Research &&
+            !super::deliberation::named_research_entities(&self.plan.goal).is_empty();
+        if requirements.supported&&!staged_named_research{
             requirements.refresh(&self.plan.goal,&self.evidence);
             requirements.can_review()?;
         }
@@ -666,6 +673,26 @@ mod explicit_wikipedia_article_plan_tests{
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn each_named_site_stage_can_finish_before_global_source_coverage(){
+        let goal="Visit the official websites of Alpha, Beta and Gamma. Compare their free plans for a team of four and recommend one.";
+        let mut run=Orchestrator::from_plan(plan_task(goal));
+        run.begin();
+        let alpha=snapshot("https://alpha.com/pricing",
+            &"Alpha Free plan includes workspace collaboration for a small team. ".repeat(4));
+        run.observe(&alpha);
+        run.action_outcome(&BrowserAction::Navigate{url:alpha.origin.clone()},true);
+        assert!(run.can_complete(&alpha).is_ok(),"first source stage must not require Beta and Gamma: {:?}",run.can_complete(&alpha));
+        assert!(!run.complete_stage("Observed Alpha"));
+        assert!(run.can_complete(&alpha).is_err(),"second stage cannot reuse Alpha as Beta");
+        let beta=snapshot("https://beta.net/pricing",
+            &"Beta Free plan includes collaboration for teams of four. ".repeat(4));
+        run.observe(&beta);
+        run.action_outcome(&BrowserAction::Navigate{url:beta.origin.clone()},true);
+        assert!(run.can_complete(&beta).is_ok(),"second source should be eligible once Beta observed: {:?}",run.can_complete(&beta));
+        assert!(!run.complete_stage("Observed Beta"));
+        assert!(run.can_complete(&beta).is_err(),"third stage cannot reuse Beta as Gamma");
+    }
     #[test]
     fn named_websites_require_separate_research_stages() {
         let goal="Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the most suitable option.";
