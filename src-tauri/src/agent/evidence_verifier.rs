@@ -775,12 +775,34 @@ pub fn retryable_named_comparison_selection_error(reason:&str)->bool{
     ) || reason.starts_with("No explicitly free-tier passage selected for ")
 }
 fn named_free_candidates(goal:&str,source:&SourceEvidence)->Vec<Passage>{
-    let mut candidates=candidate_passages(goal,source).into_iter().filter(|p|{
-        let lower=p.text.to_ascii_lowercase();
-        !["everything in free, and","everything in free forever, plus",
+    // The generic passage extractor is goal-keyword ranked and capped at 14.
+    // Pricing pages often repeat 'free' in navigation and paid-tier upsells,
+    // crowding the actual FREE plan rows out of that shortlist. Scan the
+    // original captured text for complete standalone FREE-tier passages too.
+    let mut candidates=candidate_passages(goal,source);
+    for (i,raw) in source.excerpt.split_inclusive(['.','!','?','\n']).enumerate(){
+        let passage=raw.trim();
+        if !(35..=225).contains(&passage.chars().count()){continue;}
+        let low=passage.to_ascii_lowercase();
+        if (low.contains("free plan")||low.contains("free forever")
+            ||low.contains("free tier")||low.contains("free workspace")
+            ||low.contains("free membership"))
+            && !candidates.iter().any(|p|p.text==passage){
+            candidates.push(Passage{id:format!("free_{}",i+1),text:passage.to_owned()});
+        }
+    }
+    candidates.retain(|p|{
+        let low=p.text.to_ascii_lowercase();
+        let tier=low.contains("free")
+            && ["plan","forever","tier","member","collaborat","workspace","board","storage","block","user"]
+                .iter().any(|x|low.contains(x));
+        let paid=["everything in free, and","everything in free forever, plus",
           "everything in free, plus","regular price","billed yearly",
-          "billed annually","per user per month"].iter().any(|x|lower.contains(x))
-    }).collect::<Vec<_>>();
+          "billed annually","per user per month","enterprise plan",
+          "cancel anytime","cancellation","free trial","try for free"]
+          .iter().any(|x|low.contains(x));
+        tier&&!paid
+    });
     // Show explicitly free-tier evidence first. Small local selectors may
     // otherwise spend their limited IDs on unrelated feature passages.
     // Original passage IDs and full captured text remain unchanged.
@@ -790,7 +812,10 @@ fn named_free_candidates(goal:&str,source:&SourceEvidence)->Vec<Passage>{
         // plans and collaboration, not generic home-page "try for free"
         // buttons. Original passage IDs, quotes and source URLs are unchanged.
         let score=i32::from(low.contains("free"))*12
+            + i32::from(low.contains("free plan")||low.contains("free forever")||low.contains("free tier"))*20
             + i32::from(low.contains("plan")||low.contains("tier")||low.contains("forever"))*8
+            + i32::from(low.chars().any(|c|c.is_ascii_digit())&&
+                ["member","collaborator","user","workspace"].iter().any(|s|low.contains(s)))*12
             + i32::from(["member","collaborat","workspace","user","board","block"]
                 .iter().any(|s|low.contains(s)))*6
             + i32::from(["pricing","limit","storage","task","team"]
@@ -1015,6 +1040,19 @@ mod named_comparison_selection_tests{
             SourceEvidence{url:"https://clickup.com/pricing".into(),title:"ClickUp Free Pricing".into(),
                 excerpt:"ClickUp Free Forever plan includes collaborative tasks for unlimited members. The Free plan offers limited storage.".into()}
         ]
+    }
+    #[test]
+    fn free_tier_candidates_exclude_paid_upgrade_and_cancellation_snippets(){
+        let page=SourceEvidence{
+            url:"https://trello.com/en/pricing".into(),title:"Trello pricing".into(),
+            excerpt:"Cancel anytime from an Enterprise plan; compare other plans. Free plan includes up to 10 collaborators per workspace. Everything in Free, and premium automation applies to paid upgrades. Free trial cancellation can happen online.".into()
+        };
+        let found=named_free_candidates(GOAL,&page);
+        assert!(!found.is_empty());
+        assert!(found.iter().any(|p|p.text.contains("Free plan includes up to 10 collaborators")));
+        assert!(found.iter().all(|p|!p.text.to_ascii_lowercase().contains("cancellation")&&
+            !p.text.to_ascii_lowercase().contains("everything in free, and")));
+        assert!(found.iter().all(|p|page.excerpt.contains(&p.text)));
     }
     #[test]
     fn grounded_recommendation_uses_only_native_source_passage_ids(){

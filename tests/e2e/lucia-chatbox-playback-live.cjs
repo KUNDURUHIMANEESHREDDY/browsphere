@@ -82,6 +82,7 @@ async function main() {
       const data=await evaluate(`({launches:window.__chatPlayback.launches,events:window.__chatPlayback.events.slice(-90)})`);
       if (data.launches.length) { runId=data.launches[0].runId;taskTab=data.launches[0].tab; }
       if(i===12&&!data.launches.length)throw Error('Chatbox did not dispatch a task within 13 seconds');
+      if(i===30&&!runId)throw Error('Native task admission did not return a run ID within 31 seconds');
       const evs=data.events.filter(e=>e.payload?.run_id===runId);
       const traces=evs.filter(e=>e.kind==='agent:trace');
       // Diagnostic only: test whether hidden WebView2 throttles media loading.

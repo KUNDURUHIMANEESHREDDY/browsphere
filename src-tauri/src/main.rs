@@ -2560,8 +2560,22 @@ async fn start_agent_run(
     // otherwise use an already configured cloud provider with credentials.
     // Never silently change the saved AI & ML settings.
     let task_router=configured_router.task_route_with_memory(&snapshot.origin,&state.creds);
-    task_router.preflight_agent_model(&snapshot.origin).await
-        .map_err(|e|e.to_string())?;
+    if !is_private.unwrap_or(false) { diagnostics::record("agent", "run_admission", serde_json::json!({"stage":"model_preflight_start"})); }
+    let admission=tokio::time::timeout(std::time::Duration::from_secs(12),
+        task_router.preflight_agent_model(&snapshot.origin)).await;
+    match admission {
+        Ok(Ok(())) => {
+            if !is_private.unwrap_or(false) { diagnostics::record("agent", "run_admission", serde_json::json!({"stage":"model_preflight_ok"})); }
+        }
+        Ok(Err(e)) => {
+            if !is_private.unwrap_or(false) { diagnostics::record("agent", "run_admission", serde_json::json!({"stage":"model_preflight_failed"})); }
+            return Err(e.to_string());
+        }
+        Err(_) => {
+            if !is_private.unwrap_or(false) { diagnostics::record("agent", "run_admission", serde_json::json!({"stage":"model_preflight_timeout"})); }
+            return Err("Lucia model preflight timed out; task was not started. Check the selected model service.".into());
+        }
+    }
     let private_mode = is_private.unwrap_or(false);
     let memory_enabled = allow_learning.unwrap_or(false) && !private_mode;
 
@@ -2588,10 +2602,12 @@ async fn start_agent_run(
         };
         let mut bounds = state.tabs.bounds.lock().await.clone();
         bounds.hidden = true;
+        if !is_private.unwrap_or(false) { diagnostics::record("agent", "run_admission", serde_json::json!({"stage":"background_tab_create_start"})); }
         open_or_navigate_tab_inner(
             app.clone(), app.state::<Arc<AppState>>(), tab_id.clone(),
             start_url.clone(), Some(bounds), Some(private_mode), false,
         ).await?;
+        if !is_private.unwrap_or(false) { diagnostics::record("agent", "run_admission", serde_json::json!({"stage":"background_tab_create_ok"})); }
         if start_url == "about:blank" {
             DomSnapshot {
                 structure: Default::default(), origin: "about:blank".into(), title: String::new(),
