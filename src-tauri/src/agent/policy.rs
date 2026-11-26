@@ -280,7 +280,7 @@ pub fn requested_search_entry_url(goal: &str) -> Option<Url> {
 /// observed, bound to the actual destination, and independently verified.
 pub fn named_pricing_recovery_waypoint(goal:&str,stage:usize,origin:&str)->Option<Url>{
     if !super::deliberation::read_only(goal) ||
-        !goal.to_ascii_lowercase().contains("free plan"){return None;}
+        !super::evidence_verifier::requires_named_free_evidence(goal){return None;}
     let names=super::deliberation::named_research_entities(goal);
     let name=names.get(stage)?;
     let current=Url::parse(origin).ok()?;

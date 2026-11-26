@@ -67,3 +67,24 @@ These safeguards are conservative. Some real websites do not publish a numeric f
 - An earlier repeat halted at the repeated-action guard before the first source; a guarded, distinct observed-control fallback was added. One later live run progressed past that point, but repeated success is not established.
 - These results verify bounded recovery and rejection of unsupported completion; they do NOT prove general autonomy, repeated pass reliability, or verified factual correctness of every real-world claim.
 - Installed app and origin/main are intentionally left unchanged until live acceptance is repeatably green.
+
+## Fact-directed research before synthesis (26 November 2026)
+
+For user-named, read-only FREE-tier comparison objectives, Lucia compiles a provider-specific fact checklist before executing research. Every named provider requires an observed official source, a direct FREE-tier source passage, and—when the original goal asks about teams—a source-exact member/collaborator capacity passage. The checklist is a candidate-evidence gate, not independent proof of external factual truth.
+
+The Research specialist cannot hand off on a page visit or generic FREE banner alone. The Comparison and Verification specialists cannot start or finish while any named-source fact remains missing. Each source's missing fact is exposed in `agent:fact_dependencies` telemetry without raw page text. The existing independent evidence verifier and purchase/form restrictions remain authoritative.
+
+`src-tauri/src/agent/fact_research.rs` provides bounded, goal-derived source acquisition: choose an actual observed HTTPS link to the named official domain, including an observed official homepage result; then open only observed same-origin free-plan/pricing links, or a single source-scoped public Bing discovery waypoint. Search results receive bounded hydration observations, cannot count as official factual evidence, and lookalike/cross-domain/auth or checkout links are rejected. Neither the planner nor the model can invent an official destination or bypass native policy.
+
+An additional policy mismatch was repaired in `objective_gate.rs`: the exact `named_pricing_recovery_waypoint` previously allowed by the navigation policy was rejected by the later research objective gate. Only the exact query from the user-named official source is now accepted. Unrelated queries and nonofficial origins remain rejected by regression tests.
+
+The live chatbox harness records both action route diagnostics and source-by-source fact dependencies. A completed run requires an independently evidence-checked report, supported official source quotes, actual requested team-capacity facts, and no paid-plan pricing used to justify a free-plan recommendation. Conservative missing-fact detection may leave legitimate tasks unverified until the original website presents sufficiently explicit data; that is preferable to unsupported success.
+
+### 26 November 2026 validation of fact-directed acquisition
+
+- Full Rust regression suite following the fact-directed gate and bounded unreadable-page observation: **501 passed, 0 failed, 12 ignored**. JavaScript acceptance harness syntax and Git whitespace checks also passed.
+- Rebuilt development executable with the new fact-directed core (not the installed release). The exact previously denied official-plan research navigation was verified as `confirmed` in the live native browser, and the `facts:directed_source_acquisition` action route opened genuinely observed official links.
+- Live W1 Notion/Trello/ClickUp: **unverified**. Reached two named official sources; source-dependent checklist reported Trello Free candidate evidence but missing a source-exact collaborator/member limit, and ClickUp not yet researched. Bounded acquisition ended without inventing the missing fact or a recommendation. This is **not a demo task pass**.
+- Separate unfamiliar GitHub/GitLab/Bitbucket test: **unverified**. Reached GitHub with Free-tier candidate text but no exact free-tier collaborator-limit fact; later named sites remained missing. Bounded acquisition stopped safely. This is **not a demo task pass**.
+- Limitations: strict per-source acquisition currently stops when a named provider exhausts allowed research paths, rather than continuing independent source visits and globally revisiting the missing provider at the end. Dynamic pricing tables may omit capacity evidence from captured WebView text. Both must be improved before repeated autonomous comparison completion can be claimed.
+- No installed application, release installer, or `main` branch is updated by this change. The development and tests were conducted against an isolated debug executable. The independent verifier and browser permissions remain unchanged.

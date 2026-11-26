@@ -142,7 +142,9 @@ fn relevant_navigation(goal:&str,page:&DomSnapshot,url:&str)->bool{
     if super::policy::public_research_fallback(goal,&page.origin).is_some_and(|u|u.as_str()==url){return true;}
     if super::policy::public_offtopic_search(goal,page).is_some_and(|u|u.as_str()==url){return true;}
     if super::deliberation::named_research_entities(goal).iter().enumerate()
-       .any(|(stage,_)|super::policy::named_research_waypoint(goal,stage).is_some_and(|u|u.as_str()==url)){return true;}
+       .any(|(stage,_)|super::policy::named_research_waypoint(goal,stage).is_some_and(|u|u.as_str()==url)
+           ||super::policy::named_pricing_recovery_waypoint(goal,stage,&page.origin)
+               .is_some_and(|u|u.as_str()==url)){return true;}
     if super::policy::requested_search_entry_url(goal).is_some_and(|u|u.as_str()==url){return true;}
     if let Some(subject)=super::deliberation::lookup_subject(goal){return page.interactive_nodes.iter().any(|n|!n.is_sensitive&&!n.is_submit&&n.href.as_deref()==Some(url)&&lookup_link_matches(&subject,&n.label,url));}
     if super::skills::TaskSpec::compile(goal).and_then(|s|s.explicit_repository_url(&page.origin)).as_deref()==Some(url){return true;}
@@ -299,6 +301,19 @@ mod tests{
         assert!(check(goal,&p.origin,&p,&ledger,&BrowserAction::Navigate{url:target.clone()}).is_ok());
         p.origin=target.clone();
         assert!(check(goal,&p.origin,&p,&ledger,&BrowserAction::Navigate{url:target}).is_err());
+    }
+    #[test]fn fact_directed_named_pricing_waypoint_passes_exact_objective_gate(){
+        let goal="Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the best.";
+        let mut p=page();
+        p.origin="https://www.notion.com/".into();p.interactive_nodes.clear();
+        let exact=super::super::policy::named_pricing_recovery_waypoint(goal,0,&p.origin)
+            .expect("read-only official Notion source allows bounded discovery").to_string();
+        let ledger=ObjectiveLedger::new(goal);
+        assert!(check(goal,&p.origin,&p,&ledger,&BrowserAction::Navigate{url:exact.clone()}).is_ok());
+        assert!(check(goal,&p.origin,&p,&ledger,&BrowserAction::Navigate{
+            url:"https://www.bing.com/search?q=unrelated+free+subscription".into()}).is_err());
+        p.origin="https://evil.example/".into();
+        assert!(check(goal,&p.origin,&p,&ledger,&BrowserAction::Navigate{url:exact}).is_err());
     }
     #[test]fn named_first_result_opener_passes_without_relaxing_lookup_safety(){
         let goal="On the current local test page, search for robotics video and open the first result.";

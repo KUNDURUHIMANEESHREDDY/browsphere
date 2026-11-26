@@ -472,6 +472,24 @@ impl Orchestrator {
         // comparison/verification stages require all source requirements.
         let staged_named_research=self.specialist()==Specialist::Research &&
             !super::deliberation::named_research_entities(&self.plan.goal).is_empty();
+        // Compile factual dependencies before allowing a named source stage to
+        // hand off. A visited homepage or generic 'Free' banner cannot stand in
+        // for the user's requested free-tier team capacity. Later stages require
+        // every named provider's source-exact candidate; independent verification
+        // remains the only mechanism that can approve the final recommendation.
+        if let Some(facts)=super::fact_research::Contract::compile(&self.plan.goal){
+            let missing=if staged_named_research{
+                facts.missing_stage(&self.plan.goal,&self.evidence,self.current)
+                    .into_iter().collect::<Vec<_>>()
+            }else if matches!(self.specialist(),Specialist::Comparison|Specialist::Verification){
+                facts.missing(&self.plan.goal,&self.evidence)
+            }else{Vec::new()};
+            if let Some(next)=missing.first(){
+                let facet=if next.needs_team_capacity{"free-tier collaborator/member limit"}
+                    else{"free-tier plan details"};
+                return Err(format!("Missing source-exact {facet} for {} before synthesis",next.source));
+            }
+        }
         if requirements.supported&&!staged_named_research{
             requirements.refresh(&self.plan.goal,&self.evidence);
             requirements.can_review()?;
@@ -679,19 +697,36 @@ mod tests {
         let mut run=Orchestrator::from_plan(plan_task(goal));
         run.begin();
         let alpha=snapshot("https://alpha.com/pricing",
-            &"Alpha Free plan includes workspace collaboration for a small team. ".repeat(4));
+            &"Alpha Free plan includes up to 10 members per team workspace. ".repeat(4));
         run.observe(&alpha);
         run.action_outcome(&BrowserAction::Navigate{url:alpha.origin.clone()},true);
         assert!(run.can_complete(&alpha).is_ok(),"first source stage must not require Beta and Gamma: {:?}",run.can_complete(&alpha));
         assert!(!run.complete_stage("Observed Alpha"));
         assert!(run.can_complete(&alpha).is_err(),"second stage cannot reuse Alpha as Beta");
         let beta=snapshot("https://beta.net/pricing",
-            &"Beta Free plan includes collaboration for teams of four. ".repeat(4));
+            &"Beta Free plan includes up to four members per team workspace. ".repeat(4));
         run.observe(&beta);
         run.action_outcome(&BrowserAction::Navigate{url:beta.origin.clone()},true);
         assert!(run.can_complete(&beta).is_ok(),"second source should be eligible once Beta observed: {:?}",run.can_complete(&beta));
         assert!(!run.complete_stage("Observed Beta"));
         assert!(run.can_complete(&beta).is_err(),"third stage cannot reuse Beta as Gamma");
+    }
+    #[test]
+    fn named_research_stage_blocks_premature_completion_until_exact_team_fact(){
+        let goal="Visit the official websites of Alpha, Beta and Gamma. Compare their free plans for a team of four and recommend one.";
+        let mut run=Orchestrator::from_plan(plan_task(goal));
+        run.begin();
+        let weak=snapshot("https://alpha.com/pricing",
+            &"Alpha Free plan has collaborative tools for small teams. ".repeat(4));
+        run.observe(&weak);
+        run.action_outcome(&BrowserAction::Navigate{url:weak.origin.clone()},true);
+        assert!(run.can_complete(&weak).unwrap_err().contains("collaborator/member limit"));
+        let stronger=snapshot("https://alpha.com/pricing",
+            &"Alpha Free plan allows up to 10 team members in one shared workspace. ".repeat(4));
+        run.observe(&stronger);
+        assert!(run.can_complete(&stronger).is_ok(),"observed source-exact member limit should release only this stage: {:?}",run.can_complete(&stronger));
+        run.complete_stage("Source Alpha facts captured");
+        assert!(run.can_complete(&stronger).is_err(),"Alpha receipt must not satisfy Beta");
     }
     #[test]
     fn named_websites_require_separate_research_stages() {

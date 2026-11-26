@@ -1509,6 +1509,8 @@ async fn run_browser_loop(
     let mut replacement=crate::agent::objective_gate::ReplacementPlanner::default();
     let mut skill=crate::agent::skills::SkillRun::compile(&goal);
     let mut requirements=crate::agent::requirements::Ledger::compile(&goal);
+    let fact_contract=crate::agent::fact_research::Contract::compile(&goal);
+    let mut fact_research=crate::agent::fact_research::Research::default();
     let mut acquisition=crate::agent::evidence_acquisition::Acquisition::default();
     let mut explicit_focus_attempts=std::collections::HashMap::<String,usize>::new();
     let mut explicit_revisits=std::collections::HashSet::<String>::new();
@@ -2209,9 +2211,25 @@ async fn run_browser_loop(
             }
         }
         let _=app.emit("agent:requirement_state",serde_json::json!({"run_id":run_id,"step_index":step,"ledger":&requirements}));
+        if let Some(facts)=fact_contract.as_ref(){
+            let missing=facts.missing(&goal,&orchestrator.evidence);
+            let _=app.emit("agent:fact_dependencies",serde_json::json!({
+                "run_id":run_id,"step_index":step,"remaining":missing.len(),
+                "missing":missing,"eligible_for_synthesis":facts.ready(&goal,&orchestrator.evidence)
+            }));
+        }
         let current_reference=crate::agent::execution_intelligence::current_reference_subject(&goal).is_some();
         let current_reference_ready=current_reference&&snapshot.origin==initial_origin&&
             crate::agent::execution_intelligence::current_reference_observed(&goal,&snapshot,&orchestrator.evidence);
+        let fact_direction=fact_contract.as_ref().and_then(|contract|{
+            if orchestrator.specialist()==Specialist::Research{
+                fact_research.decide(&goal,contract,orchestrator.current,
+                    &orchestrator.evidence,&snapshot)
+            }else if orchestrator.specialist()==Specialist::Comparison
+                && !contract.ready(&goal,&orchestrator.evidence){
+                Some(crate::agent::fact_research::Decision::Stop)
+            }else{None}
+        });
         let intelligence_next=if let Some(repair)=verifier_repair.as_mut().filter(|_|orchestrator.specialist()!=Specialist::Verification){
             if repair.has_new_fact(&orchestrator.evidence){
                 let _=app.emit("agent:verification_recovery",serde_json::json!({"run_id":run_id,"status":"new_candidate_observed","attempts":repair.attempted()}));
@@ -2227,6 +2245,15 @@ async fn run_browser_loop(
                 crate::agent::execution_intelligence::Next::Action(action,"verification:bounded_source_research")
             }else{
                 crate::agent::execution_intelligence::Next::Stop("Independent verification rejected the comparison; no new supporting source facts were observed after bounded research. No completion is claimed.")
+            }
+        }else if let Some(direction)=fact_direction{
+            match direction{
+                crate::agent::fact_research::Decision::Action(action)=>
+                    crate::agent::execution_intelligence::Next::Action(action,"facts:directed_source_acquisition"),
+                crate::agent::fact_research::Decision::Wait=>crate::agent::execution_intelligence::Next::Wait,
+                crate::agent::fact_research::Decision::Stop=>
+                    crate::agent::execution_intelligence::Next::Stop(
+                        "Required free-tier facts are still missing after bounded, source-specific research. No recommendation was generated."),
             }
         }else if let Some(c)=catalog.as_mut().filter(|_|orchestrator.specialist()!=Specialist::Verification){
             if freshly_observed&&!private_mode&&!is_child{

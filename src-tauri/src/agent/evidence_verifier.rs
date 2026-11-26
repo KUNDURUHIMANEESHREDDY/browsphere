@@ -827,7 +827,7 @@ fn named_free_candidates(goal:&str,source:&SourceEvidence)->Vec<Passage>{
     }
     candidates.retain(|p|{
         let low=p.text.to_ascii_lowercase();
-        let tier=low.contains("free")
+        let tier=low.split(|c:char|!c.is_alphanumeric()).any(|word|word=="free")
             && ["plan","forever","tier","member","collaborat","workspace","board","storage","block","user"]
                 .iter().any(|x|low.contains(x));
         tier&&!paid_upgrade_passage(&p.text)
@@ -858,13 +858,37 @@ fn named_free_candidates(goal:&str,source:&SourceEvidence)->Vec<Passage>{
 fn best_named_free_source<'a>(goal:&str,sources:&'a [SourceEvidence],name:&str)->Option<&'a SourceEvidence>{
     let brand=name.to_ascii_lowercase().replace([' ','-'],"");
     sources.iter().filter(|s|web_url(&s.url).and_then(|u|u.host_str().map(str::to_owned))
-        .is_some_and(|host|host.strip_prefix("www.").unwrap_or(&host)
-            .split('.').next()==Some(brand.as_str())))
+        .is_some_and(|host|{
+            let host=host.strip_prefix("www.").unwrap_or(&host);
+            let parts=host.split('.').collect::<Vec<_>>();
+            parts.len()==2 && parts[0].replace('-',"")==brand
+        }))
         .max_by_key(|s|{
-            let has_free=named_free_candidates(goal,s).iter()
-                .any(|p|p.text.to_ascii_lowercase().contains("free"));
-            (has_free,s.url.to_ascii_lowercase().contains("pricing"),s.excerpt.len())
+            let candidates=named_free_candidates(goal,s);
+            let capacity=candidates.iter().any(|p|free_team_capacity_passage(&p.text));
+            let has_free=candidates.iter().any(|p|p.text.to_ascii_lowercase().contains("free"));
+            (capacity,has_free,s.url.to_ascii_lowercase().contains("pricing"),s.excerpt.len())
         })
+}
+/// Candidate receipts for one official named source. These are not independently
+/// verified facts; they are a prerequisite for invoking synthesis and review.
+#[derive(Clone,Debug,Default,PartialEq,Eq)]
+pub struct NamedSourceFactStatus{
+    pub observed:bool,
+    pub has_free_tier:bool,
+    pub has_team_capacity:bool,
+    pub candidate_count:usize,
+}
+pub fn named_source_fact_status(goal:&str,sources:&[SourceEvidence],name:&str)->NamedSourceFactStatus{
+    let Some(source)=best_named_free_source(goal,sources,name)else{return NamedSourceFactStatus::default()};
+    let passages=named_free_candidates(goal,source);
+    NamedSourceFactStatus{
+        // SourceEvidence is only entered by the live browser capture gate.
+        observed:!source.excerpt.trim().is_empty(),
+        has_free_tier:passages.iter().any(|p|p.text.to_ascii_lowercase().contains("free")),
+        has_team_capacity:passages.iter().any(|p|free_team_capacity_passage(&p.text)),
+        candidate_count:passages.len(),
+    }
 }
 /// A named-source comparison explicitly requesting FREE tiers must not
 /// fall back to a generic multi-page summary when one provider lacks a real

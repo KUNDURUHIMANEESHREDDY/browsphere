@@ -53,7 +53,7 @@ async function main(){
        const entry={goal:args[0],tab:args[3],runId:null};window.__orchestratorProbe.launches.push(entry);
        return Promise.resolve(original.apply(this,args)).then(runId=>{entry.runId=runId;return runId},error=>{entry.error=String(error);throw error});
      };
-     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan','agent:verification_recovery'])
+     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan','agent:verification_recovery','agent:fact_dependencies'])
        await window.__TAURI__.event.listen(kind,event=>
          window.__orchestratorProbe.events.push({kind,payload:event.payload}));
      const config=await window.__TAURI__.core.invoke('get_router_config');
@@ -83,7 +83,7 @@ async function main(){
      const traces=evs.filter(e=>e.kind==='agent:trace');
      if(traces.length>lastCount){
        lastCount=traces.length;const e=traces.at(-1).payload;
-       console.log('LIVE_ACTION',JSON.stringify({at:now(),action:e.action?.type,outcome:e.outcome,decision:e.decision}).slice(0,460));
+       console.log('LIVE_ACTION',JSON.stringify({at:now(),action:e.action?.type,outcome:e.outcome,decision:e.decision,route:e.model_route}).slice(0,730));
      }
      const ended=evs.find(e=>e.kind==='agent:run_status');
      if(ended){finalStatus=ended.payload.status;break;}
@@ -103,6 +103,8 @@ async function main(){
    const recoveryEvents=evs.filter(e=>e.kind==='agent:verification_recovery');
    const recoveryStages=recoveryEvents.map(e=>e.payload.status);
    const progress=evs.filter(e=>e.kind==='agent:goal_progress').map(e=>e.payload.progress).at(-1);
+   const lastFactDependencies=evs.filter(e=>e.kind==='agent:fact_dependencies').map(e=>e.payload).at(-1);
+   const factDependencyHistory=evs.filter(e=>e.kind==='agent:fact_dependencies').map(e=>({step:e.payload.step_index,missing:e.payload.missing,ready:e.payload.eligible_for_synthesis}));
    const hosts=[...new Set((report?.findings||[]).map(f=>{try{return new URL(f.url).hostname.toLowerCase().replace(/^www[.]/,'')}catch{return null}}).filter(Boolean))];
    const missingHosts=expected.filter(h=>!hosts.some(observed=>observed===h||observed.endsWith('.'+h)));
    const findings=report?.findings||[];
@@ -129,7 +131,7 @@ async function main(){
      &&finalStatus==='completed'&&Boolean(report)&&!missingHosts.length
      &&!paidUpgradeQuote&&!paidSummary&&!missingFreeProof.length&&!missingCapacityProof.length&&!incompleteSummary
      &&findings.every(f=>f.url&&f.quote&&f.claim);
-   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,recoveryStages,progress,findings:findings.length,hosts,missingHosts,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,summary:report?.summary?.slice(0,500)}));
+   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,recoveryStages,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,summary:report?.summary?.slice(0,500)}));
    if(!passed)throw Error('Native task failed one or more end-to-end criteria');
  }finally{
    try{await evaluate("window.__TAURI__.core.invoke('cancel_agent_run')")}catch{}
