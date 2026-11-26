@@ -1,4 +1,5 @@
 'use strict';
+const fs=require('node:fs'),crypto=require('node:crypto');
 // Unfamiliar-site acceptance: the REAL home chatbox dispatches the REAL native
 // task. Neither the browser action nor the independent verifier is mocked.
 // Requires an isolated Browsphere instance with remote debugging enabled.
@@ -53,7 +54,7 @@ async function main(){
        const entry={goal:args[0],tab:args[3],runId:null};window.__orchestratorProbe.launches.push(entry);
        return Promise.resolve(original.apply(this,args)).then(runId=>{entry.runId=runId;return runId},error=>{entry.error=String(error);throw error});
      };
-     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan','agent:verification_recovery','agent:fact_dependencies'])
+     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan','agent:verification_recovery','agent:fact_dependencies','agent:document_artifact'])
        await window.__TAURI__.event.listen(kind,event=>
          window.__orchestratorProbe.events.push({kind,payload:event.payload}));
      const config=await window.__TAURI__.core.invoke('get_router_config');
@@ -127,11 +128,26 @@ async function main(){
      try{const actual=new URL(f.url).hostname.toLowerCase().replace(/^www\./,'');return actual===host&&capacityQuote(f.quote)}catch{return false}
    })):[];
    const incompleteSummary=/need to compare|still need to compare|cannot determine|insufficient evidence|unclear whether|based on the free plan details/i.test(report?.summary||'');
+   const requiresReport=/\b(?:write|create|prepare) a (?:research )?report\b/i.test(goal)&&/\b(?:research|sources|citations)\b/i.test(goal);
+   const artifact=evs.filter(e=>e.kind==='agent:document_artifact'&&e.payload.status==='readback_verified').at(-1)?.payload?.artifact;
+   let artifactReadbackVerified=false;
+   if(requiresReport&&artifact){
+     try{
+       const raw=fs.readFileSync(artifact.path);
+       const sha=crypto.createHash('sha256').update(raw).digest('hex');
+       const text=raw.toString('utf8');
+       artifactReadbackVerified=artifact.readback_verified===true&&artifact.source_count>=2
+         &&sha===artifact.sha256&&raw.length===artifact.bytes
+         &&findings.every(f=>text.includes(f.url)&&text.includes(
+           String(f.quote).replaceAll('<','&lt;').replaceAll('>','&gt;').replace(/\r?\n/g,'\n> ')));
+     }catch{};
+   }
    const passed=final.launches.length===1&&final.launches[0].goal===goal&&Boolean(runId)
      &&finalStatus==='completed'&&Boolean(report)&&!missingHosts.length
      &&!paidUpgradeQuote&&!paidSummary&&!missingFreeProof.length&&!missingCapacityProof.length&&!incompleteSummary
+     &&(!requiresReport||artifactReadbackVerified)
      &&findings.every(f=>f.url&&f.quote&&f.claim);
-   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,recoveryStages,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,summary:report?.summary?.slice(0,500)}));
+   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,recoveryStages,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,requiresReport,artifactReadbackVerified,summary:report?.summary?.slice(0,500)}));
    if(!passed)throw Error('Native task failed one or more end-to-end criteria');
  }finally{
    try{await evaluate("window.__TAURI__.core.invoke('cancel_agent_run')")}catch{}

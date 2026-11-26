@@ -170,6 +170,25 @@ fn align(contract:&ExplicitContract,stages:&[super::orchestrator::SpecialistStag
     let mut best=None;visit(&scores,0,&mut vec![],0,&mut best);
     match best{Some((_,indices,false))=>Ok(indices),_=>anyhow::bail!("Explicit objective-to-stage alignment is missing or ambiguous")}
 }
+/// Semantic concepts are advisory, never a source of permission. For goals
+/// whose ordering is already captured by the validated specialist stages and
+/// which have NO literal ordered-clause contract, an ungrounded model span may
+/// be discarded rather than aborting browser execution. Native policy still
+/// evaluates the unmodified user goal at every step.
+pub fn ungrounded_advisory_can_fall_back(goal:&str,error:&str,proposal:Option<&SemanticTask>)->bool{
+    let explicit=ExplicitContract::extract(goal);
+    // A proposed fabricated constraint can invert an explicit user negation.
+    // Never ignore the entire proposal in this case; fail closed and let
+    // strict validation reject it. Advisory objective labels are different:
+    // they grant no permissions and can safely be removed.
+    let fabricated_constraint=proposal.is_some_and(|task|task.concepts.iter().any(|c|
+        c.kind==ConceptKind::Constraint &&
+        !goal.to_ascii_lowercase().contains(&c.span.to_ascii_lowercase())));
+    explicit.ordered.is_empty() && !fabricated_constraint &&
+        ["Semantic span has no literal user anchor","Ambiguous semantic span",
+         "Semantic concept must quote an exact span of the original user goal"]
+        .iter().any(|s|error.contains(s))
+}
 impl SemanticTask{
     /// Reconcile native explicit language anchors and a model semantic graph.
     /// Recovered constraints and relationships are strictly user-grounded;
@@ -319,6 +338,16 @@ mod tests{
         serde_json::from_str(r#"{"concepts":[{"kind":"objective","span":"find the guide","stages":[1]},{"kind":"objective","span":"compare versions","stages":[2]},{"kind":"constraint","span":"do not submit","stages":[]},{"kind":"entity","span":"guide","stages":[]}],"relations":[{"from":2,"to":1,"kind":"depends_on"},{"from":3,"to":2,"kind":"qualifies"},{"from":1,"to":4,"kind":"refers_to"}]}"#).unwrap()
     }
     const GOAL:&str="First find the guide, then compare versions; do not submit.";
+    #[test]fn ungrounded_advisory_is_not_mandatory_when_no_explicit_order_contract(){
+        let task="On the current local test website, submit the feedback form, then report the visible feedback confirmation. Do not submit the application form.";
+        assert!(ungrounded_advisory_can_fall_back(task,"Semantic span has no literal user anchor",None));
+        assert!(!ungrounded_advisory_can_fall_back(task,"Semantic relationship violates explicit user ordering",None));
+        assert!(!ungrounded_advisory_can_fall_back("First open the guide, then submit the form; do not purchase.",
+            "Semantic span has no literal user anchor",None));
+        let altered=SemanticTask{concepts:vec![Concept{kind:ConceptKind::Constraint,
+            span:"Submit the application automatically".into(),stages:vec![]}],relations:vec![]};
+        assert!(!ungrounded_advisory_can_fall_back(task,"Semantic span has no literal user anchor",Some(&altered)));
+    }
     #[test]fn grounded_semantic_graph_preserves_scope_and_order(){
         let task=parse();assert!(task.validate(GOAL,2).is_ok());
         assert!(task.hint(2).contains("do not submit"));assert!(task.hint(2).contains("{1}"));

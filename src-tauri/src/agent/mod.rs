@@ -9,6 +9,7 @@ pub mod intent_router;
 pub mod native_eval;
 pub mod vision;
 pub mod writer;
+pub mod report_artifact;
 pub mod semantic_core;
 pub mod goal_progress;
 pub mod evidence_repair;

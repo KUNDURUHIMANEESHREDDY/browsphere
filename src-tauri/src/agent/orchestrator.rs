@@ -176,8 +176,22 @@ pub fn parse_generated_plan(goal: &str, raw: &str) -> anyhow::Result<TaskPlan> {
         status: "pending",
     });
     let mut semantic=semantic;
-    if let Some(task)=semantic.as_mut(){task.ground_spelling(goal)?;task.validate(goal,stages.len()-1)?;}
-    let semantic_provenance=semantic.as_ref().map(|_|"model_proposed");
+    let mut rejected_ungrounded_advisory=false;
+    if let Some(task)=semantic.as_mut(){
+        if let Err(error)=task.ground_spelling(goal).and_then(|_|task.validate(goal,stages.len()-1)){
+            // Advisory semantic labels cannot abort an otherwise schema-valid
+            // staged plan solely because a model invented a literal span.
+            // This changes no action permission: the exact original goal,
+            // staged native policy and independent verification stay active.
+            if super::semantic_task::ungrounded_advisory_can_fall_back(goal,&error.to_string(),Some(task)){
+                semantic=None;
+                rejected_ungrounded_advisory=true;
+            }else{return Err(error)}
+        }
+    }
+    let semantic_provenance=if rejected_ungrounded_advisory{
+        Some("rejected_ungrounded_advisory_native_policy")
+    }else{semantic.as_ref().map(|_|"model_proposed")};
     Ok(TaskPlan { goal: goal.to_string(), stages, semantic, semantic_provenance })
 }
 
@@ -251,6 +265,14 @@ pub(crate) fn is_simple_named_title_task(goal: &str) -> bool {
     ])
 }
 
+/// Explicitly current-page forms need no destination discovery stage. The
+/// ordinary native Form specialist and post-submit verifier remain mandatory.
+pub fn current_page_form(goal:&str)->bool{
+    let lower=goal.to_ascii_lowercase();
+    ["on the current","on this page","current website","current page"].iter()
+        .any(|term|lower.contains(term)) && lower.contains("form") &&
+        contains_any(&lower,&["fill ","submit ","apply ","register ","complete the form","sign up"])
+}
 /// A deterministic minimum plan, built from the user's intent.
 /// The selected LLM decides actual actions for each specialist at runtime.
 pub fn plan_task(goal: &str) -> TaskPlan {
@@ -274,7 +296,14 @@ pub fn plan_task(goal: &str) -> TaskPlan {
     } else if contains_any(
         &lower, &["fill ", "submit ", "apply ", "register ", "complete the form", "sign up"],
     ) {
-        vec![Specialist::Browser, Specialist::Form]
+        // A user who explicitly assigned a form on the CURRENT page should
+        // not be forced through a navigation specialist first. It can only
+        // propose unrelated URLs and stall despite a visible, authorized
+        // control. The Form stage still must satisfy native action permissions
+        // and observe a post-submission confirmation before verification.
+        if current_page_form(goal){
+            vec![Specialist::Form]
+        }else{vec![Specialist::Browser, Specialist::Form]}
     } else if contains_any(
         &lower, &["extract", "collect", "scrape", "table", "dataset", "spreadsheet", "list of"],
     ) {
@@ -915,6 +944,38 @@ mod tests {
         assert!(!Specialist::Research.allows_on_page(&unrelated, &page));
     }
 
+    #[test]
+    fn current_page_form_does_not_require_unrelated_navigation(){
+        let goal="On the current local test website, submit the feedback form, then report the visible feedback confirmation. Do not submit the application form.";
+        let stages=plan_task(goal).stages;
+        assert_eq!(stages.len(),2);
+        assert_eq!(stages[0].specialist,Specialist::Form);
+        assert_eq!(stages[1].specialist,Specialist::Verification);
+        let remote=plan_task("Open the company website and submit its feedback form").stages;
+        assert_eq!(remote[0].specialist,Specialist::Browser);
+        assert_eq!(remote[1].specialist,Specialist::Form);
+    }
+    #[test]
+    fn invented_advisory_span_does_not_abort_valid_form_stages(){
+        let goal="On the current local test website, submit the feedback form, then report the visible feedback confirmation. Do not submit the application form.";
+        let raw=serde_json::json!({"stages":[{"specialist":"form","objective":"Submit only the requested feedback form","success_criteria":"Visible feedback confirmation"}],
+            "semantic":{"concepts":[{"kind":"objective","span":"Submit the unrelated application immediately","stages":[1]}],"relations":[]}}).to_string();
+        let p=parse_generated_plan(goal,&raw).unwrap();
+        assert!(p.semantic.is_none());
+        assert_eq!(p.semantic_provenance,Some("rejected_ungrounded_advisory_native_policy"));
+        assert_eq!(p.goal,goal);
+        assert_eq!(p.stages.len(),2);
+        assert_eq!(p.stages[0].specialist,Specialist::Form);
+        assert_eq!(p.stages[1].specialist,Specialist::Verification);
+    }
+    #[test]
+    fn explicit_order_cannot_be_discarded_on_an_invented_span(){
+        let goal="First inspect the public guide, then submit the feedback form. Do not submit the application form.";
+        let raw=serde_json::json!({"stages":[{"specialist":"research","objective":"Inspect the public guide","success_criteria":"Guide observed"},
+           {"specialist":"form","objective":"Submit feedback","success_criteria":"Confirmed submitted feedback"}],
+           "semantic":{"concepts":[{"kind":"objective","span":"Submit an unrelated application","stages":[1]}],"relations":[]}}).to_string();
+        assert!(parse_generated_plan(goal,&raw).is_err());
+    }
     #[test]
     fn form_specialist_cannot_report_submission_without_successful_submit() {
         let mut o = Orchestrator::new("Submit my application form");

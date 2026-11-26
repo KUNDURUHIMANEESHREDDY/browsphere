@@ -260,6 +260,20 @@ pub fn research_facets(goal:&str)->Vec<&'static str>{
         ["limitation","distinction","caveat","constraint","drawback"].iter().any(|m|g.contains(m)){
         return vec!["output_behavior","operational_distinction"];
     }
+    // User-requested numerical dimensions are independent factual obligations.
+    // They are compiled only when explicitly requested; neither a visited
+    // page nor an LLM paraphrase can satisfy them without a captured value.
+    let mut measurable=Vec::new();
+    if ["ticket price","admission price","entry fee","pricing","price","cost per","cost of"].iter().any(|term|g.contains(term)){
+        measurable.push("price");
+    }
+    if ["duration","how long","course length","time to complete"].iter().any(|term|g.contains(term)){
+        measurable.push("duration");
+    }
+    if ["opening hours","opening times","operating hours","opening time","closing time","timings"].iter().any(|term|g.contains(term)){
+        measurable.push("opening_hours");
+    }
+    if !measurable.is_empty(){return measurable;}
     if (g.contains("feature")||g.contains("capabilit")||g.contains("advantage"))&&
         (g.contains("limitation")||g.contains("caveat")||g.contains("drawback")){
         vec!["feature","caveat"]
@@ -318,9 +332,13 @@ fn operand_matches(operand:&str,text:&str)->bool{
 /// request asks to compare *facts* rather than naming two textual operands.
 /// This can improve page capture without inferring results or credentials.
 pub fn fact_focus_terms(goal:&str)->Vec<String>{
-    let named=comparison_focus_terms(goal);
-    if !named.is_empty(){return named}
     let facets=research_facets(goal);
+    // A sentence enumerating price, duration and hours is requesting FACTS,
+    // not comparing subjects named 'price duration' and 'opening hours'.
+    if !facets.iter().any(|f|matches!(*f,"price"|"duration"|"opening_hours")){
+        let named=comparison_focus_terms(goal);
+        if !named.is_empty(){return named}
+    }
     let mut terms=Vec::<String>::new();
     for facet in facets{
         let word=match facet{
@@ -330,6 +348,9 @@ pub fn fact_focus_terms(goal:&str)->Vec<String>{
             "default_behavior"=>"default",
             "runtime_compatibility"=>"requires",
             "installation_command"=>"install",
+            "price"=>"price",
+            "duration"=>"duration",
+            "opening_hours"=>"hours",
             "contrast_left"|"contrast_right"=>"difference",
             _=>continue
         };
@@ -422,6 +443,27 @@ fn facet_score(goal:&str,facet:&str,text:&str)->i32{
         let direct=tail.trim_start_matches(|c:char|c.is_whitespace()||matches!(c,','|':'|';')).split_whitespace().take(4).collect::<Vec<_>>().join(" ");
         let score=explanation.iter().filter(|v|tail.contains(**v)).count() as i32;
         return score+if score>0&&["avoids","skips","does not","prevents","updates","performs","inserts","returns","causes","means","ignores","allows"].iter().any(|v|super::browser_skills::phrase(&direct,v)){4}else{0};
+    }
+    if matches!(facet,"price"|"duration"|"opening_hours"){
+        let tokens=t.split(|c:char|!c.is_ascii_alphanumeric()&&c!=':'&&c!='₹'&&c!='$'&&c!='€'&&c!='£')
+            .filter(|word|!word.is_empty()).collect::<Vec<_>>();
+        let has_number=tokens.iter().any(|w|w.parse::<f64>().ok().is_some_and(|n|n>=0.0&&n<=1_000_000.0));
+        if facet=="price"{
+            let amount=t.contains('₹')||t.contains('$')||t.contains('€')||t.contains('£')||
+                ["inr ","usd ","rs.","rs ","eur ","free admission","free entry","free tickets"].iter().any(|x|t.contains(x));
+            let subject=["price","fee","ticket","admission","entry","cost","per person","per adult"].iter().any(|x|t.contains(x));
+            return if amount&&subject&&(has_number||t.contains("free ")){4}else{0};
+        }
+        if facet=="duration"{
+            let units=["minute","hour","day","week","month","year","lesson","session"].iter().any(|x|t.contains(x));
+            let subject=["duration","takes","length","complete","lasts","requires","course","hours","weeks"].iter().any(|x|t.contains(x));
+            return if has_number&&units&&subject{4}else{0};
+        }
+        let clock=tokens.iter().any(|w|w.split_once(':').is_some_and(|(h,m)|{
+            h.parse::<u8>().ok().is_some_and(|n|n<=23)&&m.parse::<u8>().ok().is_some_and(|n|n<=59)
+        }))||t.contains(" am")||t.contains(" pm")||t.contains("a.m.")||t.contains("p.m.");
+        let context=["hours","open","close","timings","admission","operating"].iter().any(|x|t.contains(x));
+        return if clock&&context{4}else{0};
     }
     if facet=="installation_command"{
         let commands=["pip install ","python -m pip install ","npm install ","yarn add ","pnpm add ","cargo add ","cargo install ","gem install ","go install ","dotnet add package "];
@@ -2795,5 +2837,35 @@ mod fact_dimension_parsing_tests {
             "For clauses can be combined with if clauses to filter elements."));
         assert!(!source_facet_supported(REQUEST,"output_behavior",&python,
             "This page is the Python data structures tutorial."));
+    }
+}
+
+#[cfg(test)]
+mod measured_fact_tests {
+    use super::*;
+    const GOAL:&str="Visit https://example.org/a and https://example.org/b. Compare admission ticket price, duration, and opening hours from each official source.";
+    fn source(text:&str)->SourceEvidence{
+        SourceEvidence{url:"https://example.org/a".into(),title:"Admission details".into(),excerpt:text.into()}
+    }
+    #[test]fn compiles_explicit_measurable_dimensions(){
+        assert_eq!(research_facets(GOAL),vec!["price","duration","opening_hours"]);
+        assert_eq!(fact_focus_terms(GOAL),vec!["price","duration"]);
+    }
+    #[test]fn extracts_actual_values_not_generic_marketing_text(){
+        assert!(facet_supported(GOAL,"price","Entry ticket price INR 150 per person."));
+        assert!(facet_supported(GOAL,"duration","The tour lasts 2 hours and includes an introduction."));
+        assert!(facet_supported(GOAL,"opening_hours","The museum is open from 09:30 to 17:00 daily."));
+        for bad in ["Admission rates vary, contact us", "Great free family attractions", "This tour has flexible duration"] {
+            assert!(!facet_supported(GOAL,"price",bad));
+            assert!(!facet_supported(GOAL,"duration",bad));
+            assert!(!facet_supported(GOAL,"opening_hours",bad));
+        }
+    }
+    #[test]fn candidate_passages_are_exact_captured_fragments(){
+        let s=source("The museum admission ticket price is INR 150 per adult. The guided tour duration is 2 hours for each group. Opening hours are 09:30 to 17:00 on weekdays.");
+        for group in facet_candidates(GOAL,&s){
+            assert!(!group.candidates.is_empty(),"Missing {}",group.facet);
+            for part in group.candidates {assert!(s.excerpt.contains(&part.text));}
+        }
     }
 }

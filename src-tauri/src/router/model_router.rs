@@ -975,13 +975,43 @@ User text: <text>{}</text>"#,
     /// validates the plan and always appends read-only verification.
     pub async fn plan_for_origin(&self,goal:&str,origin:&str,creds:&CredentialStore)->anyhow::Result<crate::agent::orchestrator::TaskPlan>{
         use crate::agent::semantic_task::{SemanticTask,ExplicitContract};
-        let mut plan=self.plan_draft_for_origin(goal,origin,creds).await?;
+        // A planner can reject its own fabricated semantic spans before a
+        // well-formed native task ever starts. Recover with the deterministic
+        // minimum specialist plan (not the rejected model proposal). No new
+        // actions are permitted; every step retains the original user goal,
+        // native security policy, and independent completion verification.
+        let mut plan=match self.plan_draft_for_origin(goal,origin,creds).await{
+            Ok(plan)=>plan,
+            Err(error) if crate::agent::semantic_task::ungrounded_advisory_can_fall_back(
+                goal,&error.to_string(),None)=>{
+                tracing::warn!("Lucia rejected ungrounded planner semantics; using native minimum plan");
+                let mut minimum=crate::agent::orchestrator::plan_task(goal);
+                minimum.semantic_provenance=Some("native_minimum_after_semantic_rejection");
+                minimum
+            },
+            Err(error)=>return Err(error),
+        };
         let count=plan.stages.len()-1;
         let contract=ExplicitContract::extract(goal);
         let requires=count>1||contract.required();
+        // A literal negative clause remains binding in the original goal and
+        // native action policy even when no advisory semantic graph exists.
+        // Only explicitly ordered multi-stage clauses require a semantic
+        // dependency reconstruction before execution.
+        if contract.ordered.is_empty()&&plan.semantic.is_none(){return Ok(plan)}
         if !requires&&plan.semantic.is_none(){return Ok(plan);}
         let stages=&plan.stages[..count];
         let initial=SemanticTask::reconcile(goal,stages,plan.semantic.clone());
+        // The semantic overlay is advisory. A model-invented span must not
+        // crash an otherwise validated specialist workflow when no explicit
+        // ordered-clause dependency needs reconstruction. The original goal
+        // remains in the plan and every native action/verification gate.
+        if initial.as_ref().err().is_some_and(|e|
+            crate::agent::semantic_task::ungrounded_advisory_can_fall_back(goal,&e.to_string(),plan.semantic.as_ref())){
+            plan.semantic=None;
+            plan.semantic_provenance=Some("rejected_ungrounded_advisory_native_policy");
+            return Ok(plan)
+        }
         if let Ok(Some(semantic))=initial.as_ref(){
             plan.semantic_provenance=Some(if plan.semantic.is_some(){"model_with_native_reconciliation"}else{"native_explicit_reconstruction"});
             plan.semantic=Some(semantic.clone());

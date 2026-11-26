@@ -1595,6 +1595,7 @@ async fn run_browser_loop(
         || intelligence.managed()
         || crate::agent::execution_intelligence::current_reference_subject(&goal).is_some()
         || requested_named_link_title(&goal).is_some()
+        || crate::agent::orchestrator::current_page_form(&goal)
         || crate::agent::prerequisites::named_link(&goal,&snapshot).is_some()
         || crate::agent::prerequisites::route_values(&goal).is_some()
         || crate::agent::prerequisites::filter_constraints(&goal).is_some()
@@ -4454,6 +4455,16 @@ async fn run_browser_loop(
                     if let Some(checks)=inherited_checks.as_ref(){
                         report.summary=format!("{}\nEarlier workflow: {}",report.summary,checks.chars().take(1500).collect::<String>());
                         report.limitations.push_str(" Earlier tool steps passed their user-defined checks; they are not external factual verification.");
+                    }
+                    if crate::agent::report_artifact::requested(&goal){
+                        anyhow::ensure!(!private_mode&&!is_child,
+                            "Local research report persistence is disabled for private or child tasks");
+                        let receipt=crate::agent::report_artifact::save(
+                            &goal,&report,&orchestrator.evidence,&crate::resolve_data_dir())?;
+                        report.summary.push_str(&format!("\nSaved research report: {} (verified readback)",receipt.path));
+                        let _=app.emit("agent:document_artifact",serde_json::json!({
+                            "run_id":run_id,"artifact":receipt,"status":"readback_verified"
+                        }));
                     }
                     if !is_child{
                         let _ = app.emit("agent:verification_report", serde_json::json!({"run_id": run_id,"report": report}));
