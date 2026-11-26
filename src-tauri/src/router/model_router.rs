@@ -98,13 +98,34 @@ fn default_supervisor_model() -> String { "lfm3:1.7b".into() }
 
 fn default_writer_model() -> String { "qwen2.5:3b-instruct".into() }
 
+#[cfg(test)]
+mod local_action_default_tests {
+    use super::*;
+    #[test]
+    fn browser_model_preflight_never_switches_explicit_cloud_only_to_local(){
+        let mut cfg=RouterConfig::default();
+        cfg.lucia_cloud_only=true;
+        let route=ModelRouter::new(cfg);
+        let rt=tokio::runtime::Runtime::new().expect("runtime");
+        assert!(rt.block_on(route.preflight_agent_model("https://example.org")).is_ok());
+    }
+    #[test]
+    fn default_agent_model_is_a_supported_configured_role(){
+        let c=RouterConfig::default();
+        assert_eq!(c.ollama_model,"qwen2.5:3b-instruct");
+        assert_eq!(c.writer_model,c.ollama_model);
+        assert_ne!(c.ollama_model,"qwen3.5:4b");
+        assert!(c.prefer_local_for_simple);
+        assert!(!c.lucia_cloud_only);
+    }
+}
 impl Default for RouterConfig {
     fn default() -> Self {
         Self {
             ollama_url: "http://127.0.0.1:11434".to_string(),
-            // A bundled/local default must match a model installed by the
-            // standard Lucia setup; users can still select a stronger model.
-            ollama_model: "qwen3.5:0.8b".to_string(),
+            // Prefer a model with demonstrated structured-action capability.
+            // The 4B tag was not bundled and caused 404s on clean installs.
+            ollama_model: "qwen2.5:3b-instruct".to_string(),
             vision_model: String::new(),
             writer_model: default_writer_model(),
             supervisor_model: default_supervisor_model(),
@@ -311,6 +332,26 @@ impl ModelRouter {
         Ok(data.get("models").and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(str::to_string)).collect())
             .unwrap_or_default())
+    }
+
+    /// A valid API endpoint is not evidence that the configured action model
+    /// exists. Resolve it before allocating a browser task, rather than
+    /// spending multiple action iterations receiving Ollama HTTP 404.
+    /// This never downloads models or changes the user's preferred provider.
+    pub async fn preflight_agent_model(&self, origin:&str)->anyhow::Result<()>{
+        if self.select_backend(origin)!="ollama"{return Ok(());}
+        let selected=self.config.ollama_model.trim();
+        anyhow::ensure!(!selected.is_empty(),
+            "No local browser-action model is configured. Select a model in AI & ML settings.");
+        let installed=self.list_local_models().await.map_err(|e|
+            anyhow::anyhow!("Local model service is not ready at {}: {e}. Start Ollama or select a connected cloud model before running Lucia.",
+                self.config.ollama_url))?;
+        anyhow::ensure!(!installed.is_empty(),
+            "Ollama is running but no local models are installed. Configure an available model in AI & ML settings.");
+        anyhow::ensure!(installed.iter().any(|name|name==selected),
+            "Lucia cannot start: local browser-action model '{}' is not installed. Available models: {}. Choose one in AI & ML settings.",
+            selected,installed.join(", "));
+        Ok(())
     }
 
     pub fn new(config: RouterConfig) -> Self {
@@ -733,6 +774,44 @@ User text: <text>{}</text>"#,
                     "status":{"type":"string","enum":["verified","insufficient"]},
                     "findings":{"type":"array","maxItems":6,"items":finding},
                     "uncertainty":{"type":"string","maxLength":400}}});
+            }
+        }
+        // Native named-source comparisons previously fell through to generic
+        // JSON mode, which gives small local models no output-shape guidance.
+        // The schema comes only from the immutable source/ID catalog that the
+        // native evidence verifier constructed, never from model claims.
+        let catalog:serde_json::Value=serde_json::from_str(user).unwrap_or_default();
+        if catalog["instruction"].as_str().is_some_and(|instruction|
+            instruction.starts_with("Select 1-2 directly relevant passage IDs PER source")){
+            if let Some(sources)=catalog["sources"].as_array(){
+                let mut names=Vec::<String>::new();
+                let mut ids=Vec::<String>::new();
+                for source in sources.iter().take(8){
+                    let Some(name)=source["name"].as_str()else{break};
+                    let Some(candidates)=source["candidates"].as_array()else{break};
+                    if candidates.is_empty(){break;}
+                    names.push(name.to_string());
+                    for candidate in candidates.iter().take(12){
+                        if let Some(id)=candidate["id"].as_str(){
+                            if !ids.iter().any(|known|known==id){ids.push(id.to_string());}
+                        }
+                    }
+                }
+                if (2..=8).contains(&names.len()) && names.len()==sources.len()&&!ids.is_empty(){
+                    let mut options=names.clone();
+                    options.push(String::new());
+                    return json!({"type":"object","additionalProperties":false,
+                        "required":["picks","recommended","rationale"],
+                        "properties":{
+                            "picks":{"type":"array","minItems":names.len(),"maxItems":names.len(),
+                                "items":{"type":"object","additionalProperties":false,
+                                    "required":["name","ids"],"properties":{
+                                        "name":{"type":"string","enum":names},
+                                        "ids":{"type":"array","minItems":1,"maxItems":2,
+                                            "items":{"type":"string","enum":ids}}}}},
+                            "recommended":{"type":"string","enum":options},
+                            "rationale":{"type":"string","maxLength":500}}});
+                }
             }
         }
         json!("json")
@@ -3017,5 +3096,22 @@ Interactive nodes JSON: {}"#,serde_json::to_string(&nodes).unwrap());
     #[test]
     fn endpoint_without_host_cannot_have_key_account() {
         assert!(ModelRouter::api_key_account("file:///tmp/secret").is_err());
+    }
+}
+
+#[cfg(test)]
+mod named_comparison_schema_tests {
+    use super::ModelRouter;
+    #[test]
+    fn named_catalog_enforces_fixed_sources_and_real_ids() {
+        let payload=serde_json::json!({"instruction":"Select 1-2 directly relevant passage IDs PER source.",
+            "sources":[{"name":"One","candidates":[{"id":"p1","text":"Free team access"}]},
+                        {"name":"Two","candidates":[{"id":"p2","text":"Free plan"}]}]});
+        let schema=ModelRouter::structured_schema("format named-source comparison",&payload.to_string());
+        assert_eq!(schema["properties"]["picks"]["minItems"],2);
+        assert_eq!(schema["properties"]["picks"]["maxItems"],2);
+        assert_eq!(schema["properties"]["recommended"]["enum"][0],"One");
+        assert_eq!(schema["properties"]["picks"]["items"]["properties"]["ids"]["items"]["enum"][1],"p2");
+        assert_eq!(ModelRouter::structured_schema("unrelated","{}"),"json");
     }
 }

@@ -17,6 +17,22 @@ pub struct LuciaIntent {
 }
 
 impl LuciaIntent {
+    /// Short conversational greetings must never activate a browser workflow.
+    /// Exact-match only: do not reinterpret longer real requests containing
+    /// these phrases (e.g. "what's up with my download history").
+    pub fn explicit_chat_greeting(message:&str)->Option<Self>{
+        let normalized=message.trim().trim_end_matches(['.','!','?',' '])
+            .trim().to_ascii_lowercase();
+        let greeting=matches!(normalized.as_str(),
+            "hi"|"hey"|"hello"|"hello there"|"hey there"|"hi there"|
+            "yo"|"sup"|"wassup"|"what's up"|"whats up"|"what is up"|
+            "how are you"|"how's it going"|"hows it going"|
+            "good morning"|"good afternoon"|"good evening");
+        greeting.then(||Self{
+            mode:LuciaMode::Chat,
+            reason:"Conversational greeting with no requested browser action".into()
+        })
+    }
     /// Explicit media commands are browser tasks even when the intent model
     /// is unavailable. Keep this intentionally narrow: questions *about*
     /// playing music and ambiguous uses of "play" stay with the classifier.
@@ -82,6 +98,18 @@ mod tests {
             "play chess", "play music theory",
         ] {
             assert!(LuciaIntent::explicit_media_task(question).is_none());
+        }
+    }
+    #[test]
+    fn greetings_are_chat_but_real_browser_commands_remain_distinct(){
+        for text in ["whats up","What's up?","Hey!","Hello there.","how are you?",
+                     "good morning","sup"]{
+            assert_eq!(LuciaIntent::explicit_chat_greeting(text).unwrap().mode,LuciaMode::Chat);
+        }
+        for text in ["what's up with my downloads","what's up with my open tabs",
+                     "hey, open YouTube","search google for note apps",
+                     "download the report","what's up with this website?"]{
+            assert!(LuciaIntent::explicit_chat_greeting(text).is_none(),"{text}");
         }
     }
     #[test]

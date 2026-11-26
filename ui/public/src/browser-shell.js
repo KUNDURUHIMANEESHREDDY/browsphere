@@ -511,7 +511,7 @@
       var activeInspectorTab = 'elements';
       var nativeRouterConfig = {
         ollama_url: 'http://127.0.0.1:11434',
-        ollama_model: 'qwen3.5:4b',
+        ollama_model: 'qwen2.5:3b-instruct',
         litellm_url: 'http://127.0.0.1:4000/v1/chat/completions',
         litellm_model: 'gpt-4o-mini',
         litellm_api_key: '',
