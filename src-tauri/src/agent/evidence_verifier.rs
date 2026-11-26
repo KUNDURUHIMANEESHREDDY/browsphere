@@ -285,7 +285,15 @@ fn named_comparison(goal:&str)->Option<(String,String)>{
     let (a,b)=rest[..end].split_once(" and ").or_else(||rest[..end].split_once(" with ")).or_else(||rest[..end].split_once(" vs "))?;
     let clean=|v:&str|v.trim_matches(|c:char|c.is_whitespace()||matches!(c,'\u{60}'|'"'|'\'')).to_owned();
     let (a,b)=(clean(a),clean(b));
-    if a.is_empty()||b.is_empty()||a.len()>100||b.len()>100||a.contains("://")||b.contains("://"){return None;}
+    // 'Compare what each returns and identify a limitation' lists requested
+    // FACT DIMENSIONS, not two comparison subjects. Treating these clauses as
+    // operands makes every captured quote fail source-specific matching.
+    let dimension_question=|s:&str|["what ","how ","which ","whether ",
+        "why ","each ","both ","their ","features ","limitations ",
+        "the results ","the differences "].iter().any(|prefix|s.starts_with(prefix));
+    if a.is_empty()||b.is_empty()||a.len()>100||b.len()>100
+        ||a.contains("://")||b.contains("://")
+        ||dimension_question(&a)||dimension_question(&b){return None;}
     Some((a,b))
 }
 fn operand_words(text:&str)->Vec<String>{
@@ -306,6 +314,30 @@ fn operand_matches(operand:&str,text:&str)->bool{
     false
 }
 /// User-derived anchors used only for rendered DOM retrieval.
+/// General evidence dimensions become native read-only focus hints when a
+/// request asks to compare *facts* rather than naming two textual operands.
+/// This can improve page capture without inferring results or credentials.
+pub fn fact_focus_terms(goal:&str)->Vec<String>{
+    let named=comparison_focus_terms(goal);
+    if !named.is_empty(){return named}
+    let facets=research_facets(goal);
+    let mut terms=Vec::<String>::new();
+    for facet in facets{
+        let word=match facet{
+            "output_behavior"=>"returns",
+            "operational_distinction"|"caveat"=>"limitation",
+            "feature"=>"supports",
+            "default_behavior"=>"default",
+            "runtime_compatibility"=>"requires",
+            "installation_command"=>"install",
+            "contrast_left"|"contrast_right"=>"difference",
+            _=>continue
+        };
+        if !terms.iter().any(|term|term==word){terms.push(word.to_string());}
+        if terms.len()>=2{break;}
+    }
+    terms
+}
 pub fn comparison_focus_terms(goal:&str)->Vec<String>{
     let Some((a,b))=named_comparison(goal)else{return vec![];};
     [a,b].into_iter().filter_map(|term|{
@@ -2737,5 +2769,31 @@ mod named_selection_format_tests {
         assert_eq!(parsed.recommended,"Trello");
         assert!(parse_named_comparison_response("{\"picks\":[],\"recommended\":\"Trello\"}").is_err());
         assert!(parse_named_comparison_response("{\"picks\":[]}{\"picks\":[]}").is_err());
+    }
+}
+
+#[cfg(test)]
+mod fact_dimension_parsing_tests {
+    use super::*;
+    const REQUEST:&str="Visit https://docs.python.org/3/tutorial/datastructures.html and https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/map. Compare what each returns and identify one limitation or distinction of each, citing exact source passages.";
+    #[test]
+    fn comparing_requested_facts_does_not_invent_two_textual_subjects(){
+        assert!(named_comparison(REQUEST).is_none());
+        assert_eq!(research_facets(REQUEST),vec!["output_behavior","operational_distinction"]);
+        assert_eq!(fact_focus_terms(REQUEST),vec!["returns","limitation"]);
+    }
+    #[test]
+    fn fact_dimensions_accept_captured_source_specific_behavior_without_fake_operands(){
+        let python=SourceEvidence{
+            url:"https://docs.python.org/3/tutorial/datastructures.html".into(),
+            title:"Data Structures - Python documentation".into(),
+            excerpt:"A list comprehension creates a new list by applying an expression to each item. For clauses can be combined with if clauses to filter elements.".into()
+        };
+        assert!(source_facet_supported(REQUEST,"output_behavior",&python,
+            "A list comprehension creates a new list by applying an expression to each item."));
+        assert!(source_facet_supported(REQUEST,"operational_distinction",&python,
+            "For clauses can be combined with if clauses to filter elements."));
+        assert!(!source_facet_supported(REQUEST,"output_behavior",&python,
+            "This page is the Python data structures tutorial."));
     }
 }

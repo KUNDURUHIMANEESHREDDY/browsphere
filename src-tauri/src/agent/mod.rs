@@ -13,6 +13,7 @@ pub mod semantic_core;
 pub mod goal_progress;
 pub mod evidence_repair;
 pub mod fact_research;
+pub mod fact_graph;
 pub mod action_intelligence;
 pub mod course_comparison;
 pub mod observed_facts;

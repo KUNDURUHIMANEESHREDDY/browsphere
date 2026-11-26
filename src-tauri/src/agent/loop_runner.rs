@@ -1511,6 +1511,7 @@ async fn run_browser_loop(
     let mut requirements=crate::agent::requirements::Ledger::compile(&goal);
     let fact_contract=crate::agent::fact_research::Contract::compile(&goal);
     let mut fact_research=crate::agent::fact_research::Research::default();
+    let mut fact_graph=crate::agent::fact_graph::FactGraph::compile(&goal);
     let mut acquisition=crate::agent::evidence_acquisition::Acquisition::default();
     let mut explicit_focus_attempts=std::collections::HashMap::<String,usize>::new();
     let mut explicit_revisits=std::collections::HashSet::<String>::new();
@@ -2189,7 +2190,7 @@ async fn run_browser_loop(
             && requirements.missing_fact_sources().contains(&snapshot.origin)
             && crate::agent::browser_skills::readable(&snapshot)
             && !crate::agent::search_discovery::human_verification(&snapshot.origin,&snapshot.title,&snapshot.text_excerpt){
-            let terms=crate::agent::evidence_verifier::comparison_focus_terms(&goal);
+            let terms=crate::agent::evidence_verifier::fact_focus_terms(&goal);
             let attempts=explicit_focus_attempts.entry(snapshot.origin.clone()).or_default();
             while !terms.is_empty()&&*attempts<3&&requirements.missing_fact_sources().contains(&snapshot.origin){
                 *attempts+=1;
@@ -2211,6 +2212,13 @@ async fn run_browser_loop(
             }
         }
         let _=app.emit("agent:requirement_state",serde_json::json!({"run_id":run_id,"step_index":step,"ledger":&requirements}));
+        if let Some(graph)=fact_graph.as_mut(){
+            graph.observe(&orchestrator.evidence);
+            let _=app.emit("agent:fact_graph",serde_json::json!({
+                "run_id":run_id,"step_index":step,"nodes":graph.nodes(),
+                "candidate_ready":graph.can_synthesize(),"next_gap":graph.next_gap()
+            }));
+        }
         if let Some(facts)=fact_contract.as_ref(){
             let missing=facts.missing(&goal,&orchestrator.evidence);
             let _=app.emit("agent:fact_dependencies",serde_json::json!({
@@ -2439,11 +2447,19 @@ async fn run_browser_loop(
         }
         // Keep every preferred grounded visual control inside the compact
         // action model's native candidate list, not only in a prose hint.
-        let semantic_focus=match requirements.next_research_objective(){
-            Some(missing) if orchestrator.specialist()==Specialist::Research =>
-                format!("{} | Outstanding evidence objective: {missing}",orchestrator.semantic_focus()),
-            _=>orchestrator.semantic_focus(),
-        };
+        let semantic_focus=if orchestrator.specialist()==Specialist::Research{
+            let gap=fact_graph.as_ref().and_then(|graph|{
+                let stage_source=fact_contract.as_ref().and_then(|contract|
+                    contract.stage_name(orchestrator.current));
+                stage_source.and_then(|source|graph.next_gap_for_source(source))
+                    .or_else(||graph.next_gap())
+            });
+            if let Some(gap)=gap{
+                format!("{} | Fact-directed research: {} at source {} ({:?}); capture exact supporting passages, not generic navigation.",orchestrator.semantic_focus(),gap.dimension,gap.source,gap.state)
+            }else if let Some(missing)=requirements.next_research_objective(){
+                format!("{} | Outstanding evidence objective: {missing}",orchestrator.semantic_focus())
+            }else{orchestrator.semantic_focus()}
+        }else{orchestrator.semantic_focus()};
         let semantic_hint=orchestrator.semantic_hint();
         let mut model_controls=if crate::agent::deliberation::read_only(&goal)&&!intelligence.managed()&&skill.is_none()&&catalog.is_none()&&
             requested_named_result_title(&goal).is_none()&&orchestrator.plan.stages.len()>2{
@@ -3859,7 +3875,10 @@ async fn run_browser_loop(
                     };
                     match result {
                         Ok(report) => {
-                            if let Err(reason)=requirements.validate_report(&goal,&orchestrator.evidence,&report){
+                            let review_error=requirements.validate_report(&goal,&orchestrator.evidence,&report)
+                                .err().or_else(||fact_graph.as_mut().and_then(|graph|
+                                    graph.validate_report(&orchestrator.evidence,&report).err()));
+                            if let Some(reason)=review_error{
                                 factual_review_failed=true;
                                 verification_failure_reason=Some(reason.clone());
                                 decision=PolicyDecision::Deny{reason:format!("Requirement verification failed: {reason}")};

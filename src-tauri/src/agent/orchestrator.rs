@@ -490,6 +490,12 @@ impl Orchestrator {
                 return Err(format!("Missing source-exact {facet} for {} before synthesis",next.source));
             }
         }
+        if matches!(self.specialist(),Specialist::Comparison|Specialist::Verification){
+            if let Some(mut graph)=super::fact_graph::FactGraph::compile(&self.plan.goal){
+                graph.observe(&self.evidence);
+                if !graph.can_synthesize(){return Err(graph.hint());}
+            }
+        }
         if requirements.supported&&!staged_named_research{
             requirements.refresh(&self.plan.goal,&self.evidence);
             requirements.can_review()?;
