@@ -1,5 +1,5 @@
 from pathlib import Path
-root=Path(__file__).resolve().parent
+root=Path(__file__).resolve().parents[2]
 def replace_once(s,a,b):
     if s.count(a)!=1: raise RuntimeError(f'Expected unique anchor: {a[:90]} ({s.count(a)})')
     return s.replace(a,b,1)

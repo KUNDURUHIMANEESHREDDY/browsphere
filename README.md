@@ -99,7 +99,7 @@ From the repository root, run:
 .\build-windows-installer.bat
 ~~~
 
-This builds the UI assets and a Tauri NSIS installer, then copies it to `dist\Browsphere-setup.exe` when successful. The ordinary development installer is **unsigned** unless release signing has been configured. A built installer is not evidence of successful clean-machine installation, upgrades, or production readiness. See [release signing](RELEASE_SIGNING.md).
+This builds the UI assets and a Tauri NSIS installer, then copies it to `dist\Browsphere-setup.exe` when successful. The ordinary development installer is **unsigned** unless release signing has been configured. A built installer is not evidence of successful clean-machine installation, upgrades, or production readiness. See [release signing](docs/release/RELEASE_SIGNING.md).
 
 ## Configure Lucia models and provider routes
 
@@ -110,7 +110,7 @@ Open **Settings → AI & ML** and configure a model route. API credentials are m
 | Ollama (local) | Start Ollama, download a supported model, select the local route | Small models may produce malformed structured actions or time out on complex sites. |
 | OpenAI/LiteLLM-compatible cloud | Authorized endpoint, API key where required, and an available model | Model discovery and successful inference are different checks; use the model returned by your provider. |
 | 9Router | Run and authorize the local gateway, then configure its **chat-completions endpoint** and select a fetched model | The tested gateway endpoint was `http://127.0.0.1:20128/v1/chat/completions` with model `oc/hy4-flash-free`. The base URL `http://127.0.0.1:20128/v1` is **not itself** a chat-completions request URL. This route uses hosted inference via 9Router, not local Ollama. Quotas apply. |
-| OpenCode | Experimental model-contract testing only | OpenCode free-model catalog access does **not** constitute a supported, functioning Browsphere inference integration. See [OpenCode testing](OPENCODE_LUCIA_TESTING.md). |
+| OpenCode | Experimental model-contract testing only | OpenCode free-model catalog access does **not** constitute a supported, functioning Browsphere inference integration. See [OpenCode testing](docs/validation/OPENCODE_LUCIA_TESTING.md). |
 
 Use the **Fetch Models** flow where supported to inspect the endpoint's current model list, then explicitly select the model. A model appearing in a catalog does not guarantee authorization, quota, or successful requests.
 
@@ -191,12 +191,12 @@ SQLite (WAL mode) stores browsing and agent data locally. Credentials are kept o
 
 ## Project documents
 
-- [Lucia production and security gates](LUCIA_PRODUCTION_GATE.md)
-- [OpenCode free-model test scope](OPENCODE_LUCIA_TESTING.md)
+- [Lucia production and security gates](docs/release/LUCIA_PRODUCTION_GATE.md)
+- [OpenCode free-model test scope](docs/validation/OPENCODE_LUCIA_TESTING.md)
 - [Windows desktop E2E report](tests/e2e/REPORT.md)
-- [Voice agent](VOICE_AGENT.md)
-- [AWS connection](AWS_INTEGRATION.md)
-- [Windows release signing](RELEASE_SIGNING.md)
+- [Voice agent](docs/architecture/VOICE_AGENT.md)
+- [AWS connection](docs/integrations/AWS_INTEGRATION.md)
+- [Windows release signing](docs/release/RELEASE_SIGNING.md)
 - [Local logs and Lucia diagnostics](logs/README.md)
 
 ## License
