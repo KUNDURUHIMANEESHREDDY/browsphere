@@ -334,6 +334,8 @@ function runLocalModel(req, res) {
 function runFixture(req, res) {
   if (req.url === '/health') return send(res, 200, {ok:true,kind:'fixture'});
   const exact = {
+    '/':'index.html',
+    '/index.html':'index.html',
     '/multistep.html':'multistep.html',
     '/generic-search.html':'generic-search.html',
     '/delayed-docs.html':'delayed-docs.html',
