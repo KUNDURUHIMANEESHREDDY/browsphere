@@ -11,6 +11,44 @@ fn words(text:&str)->HashSet<String>{
         .map(|s|s.to_ascii_lowercase()).collect()
 }
 
+/// Reject obvious planner/DOM metadata instead of executing it as a query.
+pub fn invalid_search_payload(text: &str) -> bool {
+    let value = text.trim().to_lowercase();
+    if value.is_empty() { return true; }
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Strong structural markers are sufficient; ordinary search vocabulary
+    // such as "role:" and "action:" is not metadata by itself.
+    let structural = ["[type]", "node_id:", "node_id=", "search_state:"]
+        .iter().any(|marker| normalized.starts_with(marker)
+            || normalized.contains(&format!(" {}", marker)));
+    let labelled_control = normalized.contains("label:") && normalized.contains("role:");
+    if structural || labelled_control || normalized.starts_with("action: search for ") {
+        return true;
+    }
+    let imperative = ["type ", "enter ", "choose ", "write ", "generate ", "provide ",
+        "insert ", "input ", "formulate ", "select ", "come up with "]
+        .iter().any(|prefix| normalized.starts_with(prefix));
+    let placeholder = ["search query", "search term", "search keyword", "query for a song",
+        "query for a music", "relevant query", "appropriate query"]
+        .iter().any(|phrase| normalized.contains(phrase));
+    imperative && placeholder
+}
+
+#[test]
+fn rejects_instruction_payloads_without_rejecting_real_queries() {
+    for bad in ["", "Type a short search query for a song or music",
+        "Generate an appropriate query", "Provide relevant search keywords",
+        "[type]: input, label: Search, role: combobox, search_state: emptyAction: Type a query",
+        "Action: search for music", "Enter a search term"] {
+        assert!(invalid_search_payload(bad), "accepted: {}", bad);
+    }
+    for good in ["Beethoven piano performance", "Python free certification courses",
+        "how to write a search query", "search query optimization", "type 2 diabetes",
+        "ARIA role: combobox accessibility", "GitHub action: checkout", "role: software engineer"] {
+        assert!(!invalid_search_payload(good), "rejected: {}", good);
+    }
+}
+
 /// Informational, navigation, research and media tasks can safely avoid
 /// unrelated checkout/download/account controls. Real transactions or edits
 /// retain their existing dedicated native policy and approval gates.

@@ -98,7 +98,12 @@ pub fn classify(p:&DomSnapshot)->PageProfile{
     else if count_header&&records>0&&transport_ui{signals.extend(["visible_result_count","numbered_schedule_records","transport_result_controls"]);TransportResults}
     else if empty&&(listing_title||search_url||transport_ui||structure.result_regions>0){signals.push("explicit_empty_result_state");EmptyResults}
     else if structure.loading&&records==0&&structure.priced_cards==0&&structure.paragraphs<2{signals.push("loading_without_records");Loading}
-    else if structure.priced_cards>=2&&(structure.product_cards>=2||structure.result_regions>0){signals.extend(["repeated_visible_price_identity_cards","listing_structure"]);ProductListing}
+    // Ticketed attractions, museums and event search results can contain
+    // multiple price cards without being a retail catalog. Require actual
+    // product identity cards; result regions and prices alone are insufficient.
+    else if structure.priced_cards>=2&&structure.product_cards>=2{
+        signals.extend(["repeated_visible_price_identity_cards","listing_structure"]);ProductListing
+    }
     else if commerce&&price_text(&p.text_excerpt)&&(structure.offer_blocks>0||structure.headings>0)&&structure.priced_cards<2{signals.extend(["visible_price","product_action","product_content"]);ProductDetail}
     else if (listing_title||search_url||count_header)&&(structure.result_links>0||links>=2)&&readable{signals.push("results_context_with_observed_links");SearchResults}
     else if doc_hint&&readable&&(structure.code_blocks>0||structure.paragraphs>=2||structure.headings>=2){signals.push("reference_identity_with_content_structure");Documentation}
@@ -162,6 +167,14 @@ mod tests{
   assert_ne!(classify(&b).kind,PageKind::TransportResults);
   let c=p("Guide","4 Results for Central North. A documentation example shows EXPRESS (12345) Runs On: daily Train Schedule 13:30 to 08:10.");
   assert_ne!(classify(&c).kind,PageKind::TransportResults);
+ }
+ #[test]fn attraction_price_cards_without_product_identity_are_not_shopping(){
+  let mut p=p("Bengaluru family attractions opening hours and entry tickets",
+    "Family friendly museum entrance fee INR 100. Park admission INR 50. Zoo tickets INR 80. Find attraction timings.");
+  p.structure=PageStructure{priced_cards:3,result_regions:2,result_links:3,headings:2,paragraphs:2,..Default::default()};
+  assert_ne!(classify(&p).kind,PageKind::ProductListing);
+  p.structure.product_cards=3;
+  assert_eq!(classify(&p).kind,PageKind::ProductListing);
  }
  #[test]fn products_need_paired_visible_price_and_identity_structure(){
   let mut a=p("Store catalog","Example notebooks INR 59999; Example cameras INR 39999. Public store catalog.");

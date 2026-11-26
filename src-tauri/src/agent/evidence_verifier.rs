@@ -747,6 +747,33 @@ pub fn named_comparison_rationale_only_repair(original:&str,repaired:&str)->Resu
     Ok(repaired.to_string())
 }
 
+/// Permit one new model selection from the exact same immutable evidence
+/// catalog for invalid passage IDs or irrelevant selections. Never retry
+/// missing observed sources or relax the independent factual verifier.
+/// The optional native-passage fallback is allowed only after a bounded
+/// model selection failure. It still requires a new, separately validated
+/// model recommendation; missing official sources remain a hard stop.
+pub fn retryable_grounded_recommendation_error(reason:&str)->bool{
+    retryable_named_comparison_selection_error(reason)
+        || matches!(reason,
+            "Recommendation rationale is missing or excessive"
+            |"No verified recommendation from the named alternatives"
+            |"Recommendation cites numerical limits missing from the selected evidence"
+            |"Recommendation asserts an unlimited feature absent from its cited source"
+            |"Rationale correction changed the recommended option or evidence passage IDs"
+        )
+}
+pub fn retryable_named_comparison_selection_error(reason:&str)->bool{
+    matches!(reason,
+        "Invalid named comparison selection JSON"
+        |"Not every named website has evidence picks"
+        |"Named comparison omitted a source"
+        |"Choose one or two passages per source"
+        |"Selected passage ID is not in the observed source catalog"
+        |"Selected quote does not discuss the requested free-plan comparison"
+        |"Selected quote belongs to an upgraded or paid tier, not necessarily the free plan"
+    ) || reason.starts_with("No explicitly free-tier passage selected for ")
+}
 fn named_free_candidates(goal:&str,source:&SourceEvidence)->Vec<Passage>{
     let mut candidates=candidate_passages(goal,source).into_iter().filter(|p|{
         let lower=p.text.to_ascii_lowercase();
@@ -757,7 +784,20 @@ fn named_free_candidates(goal:&str,source:&SourceEvidence)->Vec<Passage>{
     // Show explicitly free-tier evidence first. Small local selectors may
     // otherwise spend their limited IDs on unrelated feature passages.
     // Original passage IDs and full captured text remain unchanged.
-    candidates.sort_by_key(|p|!p.text.to_ascii_lowercase().contains("free"));
+    candidates.sort_by_key(|p|{
+        let low=p.text.to_ascii_lowercase();
+        // Ranked *observed* text only: prioritize passages about actual free
+        // plans and collaboration, not generic home-page "try for free"
+        // buttons. Original passage IDs, quotes and source URLs are unchanged.
+        let score=i32::from(low.contains("free"))*12
+            + i32::from(low.contains("plan")||low.contains("tier")||low.contains("forever"))*8
+            + i32::from(["member","collaborat","workspace","user","board","block"]
+                .iter().any(|s|low.contains(s)))*6
+            + i32::from(["pricing","limit","storage","task","team"]
+                .iter().any(|s|low.contains(s)))*3
+            - i32::from(low.contains("free trial")||low.contains("try for free"))*12;
+        std::cmp::Reverse(score)
+    });
     candidates.truncate(7);
     candidates
 }
@@ -785,6 +825,95 @@ pub fn named_comparison_catalog(goal:&str,sources:&[SourceEvidence])->Option<ser
     }
     Some(serde_json::json!({"original_goal":goal,"sources":rows,
         "instruction":"Select 1-2 directly relevant passage IDs PER source. Compare free-plan constraints for the requested team size. Recommend only one of the names. If evidence does not establish suitability, leave recommended and rationale empty."}))
+}
+
+/// Native, source-grounded selection fallback when a compact model cannot
+/// copy passage IDs reliably. All quotes and IDs originate from the currently
+/// captured official source catalog, never from model output.
+pub fn grounded_named_comparison_catalog(goal:&str,sources:&[SourceEvidence])->Option<serde_json::Value>{
+    let names=super::deliberation::named_research_entities(goal);
+    if names.len()<2{return None;}
+    let mut picks=Vec::new();
+    let mut evidence=Vec::new();
+    for name in names {
+        let page=best_named_free_source(goal,sources,&name)?;
+        let candidates=named_free_candidates(goal,page);
+        let best=candidates.iter().find(|p|{
+            let t=p.text.to_ascii_lowercase();
+            t.contains("free") && ["plan","tier","forever","member","collaborat",
+                "workspace","user","board","block"].iter().any(|w|t.contains(w))
+        })?;
+        if !page.excerpt.contains(&best.text){return None;}
+        // A team-size comparison has two distinct evidentiary questions:
+        // does a free tier exist, and what team/member limits apply? Keep a
+        // separate exact observed capacity quote only if it provides actual
+        // limits or explicit multi-user/team suitability. Generic marketing
+        // paragraphs must not become supporting findings.
+        let wants_team=goal.to_ascii_lowercase().contains("team")
+            ||goal.to_ascii_lowercase().contains("member");
+        let capacity=if wants_team {
+            candidates.iter().filter(|p|p.id!=best.id).find(|p|{
+                let t=p.text.to_ascii_lowercase();
+                let numeric=t.chars().any(|c|c.is_ascii_digit());
+                let team=["collaborator","member","users","user per","seats","workspace"]
+                    .iter().any(|w|t.contains(w));
+                let limit=["up to ","unlimited","limit","include","supports","allows"]
+                    .iter().any(|w|t.contains(w));
+                team&&(numeric||limit)&&t.contains("free")
+                    && !t.contains("free trial")
+            })
+        }else{None};
+        let mut selected=vec![best];
+        if let Some(capacity)=capacity {selected.push(capacity);}
+        picks.push(serde_json::json!({"name":name,
+            "ids":selected.iter().map(|p|p.id.clone()).collect::<Vec<_>>()}));
+        evidence.push(serde_json::json!({"name":name,"source":page.url,
+            "quotes":selected.iter().map(|p|p.text.as_str()).collect::<Vec<_>>()}));
+    }
+    Some(serde_json::json!({"original_goal":goal,"picks":picks,"evidence":evidence}))
+}
+
+/// A model may suggest only the winning alternative and a rationale; it may
+/// not submit or alter source IDs. Rust revalidates exact quote provenance,
+/// numerical limits and named-source coverage afterwards.
+pub fn grounded_named_recommendation_report(
+    goal:&str,sources:&[SourceEvidence],catalog:&serde_json::Value,raw:&str
+)->Result<VerificationReport,String>{
+    let raw=raw.trim();
+    if raw.len()>6000{return Err("Invalid grounded recommendation JSON".into());}
+    let start=raw.find('{').ok_or("Invalid grounded recommendation JSON")?;
+    let end=raw.rfind('}').ok_or("Invalid grounded recommendation JSON")?;
+    if start>=end{return Err("Invalid grounded recommendation JSON".into());}
+    let choice:serde_json::Value=serde_json::from_str(&raw[start..=end])
+        .map_err(|_|"Invalid grounded recommendation JSON".to_string())?;
+    if !choice.as_object().is_some_and(|fields|fields.len()==2
+        &&fields.contains_key("recommended")&&fields.contains_key("rationale")){
+        return Err("Grounded recommendation may not supply or modify evidence IDs".into());
+    }
+    let recommended=choice.get("recommended").and_then(serde_json::Value::as_str)
+        .ok_or("Invalid grounded recommendation JSON")?;
+    let rationale=choice.get("rationale").and_then(serde_json::Value::as_str)
+        .ok_or("Invalid grounded recommendation JSON")?;
+    let picks=catalog.get("picks").ok_or("Missing native grounded evidence picks")?;
+    let reconstructed=serde_json::json!({"picks":picks,
+        "recommended":recommended,"rationale":rationale});
+    named_comparison_report(goal,sources,&reconstructed.to_string())
+}
+
+/// A bounded follow-up selection may fill *missing* team-capacity passages
+/// from the same observed official sources. The recommendation and rationale
+/// are copied from the original model choice, not rewritten to pass review;
+/// every native passage ID and claim is independently revalidated below.
+pub fn reselect_named_comparison_report(
+    goal:&str,sources:&[SourceEvidence],initial:&str
+)->Result<VerificationReport,String>{
+    let original=parse_named_comparison_response(initial)?;
+    let catalog=grounded_named_comparison_catalog(goal,sources)
+        .ok_or("No additional grounded free-plan evidence available")?;
+    let decision=serde_json::json!({
+        "recommended":original.recommended,"rationale":original.rationale
+    });
+    grounded_named_recommendation_report(goal,sources,&catalog,&decision.to_string())
 }
 
 pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Result<VerificationReport,String>{
@@ -886,6 +1015,45 @@ mod named_comparison_selection_tests{
             SourceEvidence{url:"https://clickup.com/pricing".into(),title:"ClickUp Free Pricing".into(),
                 excerpt:"ClickUp Free Forever plan includes collaborative tasks for unlimited members. The Free plan offers limited storage.".into()}
         ]
+    }
+    #[test]
+    fn grounded_recommendation_uses_only_native_source_passage_ids(){
+        let sources=sources();
+        let catalog=grounded_named_comparison_catalog(GOAL,&sources).unwrap();
+        assert_eq!(catalog["picks"].as_array().unwrap().len(),3);
+        let draft=serde_json::json!({"recommended":"Trello",
+            "rationale":"Trello Free plan includes unlimited cards and up to 10 collaborators per workspace."});
+        assert!(grounded_named_recommendation_report(GOAL,&sources,&catalog,
+            &draft.to_string()).is_ok());
+        let forged=serde_json::json!({"recommended":"Trello",
+            "rationale":"Trello Free plan includes unlimited cards and up to 10 collaborators per workspace.",
+            "picks":[{"name":"Notion","ids":["invented"]}]});
+        assert!(grounded_named_recommendation_report(GOAL,&sources,&catalog,
+            &forged.to_string()).is_err());
+        let unsupported=serde_json::json!({"recommended":"Trello",
+            "rationale":"Trello offers unlimited storage and 100 collaborators for free."});
+        assert!(grounded_named_recommendation_report(GOAL,&sources,&catalog,
+            &unsupported.to_string()).is_err());
+    }
+    #[test]
+    fn retryable_selection_errors_never_relax_source_authenticity(){
+        for reason in ["Selected passage ID is not in the observed source catalog",
+            "Selected quote does not discuss the requested free-plan comparison",
+            "Not every named website has evidence picks"]{
+            assert!(retryable_named_comparison_selection_error(reason));
+        }
+        for reason in ["Named source was not observed",
+            "Recommendation cites numerical limits missing from the selected evidence",
+            "Recommendation asserts an unlimited feature absent from its cited source"]{
+            assert!(!retryable_named_comparison_selection_error(reason));
+        }
+        let raw=serde_json::json!({"picks":[
+            {"name":"Notion","ids":["invented"]},
+            {"name":"Trello","ids":["p1"]},
+            {"name":"ClickUp","ids":["p1"]}],
+            "recommended":"Trello","rationale":"Trello supports five people."});
+        assert_eq!(named_comparison_report(GOAL,&sources(),&raw.to_string()).unwrap_err(),
+            "Selected passage ID is not in the observed source catalog");
     }
     #[test]
     fn prefers_observed_free_tier_pricing_page_over_generic_brand_homepage(){

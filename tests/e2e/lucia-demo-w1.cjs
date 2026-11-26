@@ -29,7 +29,7 @@ async function attach() {
     const id=++seq;
     return Promise.race([
       new Promise((yes,no)=>{pending.set(id,{yes,no});ws.send(JSON.stringify({id,method,params}));}),
-      sleep(12000).then(()=>{if(pending.has(id)){pending.delete(id);throw Error('CDP timeout '+method);}})
+      sleep(24000).then(()=>{if(pending.has(id)){pending.delete(id);throw Error('CDP timeout '+method);}})
     ]);
   }
   async function evalJs(js) {
@@ -91,10 +91,23 @@ async function main(){
       const id=await evalJs('window.aetherBridge.startLuciaSpecialistTask('+JSON.stringify(goal)+','+JSON.stringify(initial)+",'Cross-site test')");
       if(!/^[a-f0-9-]{36}$/i.test(String(id||''))) throw Error('No task ID');
       let events=[], end=null, approvalRequired=false,approvalReceipts=[];
+      let transientCdpPollErrors=0;
       const handledApprovals=new Set();
       for(let i=0;i<timeoutSeconds;i++){
         await sleep(1000);
-        events=(await evalJs('window.__crossSiteEvents.slice(-400)'))||[];
+        try{
+          events=(await evalJs('window.__crossSiteEvents.slice(-400)'))||[];
+          transientCdpPollErrors=0;
+        }catch(error){
+          // UI polling is read-only. A busy WebView2 can temporarily miss a
+          // CDP deadline while the native agent continues to run. Never retry
+          // task starts, mutations or user-facing browser actions.
+          if(String(error).includes('CDP timeout Runtime.evaluate') && ++transientCdpPollErrors<=3){
+            console.log('CDP_TRANSIENT_POLL_RETRY',transientCdpPollErrors);
+            continue;
+          }
+          throw error;
+        }
         const mine=events.filter(e=>e.payload?.run_id===id);
         const approvals=mine.filter(e=>e.kind==='agent:approval_required'&&!handledApprovals.has(e.payload?.approval_id));
         if(approvals.length){
@@ -480,7 +493,8 @@ async function main(){
     if(process.env.LUCIA_DEMO_W1==='1'){
       if(!hasQwen)throw Error('Local model unavailable');
       const goal='Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the most suitable option.';
-      const task=await runTask(goal,'browsphere://start',240);
+      const fullGoal=process.env.LUCIA_W1_DEMO_WRAPPED==='1' ? 'W1 — Compare productivity tools Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the most suitable option. Tests: Multi-website research, pricing extraction, constraint preservation and decision-making.High demo suitability' : goal;
+      const task=await runTask(fullGoal,'browsphere://start',240);
       const expected=['notion','trello','clickup'];
       const hosts=new Set((task.report?.findings||[]).map(f=>{try{return new URL(f.url).hostname.replace(/^www\./,'').split('.')[0].toLowerCase()}catch{return ''}}));
       const allSources=expected.every(name=>hosts.has(name));

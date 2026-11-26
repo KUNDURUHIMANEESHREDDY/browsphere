@@ -54,9 +54,81 @@ pub fn target_sources(goal:&str,sources:&[SourceEvidence])->Vec<SourceEvidence>{
 }
 // Explicit planning deliverables are tracked even before a source is known.
 // Missing facts cannot be promoted merely because a browser visited a page.
+/// Reject vague "open daily" claims: at least one explicit clock reading
+/// must appear alongside the source's stated hours/timings.
+fn has_clock_time(text:&str)->bool{
+    let mut previous="";
+    for token in text.split_whitespace(){
+        let value=token.trim_matches(|c:char|!(c.is_ascii_alphanumeric()||c==':'));
+        let clock=value.split_once(':').and_then(|(h,m)|{
+            let h=h.parse::<u8>().ok()?;
+            let m=m.chars().take_while(char::is_ascii_digit).collect::<String>()
+                .parse::<u8>().ok()?;
+            (h<=23&&m<=59).then_some(())
+        }).is_some();
+        let suffix=value.strip_suffix("am").or_else(||value.strip_suffix("pm"))
+            .and_then(|h|h.parse::<u8>().ok())
+            .is_some_and(|h|(1..=12).contains(&h));
+        let paired=matches!(value,"am"|"pm")&&previous.parse::<u8>().ok()
+            .is_some_and(|h|(1..=12).contains(&h));
+        if clock||suffix||paired{return true;}
+        previous=value;
+    }
+    false
+}
+/// An open-ended outing requires three separately observed public attraction
+/// pages with actual hours and admission-price evidence. Search result indexes,
+/// shopping pages and generic directories do not count as attractions.
+fn verified_planning_candidates(sources:&[SourceEvidence])->Vec<&SourceEvidence>{
+    let mut seen=HashSet::<String>::new();
+    sources.iter().filter(|s|{
+        let Some(url)=web(&s.url)else{return false;};
+        let host=url.host_str().unwrap_or("").trim_start_matches("www.");
+        if ["bing.com","google.com","duckduckgo.com","yahoo.com"]
+            .iter().any(|search|host==*search){return false;}
+        let title=s.title.to_lowercase();
+        let text=s.excerpt.to_lowercase();
+        let attraction=["park","garden","museum","zoo","palace","aquarium",
+            "science centre","science center","planetarium","botanical",
+            "attraction","gallery","fort"].iter()
+            .any(|word|title.contains(word)||text.contains(word));
+        let timing=has_clock_time(&text)
+            && ["open","hours","timings","time","closing"]
+                .iter().any(|word|text.contains(word));
+        let pricing=(text.contains('₹')||text.contains("inr ")
+                ||text.contains("rs.")||text.contains("rs "))
+            && ["ticket","entry","admission","fee","price"]
+                .iter().any(|word|text.contains(word));
+        let identity=format!("{}:{}",host,title);
+        attraction&&timing&&pricing&&seen.insert(identity)
+            &&browser_skills::readable(&page(s))
+    }).collect()
+}
+fn first_currency_amount(text:&str)->Option<u32>{
+    let lower=text.to_ascii_lowercase();
+    let starts=lower.match_indices("inr ").map(|(i,_)|i+4)
+        .chain(lower.match_indices("rs.").map(|(i,_)|i+3))
+        .chain(lower.match_indices("rs ").map(|(i,_)|i+3))
+        .chain(text.match_indices('₹').map(|(i,_)|i+'₹'.len_utf8()));
+    for start in starts{
+        let tail=text.get(start..)?.trim_start_matches(|c:char|c.is_whitespace()||c==':'||c=='=');
+        let digits=tail.chars().take_while(|c|c.is_ascii_digit()||*c==',').filter(|c|*c!=',').collect::<String>();
+        if let Ok(amount)=digits.parse::<u32>(){return Some(amount);}
+    }
+    None
+}
+/// Currency amount in the explicit total clause, never an arbitrary entry fee.
+fn stated_outing_total(summary:&str)->Option<u32>{
+    let lower=summary.to_ascii_lowercase();
+    let at=lower.find("total")?;
+    first_currency_amount(summary.get(at+5..)?)
+}
 fn planning_requirements(goal:&str)->Vec<&'static str>{
     let g=goal.to_ascii_lowercase();
-    if !deliberation::read_only(goal)||!g.trim_start().starts_with("plan "){return vec![];}
+    if !deliberation::read_only(goal)
+        || !super::policy::public_research_objective(goal).to_ascii_lowercase().starts_with("plan "){
+        return vec![];
+    }
     let mut out=vec!["research_subjects"];
     for (kind,terms) in [("opening_hours", &["opening hours","opening times"][..]),("price", &["ticket price","admission price","cost","budget"][..]),("budget_constraint", &["under ","budget","within "][..]),("itinerary", &["itinerary","schedule"][..])]{
         if terms.iter().any(|t|g.contains(t)){out.push(kind);}
@@ -90,7 +162,14 @@ impl Ledger{
         for r in &mut self.requirements{
             r.candidates=0;r.state=State::Missing;
             match &r.scope{
-                Scope::OpenResearch=>{},
+                Scope::OpenResearch=>{
+                    // Candidate evidence is not final verification. Every
+                    // source must independently show admission pricing and
+                    // hours before synthesis can even be attempted.
+                    let candidates=verified_planning_candidates(sources);
+                    r.candidates=candidates.len();
+                    if candidates.len()>=3{r.state=State::Candidate;}
+                },
                 Scope::CoursePlatform(i)=>{if course_hosts.len()>*i{r.state=State::Observed;}},
                 Scope::Target=>{if self.target_scope.is_some(){r.state=State::Observed;}},
                 Scope::Source(url)=>{if sources.iter().any(|s|source_matches(s,url)&&browser_skills::readable(&page(s))){r.state=State::Observed;}},
@@ -140,6 +219,13 @@ impl Ledger{
             })
     }
     pub fn ready(&self)->bool{!self.supported||self.requirements.iter().all(|r|r.state!=State::Missing)}
+    /// Open-ended planning can move from browsing to independent factual review
+    /// only when its specific attraction/time/price candidate contract is met.
+    /// This is not approval of the itinerary or its arithmetic.
+    pub fn planning_review_ready(&self)->bool{
+        self.supported && self.ready() && self.requirements.iter().any(|r|
+            r.kind=="itinerary" && matches!(r.state,State::Candidate|State::Verified))
+    }
     pub fn missing(&self)->Vec<&'static str>{self.requirements.iter().filter(|r|r.state==State::Missing).map(|r|r.kind).collect()}
     pub fn hint(&self)->String{
         if !self.supported{return "No compiled fact contract; existing independent verification still applies.".into();}
@@ -162,6 +248,54 @@ impl Ledger{
         if self.requirements.iter().any(|r|r.state==State::Missing
             && !matches!(&r.scope,Scope::Fact{..})){
             self.can_review()?;
+        }
+        if self.requirements.iter().any(|r|matches!(r.scope,Scope::OpenResearch)){
+            let candidates=verified_planning_candidates(sources);
+            if candidates.len()<3{
+                return Err("Fewer than three independently observed attractions with opening hours and prices".into());
+            }
+            // An observed attraction must also have an exact quote in the
+            // independently verified report, not simply appear in browser
+            // history. A generic search-result excerpt is insufficient.
+            let grounded=candidates.iter().filter(|source|
+                report.findings.iter().any(|f|source_matches(source,&f.url)
+                    &&browser_skills::verification::quote_present(source,&f.quote))
+            ).count();
+            if grounded<3{
+                return Err("Fewer than three attractions supported by verified report findings".into());
+            }
+            let summary=report.summary.to_lowercase();
+            if !summary.contains("itinerary") || !summary.contains("total"){
+                return Err("Verified outing requires an itinerary and itemized budget total".into());
+            }
+            let budget=first_currency_amount(goal)
+                .ok_or("Outing budget amount cannot be parsed from the original request")?;
+            let total=stated_outing_total(&report.summary)
+                .ok_or("Outing itinerary has no numeric rupee total")?;
+            if total>=budget{
+                return Err(format!("Proposed outing total INR {total} violates budget INR {budget}"));
+            }
+            // The only currently deterministic group-price calculation is a
+            // per-person admission fee on each official attraction page.
+            // Different child/adult pricing needs a richer structured quote
+            // contract and must not be guessed from an unlabelled amount.
+            let mut tickets=0_u32;
+            for source in &candidates{
+                if !source.excerpt.to_ascii_lowercase().contains("per person"){
+                    return Err("Attraction ticket quote lacks per-person pricing needed for group calculation".into());
+                }
+                let price=first_currency_amount(&source.excerpt)
+                    .ok_or("Attraction entry fee is not a numeric rupee amount")?;
+                tickets=tickets.checked_add(price)
+                    .ok_or("Attraction admission-price calculation overflow")?;
+            }
+            let group_admission=tickets.checked_mul(4)
+                .ok_or("Family admission-price calculation overflow")?;
+            if total<group_admission{
+                return Err(format!("Outing total INR {total} understates four-person admissions INR {group_admission}"));
+            }
+            for r in &mut self.requirements{r.state=State::Verified;}
+            return Ok(());
         }
         if super::course_comparison::count(goal).is_some(){
             super::course_comparison::validate(goal,sources,report)?;
@@ -256,6 +390,45 @@ mod tests{
   assert_eq!(l.missing(),vec!["research_subjects","opening_hours","price","budget_constraint","itinerary"]);
   l.refresh(g,&[s("https://example.org/","Example","A generic page with opening hours and ticket prices.")]);
   assert!(l.can_review().is_err());
+ }
+ #[test]fn admission_hours_require_explicit_clock_not_vague_opening_claim(){
+  assert!(has_clock_time("open 9 am to 5 pm"));
+  assert!(has_clock_time("opens 09:30 and closes 17:00"));
+  assert!(has_clock_time("hours are 9am - 4pm"));
+  assert!(!has_clock_time("open daily with regular working hours"));
+  assert!(!has_clock_time("open 24 hours without listed admission times"));
+ }
+ #[test]fn outing_requires_three_observed_attractions_before_review(){
+  let g="Plan a Sunday outing in Bengaluru for a family of four under INR 2000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary.";
+  let places=vec![
+   s("https://park.example.org/visit","Rose Garden Park Official Tickets","Rose Garden Park opening hours 9 am to 5 pm. Entry ticket price INR 100 per person. Family visitors can tour the garden."),
+   s("https://museum.example.org/plan","Science Museum Tickets","Science Museum opening hours 10 am to 5 pm. Admission fee INR 150 per person, visitors can tour the exhibits."),
+   s("https://zoo.example.org/hours","City Zoo Entry Tickets","City Zoo opening hours 9 am to 4 pm. Entry ticket fee INR 75 per person for visitors."),
+  ];
+  let mut ledger=Ledger::compile(g);
+  ledger.refresh(g,&places[..2]);
+  assert!(!ledger.ready());
+  assert!(!ledger.planning_review_ready(),"two attractions must not trigger itinerary review");
+  ledger.refresh(g,&places);
+  assert!(ledger.ready(),"three independent ticket+hours pages should be evidence candidates");
+  assert!(ledger.planning_review_ready(),"three genuine priced/timed attractions should trigger independent review");
+  assert!(ledger.requirements.iter().all(|r|r.state==State::Candidate));
+  let report=ev::VerificationReport{status:"evidence_checked".into(),summary:"Itinerary: park 9 am, museum 11 am, zoo 2 pm. Total ₹1300 including four tickets per site.".into(),limitations:String::new(),findings:places.iter().map(|p|ev::GroundedFinding{url:p.url.clone(),claim:p.excerpt.clone(),quote:p.excerpt.clone()}).collect()};
+  assert!(ledger.validate_report(g,&places,&report).is_ok());
+  assert!(ledger.requirements.iter().all(|r|r.state==State::Verified));
+  let mut insufficient=report.clone();
+  insufficient.summary="Itinerary: park, museum, zoo. Total ₹900 for four people.".into();
+  assert!(ledger.validate_report(g,&places,&insufficient).is_err(),
+      "the total must account for all four admission tickets at each attraction");
+  insufficient.summary="Itinerary: park, museum, zoo. Total ₹2500 for four people.".into();
+  assert!(ledger.validate_report(g,&places,&insufficient).is_err(),
+      "an over-budget total must fail");
+  let bogus=vec![places[0].clone(),places[0].clone(),places[1].clone()];
+  ledger.refresh(g,&bogus);
+  assert!(!ledger.ready(),"duplicate attractions may not satisfy three-source coverage");
+  let search=s("https://www.bing.com/search?q=family","Science Museum Park results","Museum opening hours 10 am to 5 pm. Entry ticket price INR 150.");
+  ledger.refresh(g,&[places[0].clone(),places[1].clone(),search]);
+  assert!(!ledger.ready(),"search-result pages must not count as observed attractions");
  }
  #[test]fn planning_provides_missing_evidence_as_native_action_objective(){
   let g="Plan a Sunday outing. Find three family attractions, check opening hours and ticket prices, and prepare an itinerary under INR 2000.";

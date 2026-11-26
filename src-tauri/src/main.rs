@@ -2077,6 +2077,9 @@ async fn route_lucia_intent(
     if let Some(intent) = agent::intent_router::LuciaIntent::explicit_media_task(&message) {
         return Ok(intent);
     }
+    if let Some(intent) = agent::intent_router::LuciaIntent::explicit_browser_task(&message) {
+        return Ok(intent);
+    }
     let router = state.router.lock().await;
     router.route_lucia_intent(&message, &state.creds)
         .await.map_err(|e| e.to_string())
@@ -2542,6 +2545,9 @@ async fn start_agent_run(
     voice_mode: Option<bool>,
     task_tab_id: Option<String>,
 ) -> Result<Uuid, String> {
+    if goal.trim().is_empty() || goal.len() > 8000 {
+        return Err("Lucia requires a nonempty task instruction of at most 8,000 bytes.".into());
+    }
     if agent::intent_router::LuciaIntent::explicit_chat_greeting(&goal).is_some(){
         return Err("This is a greeting, not a browser task. Reply in Lucia chat instead.".into());
     }
@@ -2550,7 +2556,11 @@ async fn start_agent_run(
     // otherwise produces minutes of 404s and unrelated recovery actions.
     // Cloud-only users are not probed through Ollama.
     let configured_router = { state.router.lock().await.clone() };
-    configured_router.preflight_agent_model(&snapshot.origin).await
+    // Admission-time routing is per run: prefer local when memory permits,
+    // otherwise use an already configured cloud provider with credentials.
+    // Never silently change the saved AI & ML settings.
+    let task_router=configured_router.task_route_with_memory(&snapshot.origin,&state.creds);
+    task_router.preflight_agent_model(&snapshot.origin).await
         .map_err(|e|e.to_string())?;
     let private_mode = is_private.unwrap_or(false);
     let memory_enabled = allow_learning.unwrap_or(false) && !private_mode;
@@ -2622,6 +2632,22 @@ async fn start_agent_run(
     if app.get_webview(&agent_label).is_none() {
         return Err("Lucia could not attach to the active browser WebView2 tab.".into());
     }
+    // Creating a background WebView does not prove its document is ready.
+    // For an existing website, observe the NEW task WebView (never the
+    // foreground snapshot) before registering an executable task.
+    if dedicated && snapshot.origin.starts_with("https://") {
+        let mut ready=false;
+        for _ in 0..3 {
+            if let Some(observed)=request_live_dom_snapshot(&app,&agent_label,
+                &state.pending_snapshots,1200).await {
+                if observed.origin.starts_with("https://") {ready=true;break;}
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        if !ready {
+            return Err("Lucia's background task tab did not become ready; retry in a fresh tab.".into());
+        }
+    }
 
     let run_id = Uuid::new_v4();
     // Persist the new run before replacing the active cancellation/target
@@ -2638,7 +2664,10 @@ async fn start_agent_run(
 
     if !private_mode {
         diagnostics::record("agent", "run_started", serde_json::json!({
-            "run_id": run_id.to_string(), "count": max_steps.unwrap_or(20)
+            "run_id": run_id.to_string(), "count": max_steps.unwrap_or(20),
+            "task_tab_dedicated": dedicated,
+            "snapshot_origin_kind": if snapshot.origin == "about:blank" { "blank" } else if snapshot.origin.starts_with("https://") { "https" } else { "other" },
+            "goal_length": goal.len(), "goal_present": !goal.trim().is_empty()
         }));
     }
     let cancel_token = CancellationToken::new();
@@ -2714,7 +2743,7 @@ async fn start_agent_run(
         }
     });
 
-    let router_arc = state.router.clone();
+    let router_arc = Arc::new(Mutex::new(task_router));
     let creds_arc = state.creds.clone();
     let itp_arc = state.itp.clone();
     let downloads_arc = state.downloads.clone();

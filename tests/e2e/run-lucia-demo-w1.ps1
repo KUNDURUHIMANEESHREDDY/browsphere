@@ -1,6 +1,6 @@
 # Real public-site Lucia/browser tests against the current compiled native app.
 # Runs with a disposable WebView2 profile; never uses personal browser credentials.
-param([string]$ExecutablePath = "", [int]$CdpPort = 9391, [switch]$OnlyCompatibility, [switch]$OnlyWikipedia, [switch]$OnlyPythonTutorial, [switch]$UseSavedCloud)
+param([string]$ExecutablePath = "", [int]$CdpPort = 9391, [switch]$OnlyCompatibility, [switch]$OnlyWikipedia, [switch]$OnlyPythonTutorial, [switch]$UseSavedCloud, [switch]$SkipCompatibility)
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $ExecutablePath) {
@@ -44,7 +44,11 @@ $env:LUCIA_CDP_PORT = "$CdpPort"
 $env:BROWSER_CDP_PORT = "$CdpPort"
 $app = $null
 try {
-    $app = Start-Process -FilePath $ExecutablePath -WorkingDirectory $root -PassThru
+    if ($env:LUCIA_TEST_W1_VERIFIER_DIAGNOSTIC -eq '1') {
+        $app = Start-Process -FilePath $ExecutablePath -WorkingDirectory $root -PassThru -RedirectStandardError (Join-Path $root 'logs\w1-verifier-error-native.log')
+    } else {
+        $app = Start-Process -FilePath $ExecutablePath -WorkingDirectory $root -PassThru
+    }
     Write-Host "Isolated native instance: PID=$($app.Id) CDP=$CdpPort"
     $ready = $false
     for ($i=0; $i -lt 90; $i++) {
@@ -57,7 +61,7 @@ try {
     if (-not $ready) { throw "Native app did not expose an isolated WebView2 CDP target" }
     Set-Location $root
     $compatExit=0
-    if (-not $OnlyWikipedia -and -not $OnlyPythonTutorial) {
+    if (-not $OnlyWikipedia -and -not $OnlyPythonTutorial -and -not $SkipCompatibility) {
         Write-Host "=== Real-site WebView2 compatibility ==="
         & node (Join-Path $root "tests\e2e\browser-compat.mjs")
         $compatExit=$LASTEXITCODE

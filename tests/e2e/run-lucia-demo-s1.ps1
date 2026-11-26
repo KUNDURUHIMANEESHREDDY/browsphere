@@ -1,6 +1,6 @@
 # Real public-site Lucia/browser tests against the current compiled native app.
 # Runs with a disposable WebView2 profile; never uses personal browser credentials.
-param([string]$ExecutablePath = "", [int]$CdpPort = 9391, [switch]$OnlyCompatibility, [switch]$OnlyWikipedia, [switch]$OnlyPythonTutorial, [switch]$UseSavedCloud)
+param([string]$ExecutablePath = "", [int]$CdpPort = 9391, [switch]$OnlyCompatibility, [switch]$OnlyWikipedia, [switch]$OnlyPythonTutorial, [switch]$UseSavedCloud, [switch]$SkipCompatibility)
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $ExecutablePath) {
@@ -57,7 +57,7 @@ try {
     if (-not $ready) { throw "Native app did not expose an isolated WebView2 CDP target" }
     Set-Location $root
     $compatExit=0
-    if (-not $OnlyWikipedia -and -not $OnlyPythonTutorial) {
+    if (-not $OnlyWikipedia -and -not $OnlyPythonTutorial -and -not $SkipCompatibility) {
         Write-Host "=== Real-site WebView2 compatibility ==="
         & node (Join-Path $root "tests\e2e\browser-compat.mjs")
         $compatExit=$LASTEXITCODE

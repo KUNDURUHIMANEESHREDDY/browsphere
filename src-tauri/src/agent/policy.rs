@@ -274,6 +274,28 @@ pub fn requested_search_entry_url(goal: &str) -> Option<Url> {
 
 /// A search waypoint for each source explicitly named by the user.
 /// No inferred official URLs; results still require page evidence and policy.
+/// Once a named official homepage lacks verifiable free-plan details, make a
+/// single read-only discovery query for that same user-named source. This is
+/// NOT an inferred official pricing URL; the returned search result must be
+/// observed, bound to the actual destination, and independently verified.
+pub fn named_pricing_recovery_waypoint(goal:&str,stage:usize,origin:&str)->Option<Url>{
+    if !super::deliberation::read_only(goal) ||
+        !goal.to_ascii_lowercase().contains("free plan"){return None;}
+    let names=super::deliberation::named_research_entities(goal);
+    let name=names.get(stage)?;
+    let current=Url::parse(origin).ok()?;
+    if current.scheme()!="https"||current.port().is_some()||
+        !current.username().is_empty()||current.password().is_some(){return None;}
+    let brand=name.to_ascii_lowercase().replace([' ','-'],"");
+    let host=current.host_str()?.strip_prefix("www.").unwrap_or(current.host_str()?);
+    let parts=host.split('.').collect::<Vec<_>>();
+    if parts.len()!=2||parts[0]!=brand||!parts[1].chars().all(|c|c.is_ascii_alphabetic()){
+        return None;
+    }
+    let mut target=Url::parse("https://www.bing.com/search").ok()?;
+    target.query_pairs_mut().append_pair("q",&format!("{name} free plan pricing official features limits"));
+    Some(target)
+}
 pub fn named_research_waypoint(goal:&str, stage:usize)->Option<Url>{
     let names=super::deliberation::named_research_entities(goal);
     let name=names.get(stage)?;
@@ -287,6 +309,30 @@ pub fn named_research_waypoint(goal:&str, stage:usize)->Option<Url>{
 /// evidence or permission to complete. The query is supplied by the user.
 /// Reduce verbose public outing requests to search terms without changing
 /// the original budget, people count, or factual completion requirements.
+/// Strip only presentation metadata from a user-authored demo task.
+/// The full original goal still goes through read-only/safety checks and
+/// independent verification. This changes search discovery text only.
+pub fn public_research_objective(goal:&str)->&str{
+    let mut text=goal.trim();
+    if let Some((before,_))=text.split_once(" Tests:"){
+        text=before.trim();
+    }
+    if let Some((marker,remainder))=text.split_once(" — "){
+        let marker=marker.trim();
+        let valid=marker.len()>=2 && marker.len()<=4 &&
+            marker.as_bytes()[0].is_ascii_alphabetic() &&
+            marker.as_bytes()[1..].iter().all(|byte|byte.is_ascii_digit());
+        if valid {text=remainder.trim();}
+    }
+    text
+}
+fn public_research_query(goal:&str)->String{
+    let objective=public_research_objective(goal);
+    super::course_comparison::discovery_terms(objective)
+        .or_else(||compact_public_outing_query(objective))
+        .unwrap_or_else(||objective.to_string())
+}
+
 fn compact_public_outing_query(goal:&str)->Option<String>{
     let lower=goal.to_ascii_lowercase();
     if !super::deliberation::read_only(goal)
@@ -303,20 +349,19 @@ fn compact_public_outing_query(goal:&str)->Option<String>{
 }
 
 pub fn public_research_bootstrap(goal: &str, origin: &str) -> Option<Url> {
+    let objective=public_research_objective(goal);
     if !matches!(origin, "about:blank" | "browsphere://start")
         || !super::deliberation::read_only(goal)
-        || goal.len() > 300
+        || objective.len() > 300
         || goal.chars().any(char::is_control)
         || !["find ", "research ", "compare ", "search ", "look up ", "visit ", "plan "]
-            .iter().any(|prefix| goal.trim().to_ascii_lowercase().starts_with(prefix))
+            .iter().any(|prefix| objective.to_ascii_lowercase().starts_with(prefix))
         || goal.contains("http://") || goal.contains("https://")
         || requested_navigation_url(goal).is_some()
         || requested_search_entry_url(goal).is_some()
     { return None; }
     let mut url = Url::parse("https://html.duckduckgo.com/html/").ok()?;
-    let query=super::course_comparison::discovery_terms(goal)
-        .or_else(||compact_public_outing_query(goal))
-        .unwrap_or_else(||goal.trim().to_string());
+    let query=public_research_query(goal);
     url.query_pairs_mut().append_pair("q",&query);
     Some(url)
 }
@@ -330,8 +375,7 @@ pub fn public_research_fallback(goal:&str,origin:&str)->Option<Url>{
     if current.scheme()!="https" ||current.host_str()!=Some("html.duckduckgo.com")
         || !matches!(current.path(),"/"|"/html/"){return None;}
     if current.query_pairs().any(|(key,_)|key!="q"){return None;}
-    let expected_query=super::course_comparison::discovery_terms(goal)
-        .unwrap_or_else(||goal.trim().to_string());
+    let expected_query=public_research_query(goal);
     if current.query_pairs().filter(|(key,_)|key=="q")
         .any(|(_,query)|query.as_ref()!=expected_query){return None;}
     let mut target=Url::parse("https://www.bing.com/search").ok()?;
@@ -342,6 +386,27 @@ pub fn public_research_fallback(goal:&str,origin:&str)->Option<Url>{
 /// A bounded return to the original user research query from a live,
 /// clearly off-topic public page. The caller must permit this once only;
 /// this helper never authorizes a result or an inferred destination.
+/// Recover from a repeatedly selected current-page navigation during an
+/// unfinished open-ended outing. Discover alternatives via a public search
+/// using only user-supplied research terms and the ACTUAL observed domain as
+/// an exclusion. This is not an attraction recommendation or evidence.
+pub fn public_planning_alternative_search(goal:&str,origin:&str)->Option<Url>{
+    let objective=public_research_objective(goal).to_ascii_lowercase();
+    if !objective.starts_with("plan ")||!objective.contains("attraction")
+        ||!super::deliberation::read_only(goal){return None;}
+    public_research_bootstrap(goal,"about:blank")?;
+    let page=Url::parse(origin).ok()?;
+    if page.scheme()!="https"||page.port().is_some()
+        ||!page.username().is_empty()||page.password().is_some(){return None;}
+    let host=page.host_str()?.trim_start_matches("www.");
+    if ["bing.com","google.com","duckduckgo.com","yahoo.com"].iter()
+        .any(|s|host==*s||host.ends_with(&format!(".{s}"))){return None;}
+    if host.split('.').count()<2||host.len()>100{return None;}
+    let mut search=Url::parse("https://www.bing.com/search").ok()?;
+    let query=format!("{} -site:{}",public_research_query(goal),host);
+    search.query_pairs_mut().append_pair("q",&query);
+    Some(search)
+}
 pub fn public_offtopic_search(goal:&str,page:&super::dom_extractor::DomSnapshot)->Option<Url>{
     if super::course_comparison::count(goal).is_some()
         ||!super::deliberation::named_research_entities(goal).is_empty(){return None;}
@@ -355,7 +420,7 @@ pub fn public_offtopic_search(goal:&str,page:&super::dom_extractor::DomSnapshot)
     if super::semantic_core::relevance(goal,&format!("{} {}",page.title,
         page.text_excerpt.chars().take(2500).collect::<String>()))>0{return None;}
     let mut target=Url::parse("https://www.bing.com/search").ok()?;
-    target.query_pairs_mut().append_pair("q",goal.trim());
+    target.query_pairs_mut().append_pair("q",&public_research_query(goal));
     Some(target)
 }
 /// Permit only the exactly computed user-query recovery on the observed page;
@@ -508,13 +573,20 @@ pub fn evaluate_user_navigation_policy(
     if public_fallback && actual.host_str().is_some_and(|host|host_matches_allowlist(host,allowed_domains)){
         return (RiskLevel::Low,PolicyDecision::Allow);
     }
+    let planning_alternative=public_planning_alternative_search(goal,active_origin)
+        .is_some_and(|expected|actual==expected);
+    if planning_alternative && actual.host_str().is_some_and(|host|host_matches_allowlist(host,allowed_domains)){
+        return (RiskLevel::Low,PolicyDecision::Allow);
+    }
     let research_bootstrap = public_research_bootstrap(goal,active_origin)
         .is_some_and(|expected| actual == expected);
     if research_bootstrap && actual.host_str().is_some_and(|host|host_matches_allowlist(host,allowed_domains)) {
         return (RiskLevel::Low,PolicyDecision::Allow);
     }
     let named_search_waypoint=super::deliberation::named_research_entities(goal)
-        .iter().enumerate().any(|(stage,_)|named_research_waypoint(goal,stage).as_ref()==Some(&actual));
+        .iter().enumerate().any(|(stage,_)|
+            named_research_waypoint(goal,stage).as_ref()==Some(&actual)
+            || named_pricing_recovery_waypoint(goal,stage,active_origin).as_ref()==Some(&actual));
     if named_search_waypoint && actual.host_str().is_some_and(|host|host_matches_allowlist(host,allowed_domains)){
         return (RiskLevel::Low,PolicyDecision::Allow);
     }
@@ -1118,7 +1190,8 @@ mod research_bootstrap_tests {
         let g="Plan a Sunday outing in Bengaluru for a family of four under INR 2000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary.";
         let target=public_research_fallback(g,"https://html.duckduckgo.com/").expect("missing search query should recover");
         assert_eq!(target.host_str(),Some("www.bing.com"));
-        assert_eq!(target.query_pairs().find(|(k,_)|k=="q").unwrap().1,g);
+        assert_eq!(target.query_pairs().find(|(k,_)|k=="q").unwrap().1,
+            "family friendly attractions bengaluru opening hours ticket prices");
         assert!(matches!(evaluate_user_navigation_policy("https://html.duckduckgo.com/",&BrowserAction::Navigate{url:target.into()},&[],g).1,PolicyDecision::Allow));
         let query_url=public_research_bootstrap(g,"about:blank").unwrap();
         assert!(public_research_fallback(g,query_url.as_str()).is_some());
@@ -1129,7 +1202,8 @@ mod research_bootstrap_tests {
     #[test] fn planning_with_public_research_bootstraps_without_authorizing_transactions() {
         let goal="Plan a Sunday outing in Bengaluru for a family of four under INR 2,000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary.";
         let url=public_research_bootstrap(goal,"about:blank").expect("read-only planning needs a search entry");
-        assert_eq!(url.query_pairs().find(|(k,_)|k=="q").unwrap().1,goal);
+        assert_eq!(url.query_pairs().find(|(k,_)|k=="q").unwrap().1,
+            "family friendly attractions bengaluru opening hours ticket prices");
         assert!(matches!(evaluate_user_navigation_policy("about:blank",&BrowserAction::Navigate{url:url.into()},&[],goal).1,PolicyDecision::Allow));
         assert!(public_research_bootstrap(goal,"https://example.org").is_none());
         assert!(public_research_bootstrap("Plan a trip, find a hotel and book it","about:blank").is_none());
@@ -1197,6 +1271,60 @@ mod duckduckgo_observation_tests {
 #[cfg(test)]
 mod public_outing_discovery_tests {
     use super::*;
+    #[test]
+    fn named_plan_recovery_requires_current_official_origin_and_exact_public_query(){
+        let goal="W1 — Compare productivity tools Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the most suitable option. Tests: Multi-website research, pricing extraction, constraint preservation and decision-making.High demo suitability";
+        let expected=named_pricing_recovery_waypoint(goal,0,"https://www.notion.com/")
+            .expect("named public source may search for missing free plan evidence");
+        assert_eq!(expected.host_str(),Some("www.bing.com"));
+        assert!(expected.query_pairs().any(|(k,v)|k=="q"&&v.contains("Notion free plan pricing")));
+        assert!(matches!(evaluate_user_navigation_policy("https://www.notion.com/",
+            &BrowserAction::Navigate{url:expected.to_string()},&[],goal).1,PolicyDecision::Allow));
+        assert!(named_pricing_recovery_waypoint(goal,1,"https://www.notion.com/").is_none());
+        assert!(named_pricing_recovery_waypoint(goal,0,"https://notion.evil.com/").is_none());
+        assert!(named_pricing_recovery_waypoint(goal,0,"http://www.notion.com/").is_none());
+        assert!(named_pricing_recovery_waypoint("Buy a Notion subscription",0,"https://www.notion.com/").is_none());
+        assert!(matches!(evaluate_user_navigation_policy("https://www.notion.com/",
+            &BrowserAction::Navigate{url:"https://www.bing.com/search?q=unrelated".into()},&[],goal).1,
+            PolicyDecision::RequireApproval{..}));
+    }
+    #[test]
+    fn planning_research_can_exclude_current_observed_site_once(){
+        let goal="P1 — Plan a family weekend Plan a Sunday outing in Bengaluru for a family of four under ₹2,000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary. Tests: Budget constraints, local research, calculations and planning.High demo suitability";
+        let origin="https://www.example-attraction.com/";
+        let expected=public_planning_alternative_search(goal,origin).unwrap();
+        assert_eq!(expected.host_str(),Some("www.bing.com"));
+        let query=expected.query_pairs().find(|(k,_)|k=="q").unwrap().1;
+        assert!(query.contains("family friendly attractions bengaluru"));
+        assert!(query.contains("-site:example-attraction.com"));
+        assert!(matches!(evaluate_user_navigation_policy(origin,
+            &BrowserAction::Navigate{url:expected.to_string()},&[],goal).1,
+            PolicyDecision::Allow));
+        assert!(public_planning_alternative_search(goal,"https://www.bing.com/search?q=x").is_none());
+        assert!(public_planning_alternative_search(goal,"http://example-attraction.com/").is_none());
+        assert!(public_planning_alternative_search("Buy tickets for a park",origin).is_none());
+        assert!(!matches!(evaluate_user_navigation_policy(origin,
+            &BrowserAction::Navigate{url:"https://www.bing.com/search?q=unrelated".into()},&[],goal).1,
+            PolicyDecision::Allow));
+    }
+    #[test]
+    fn titled_demo_outing_bootstraps_without_authorizing_downloads(){
+        let goal="P1 — Plan a family weekend Plan a Sunday outing in Bengaluru for a family of four under ₹2,000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary. Tests: Budget constraints, local research, calculations and planning.High demo suitability";
+        assert!(goal.len()>300);
+        let url=public_research_bootstrap(goal,"browsphere://start")
+            .expect("presentation title and test rubric must not disable read-only research");
+        assert_eq!(url.host_str(),Some("html.duckduckgo.com"));
+        assert_eq!(url.query_pairs().find(|(k,_)|k=="q").unwrap().1,
+            "family friendly attractions bengaluru opening hours ticket prices");
+        assert!(matches!(evaluate_user_navigation_policy("browsphere://start",
+            &BrowserAction::Navigate{url:url.to_string()},&[],goal).1,PolicyDecision::Allow));
+        let recovery=public_research_fallback(goal,url.as_str()).unwrap();
+        assert_eq!(recovery.host_str(),Some("www.bing.com"));
+        assert_eq!(recovery.query_pairs().find(|(k,_)|k=="q").unwrap().1,
+            "family friendly attractions bengaluru opening hours ticket prices");
+        let unsafe_goal=format!("{goal} and download private files");
+        assert!(public_research_bootstrap(&unsafe_goal,"browsphere://start").is_none());
+    }
     #[test]
     fn verbose_outing_request_uses_city_grounded_public_query() {
         let goal="Plan a Sunday outing in Bengaluru for a family of four under INR 2,000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary.";

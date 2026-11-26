@@ -4843,6 +4843,14 @@
         } else if (kind === 'verification' && ['evidence_checked','partial_evidence'].includes(payload.report?.status)) {
           task.verificationReport = payload.report;
           task.verificationSummary = payload.report.summary;
+          if (task.pendingCompletionStatus) {
+            var deferredStatus = task.pendingCompletionStatus;
+            task.pendingCompletionStatus = null;
+            clearTimeout(task.completionTimer);
+            task.completionTimer = null;
+            applyLuciaAgentEvent('status', Object.assign({}, deferredStatus, {finalizeNow:true}));
+            return;
+          }
         } else if (kind === 'workflow_graph') {
           const graph=window.BrowsphereLuciaActivity?.workflowGraph(payload);
           if (graph && (!task.workflowGraph || graph.revision>=task.workflowGraph.revision)) task.workflowGraph=graph;
@@ -4861,6 +4869,20 @@
         } else if (kind === 'error') {
           task.error = payload.message || 'The agent could not complete this step.';
         } else if (kind === 'status') {
+          // Native run status and the verification report arrive on separate
+          // event channels. Give a successful terminal run a short bounded
+          // opportunity to receive its report before rendering a final reply.
+          if (payload.status === 'completed' && !task.verificationReport && !payload.finalizeNow) {
+            task.pendingCompletionStatus = payload;
+            clearTimeout(task.completionTimer);
+            task.completionTimer = setTimeout(function () {
+              if (task.pendingCompletionStatus !== payload) return;
+              task.pendingCompletionStatus = null;
+              task.completionTimer = null;
+              applyLuciaAgentEvent('status', Object.assign({}, payload, {finalizeNow:true}));
+            }, 1200);
+            return;
+          }
           if (task.workflowGraph && payload.status !== 'completed') {
             for (const node of task.workflowGraph.nodes) {
               if (node.state === 'active' || node.state === 'pending') node.state = payload.status === 'cancelled' ? 'cancelled' : 'blocked';

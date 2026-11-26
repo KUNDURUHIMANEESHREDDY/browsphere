@@ -239,6 +239,9 @@ impl RunCore{
             if self.failed.len()>32{self.failed.pop_front();}
         }
     }
+    pub fn failed_before(&self,action:&BrowserAction,page:&DomSnapshot,stage:usize)->bool{
+        self.prepare(action,page,stage).is_some_and(|a|self.failed.contains(&a))
+    }
     pub fn stalled(&self)->bool{self.stalls>0}
     pub fn escalate(&self)->bool{self.stalls>=2}
     // A different observed state or a different unfinished stage can recover

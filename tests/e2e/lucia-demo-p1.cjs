@@ -29,7 +29,7 @@ async function attach() {
     const id=++seq;
     return Promise.race([
       new Promise((yes,no)=>{pending.set(id,{yes,no});ws.send(JSON.stringify({id,method,params}));}),
-      sleep(12000).then(()=>{if(pending.has(id)){pending.delete(id);throw Error('CDP timeout '+method);}})
+      sleep(24000).then(()=>{if(pending.has(id)){pending.delete(id);throw Error('CDP timeout '+method);}})
     ]);
   }
   async function evalJs(js) {
@@ -91,10 +91,23 @@ async function main(){
       const id=await evalJs('window.aetherBridge.startLuciaSpecialistTask('+JSON.stringify(goal)+','+JSON.stringify(initial)+",'Cross-site test')");
       if(!/^[a-f0-9-]{36}$/i.test(String(id||''))) throw Error('No task ID');
       let events=[], end=null, approvalRequired=false,approvalReceipts=[];
+      let transientCdpPollErrors=0;
       const handledApprovals=new Set();
       for(let i=0;i<timeoutSeconds;i++){
         await sleep(1000);
-        events=(await evalJs('window.__crossSiteEvents.slice(-400)'))||[];
+        try{
+          events=(await evalJs('window.__crossSiteEvents.slice(-400)'))||[];
+          transientCdpPollErrors=0;
+        }catch(error){
+          // UI polling is read-only. A busy WebView2 can temporarily miss a
+          // CDP deadline while the native agent continues to run. Never retry
+          // task starts, mutations or user-facing browser actions.
+          if(String(error).includes('CDP timeout Runtime.evaluate') && ++transientCdpPollErrors<=3){
+            console.log('CDP_TRANSIENT_POLL_RETRY',transientCdpPollErrors);
+            continue;
+          }
+          throw error;
+        }
         const mine=events.filter(e=>e.payload?.run_id===id);
         const approvals=mine.filter(e=>e.kind==='agent:approval_required'&&!handledApprovals.has(e.payload?.approval_id));
         if(approvals.length){
@@ -480,9 +493,28 @@ async function main(){
     if(process.env.LUCIA_DEMO_P1==='1'){
       if(!hasQwen)throw Error('Local model unavailable');
       const goal='Plan a Sunday outing in Bengaluru for a family of four under ₹2,000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary.';
-      const task=await runTask(goal,'browsphere://start',150);
-      console.log('DEMO_P1_RESULT',JSON.stringify(task));
-      if(task.status!=='completed'||!task.verified)process.exitCode=1;
+      const demoGoal=process.env.LUCIA_P1_DEMO_WRAPPED==='1'? 'P1 \u2014 Plan a family weekend Plan a Sunday outing in Bengaluru for a family of four under \u20b92,000. Find three family-friendly attractions, check their opening hours and ticket prices, and prepare an itinerary. Tests: Budget constraints, local research, calculations and planning.High demo suitability':goal;
+      const task=await runTask(demoGoal,'browsphere://start',150);
+      const findings=task.report?.findings||[];
+      const summary=String(task.report?.summary||'');
+      const sources=new Set(findings.map(f=>{try{return new URL(f.url).hostname}catch{return ''}}).filter(Boolean));
+      const hoursEvidence=findings.filter(f=>/\b(?:opens?|hours?|timings?)\b|\b(?:am|pm)\b/i.test(String(f.quote||'')));
+      const priceEvidence=findings.filter(f=>/\b(?:ticket|entry|admission|fee|price)\b|\u20b9|\bRs\.?/i.test(String(f.quote||'')));
+      const totals=[...summary.matchAll(/(?:estimated\s+)?(?:grand\s+)?total\s*(?:cost|budget|expenses)?\s*[:=-]?\s*(?:\u20b9|Rs\.?|INR)\s*([\d,]+)/gi)]
+        .map(m=>Number(m[1].replace(/,/g,''))).filter(Number.isFinite);
+      const checks={
+        completed:task.status==='completed',
+        independentlyVerified:task.verified===true,
+        noApproval:!task.approvalRequired,
+        multipleObservedSources:sources.size>=2,
+        openingHoursObserved:hoursEvidence.length>=3,
+        ticketPricesObserved:priceEvidence.length>=3,
+        budgetCalculated:totals.some(n=>n>=0&&n<=2000),
+        itineraryInSummary:/\\bitinerary\\b|\\bschedule\\b/i.test(summary)
+      };
+      const pass=Object.values(checks).every(Boolean);
+      console.log('DEMO_P1_RESULT',JSON.stringify({pass,checks,task}));
+      if(!pass)process.exitCode=1;
       return;
     }
     if(process.env.LUCIA_COMPLEX_TEST==='1'){

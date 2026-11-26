@@ -164,7 +164,7 @@ fn bind_action_to_live_dom(
                 return Err("Only Enter and Escape are supported".into());
             }
         }
-        BrowserAction::TypeText { node_id, is_sensitive, .. } => {
+        BrowserAction::TypeText { node_id, text, is_sensitive } => {
             if !fresh {
                 return Err("Cannot type using a stale DOM snapshot".into());
             }
@@ -173,6 +173,13 @@ fn bind_action_to_live_dom(
                 .ok_or("Input target is not present in the freshly observed DOM")?;
             if node.search_state.as_deref() == Some("read_only") {
                 return Err("Read-only control: click to open the observed picker, do not type into it".into());
+            }
+            // Reject model instructions copied into the field as literal search text.
+            // These are not concrete queries and must never be executed.
+            let search_field=node.role.eq_ignore_ascii_case("searchbox")
+                || node.label.to_ascii_lowercase().contains("search");
+            if search_field && crate::agent::action_intelligence::invalid_search_payload(text) {
+                return Err("Search text is a model instruction, not a concrete query; replan with an actual user-relevant search term".into());
             }
             if !matches!(node.tag.to_ascii_lowercase().as_str(), "input" | "textarea")
                 && !node.role.eq_ignore_ascii_case("textbox")
@@ -361,6 +368,56 @@ fn is_named_search_enter(
         (node.role.eq_ignore_ascii_case("searchbox") ||
             node.label.to_lowercase().contains("search"))
     )
+}
+
+/// Search fields can receive new DOM IDs after rerenders. Track the observed
+/// field's stable label and role, falling back to ID only for unnamed controls.
+fn search_control_key(page: &DomSnapshot, node_id: &str) -> (String, String) {
+    let stable = page.interactive_nodes.iter()
+        .find(|node| node.node_id == node_id)
+        .map(|node| {
+            let label = node.label.trim().to_ascii_lowercase();
+            if label.is_empty() { format!("id:{}", node_id) }
+            else { format!("{}:{}", node.role.to_ascii_lowercase(), label) }
+        }).unwrap_or_else(|| format!("id:{}", node_id));
+    (page.origin.clone(), stable)
+}
+
+/// A successful search submit is single-use until the query is edited.
+fn duplicate_search_enter(
+    submitted: &HashSet<(String, String)>,
+    page: &DomSnapshot,
+    action: &BrowserAction,
+) -> bool {
+    matches!(action, BrowserAction::PressKey { node_id, key }
+        if key == "Enter" && submitted.contains(&search_control_key(page, node_id)))
+}
+
+#[test]
+fn submitted_search_enter_requires_new_text_before_retry() {
+    let mut page = DomSnapshot {
+        structure: Default::default(), origin: "https://www.youtube.com/".into(),
+        title: "YouTube".into(), text_excerpt: "Search".into(),
+        interactive_nodes: vec![crate::agent::dom_extractor::DomNodeSummary {
+            href: None, node_id: "search-old".into(), tag: "input".into(),
+            role: "combobox".into(), label: "Search".into(),
+            is_submit: false, is_sensitive: false, options: vec![],
+            checked: None, search_state: Some("ready".into()), bbox: None,
+        }],
+    };
+    let mut submitted = HashSet::new();
+    let enter = BrowserAction::PressKey { node_id: "search-old".into(), key: "Enter".into() };
+    assert!(!duplicate_search_enter(&submitted, &page, &enter));
+    let key = search_control_key(&page, "search-old");
+    submitted.insert(key.clone());
+    assert!(duplicate_search_enter(&submitted, &page, &enter));
+    page.interactive_nodes[0].node_id = "search-new".into();
+    let rerendered = BrowserAction::PressKey { node_id: "search-new".into(), key: "Enter".into() };
+    assert!(duplicate_search_enter(&submitted, &page, &rerendered));
+    page.origin = "https://www.youtube.com/results".into();
+    assert!(!duplicate_search_enter(&submitted, &page, &rerendered));
+    submitted.remove(&key);
+    assert!(!duplicate_search_enter(&submitted, &page, &rerendered));
 }
 
 /// Exactly one model replan is permitted after an invalid live DOM binding.
@@ -1163,7 +1220,9 @@ async fn execute_gated_action(
 // A successful action or a model-generated summary is not a terminal receipt.
 fn final_completion_allowed(cancelled: bool, fresh: bool, graph_complete: bool, report: Option<&VerificationReport>) -> bool {
     !cancelled && fresh && graph_complete && report.is_some_and(|r|
-        r.status == "evidence_checked" && !r.summary.trim().is_empty())
+        r.status == "evidence_checked" && !r.summary.trim().is_empty()
+            && !r.findings.is_empty() && r.findings.iter().all(|f|
+                !f.claim.trim().is_empty() && !f.url.trim().is_empty() && !f.quote.trim().is_empty()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1480,11 +1539,18 @@ async fn run_browser_loop(
     let mut advisory:Option<crate::agent::deliberation::Advisory>=None;
     // Retry a delayed watch-page transition only through a freshly observed same-site link.
     let mut pending_observed_youtube_watch: Option<String> = None;
+    // Count consecutive unverified media observations per actual watch URL.
+    // A looping agent must not spend an entire action budget on an unloaded player.
+    let mut media_watch_origin: Option<String> = None;
+    let mut media_unready_checks: u8 = 0;
     // Never force the same deterministic navigation after it fails. The
     // specialist model must inspect the fresh state and choose recovery.
     let mut direct_navigation_attempted = false;
     let mut public_research_fallback_attempted = false;
     let mut public_offtopic_search_attempted = false;
+    // A planning task may leave a repeatedly selected website at most once
+    // per observed domain; never keep navigating the same URL indefinitely.
+    let mut planning_alternative_attempted=std::collections::HashSet::<String>::new();
     // Integrate upstream explicit-Google and delegated-media task state.
     let mut unspecified_music_search_attempted=false;
     let mut delegated_music_video_attempted=false;
@@ -1493,6 +1559,7 @@ async fn run_browser_loop(
     let mut google_results_settle_attempts: u8=0;
 
     let mut named_waypoints_attempted=std::collections::HashSet::<usize>::new();
+    let mut named_plan_recovery_attempted=std::collections::HashSet::<usize>::new();
     let mut objectives=crate::agent::semantic_core::ObjectiveLedger::new(&goal);
     // WebView2 may acknowledge navigation before a slow site yields a loaded DOM.
     // Only a later, fresh and exact native page observation may recover it.
@@ -1503,6 +1570,9 @@ async fn run_browser_loop(
     // Transient-only search label and query digest; never written to logs.
     // A repeated identical model typing action should search, not retype.
     let mut last_search_type: Option<(String, u64)> = None;
+    // A search Enter must not be replayed on the same page without a new typing action.
+    // This is per-run transient state; it never persists private field content.
+    let mut submitted_search_fields = HashSet::<(String, String)>::new();
     // Only follow up a successful user-requested search text entry, once,
     // while the browser remains on the page where it was entered.
     let mut named_search_typed_origin: Option<String> = None;
@@ -2423,6 +2493,29 @@ async fn run_browser_loop(
                 _=cancel.cancelled()=>return Ok("cancelled".into()),
                 result=crate::agent::media_verifier::verify_live_playback(&app,&webview_label,&snapshot.origin)=>result.is_ok()
             };
+        let media_state = if music_task && freshly_observed
+            && crate::agent::orchestrator::observed_youtube_video_page(&snapshot.origin)
+        {
+            if media_watch_origin.as_deref()!=Some(snapshot.origin.as_str()) {
+                media_watch_origin=Some(snapshot.origin.clone());
+                media_unready_checks=0;
+            }
+            if playback_ready { media_unready_checks=0; "media_playing" }
+            else {
+                media_unready_checks=media_unready_checks.saturating_add(1);
+                crate::agent::media_verifier::diagnose_live_playback(&app,&webview_label).await
+            }
+        } else { media_watch_origin=None; media_unready_checks=0; "not_a_watch_page" };
+        // Only fresh, observed evidence can establish success. An unresponsive
+        // player is an explicit failure, not a license for repeated scrolling.
+        if media_unready_checks>=6 {
+            let _=app.emit("agent:run_error",serde_json::json!({
+                "run_id":run_id,
+                "message":format!("Lucia opened the video but could not verify playback ({}). Media remained unavailable after bounded recovery; try another playable source.",media_state)
+            }));
+            final_status="unverified".into();
+            break;
+        }
         let completion_gate = if !freshly_observed || last_action_failed {
             "blocked - fresh successful observation required".to_string()
         } else if let Err(reason) = orchestrator.can_complete(&snapshot) {
@@ -2477,7 +2570,7 @@ async fn run_browser_loop(
         }
         let replan_hint=recovery_strategy.as_ref().map(|s|s.objective()).unwrap_or("No adaptive recovery objective active");
         let plan_progress=orchestrator.plan_progress();
-        let prompt_payload = format!("Native completion gate: {completion_gate}\nPlan progress: {plan_progress}\nSemantic task: {semantic_hint}\nAdaptive recovery objective: {replan_hint}\n{}\nTask state: {task_state}\nProgress assessment: {}\nPreferred live IDs JSON: {}\nAllowed navigation JSON: {}\nFailed choices JSON: {}\n{recovery_directive}\n{prompt_payload}{vision_context}",requirements.hint(),assessment.hint(),serde_json::to_string(&preferred_ids).unwrap_or_default(),serde_json::to_string(&navigation).unwrap_or_default(),serde_json::to_string(&failed_choices).unwrap_or_default());
+        let prompt_payload = format!("Native media state: {media_state}. If media is buffering or unavailable, do not repeatedly scroll or claim playback. Recover using a different observed control or video only; never invent a URL.\nNative completion gate: {completion_gate}\nPlan progress: {plan_progress}\nSemantic task: {semantic_hint}\nAdaptive recovery objective: {replan_hint}\n{}\nTask state: {task_state}\nProgress assessment: {}\nPreferred live IDs JSON: {}\nAllowed navigation JSON: {}\nFailed choices JSON: {}\n{recovery_directive}\n{prompt_payload}{vision_context}",requirements.hint(),assessment.hint(),serde_json::to_string(&preferred_ids).unwrap_or_default(),serde_json::to_string(&navigation).unwrap_or_default(),serde_json::to_string(&failed_choices).unwrap_or_default());
         let _ = app.emit("agent:activity", serde_json::json!({
             "run_id": run_id,
             "phase": if orchestrator.specialist() == Specialist::Verification {
@@ -2572,6 +2665,20 @@ async fn run_browser_loop(
             } else if freshly_observed&&!last_action_failed&&orchestrator.stage_navigation_label().is_some()&&orchestrator.can_complete(&snapshot).is_ok(){
                 ("Active semantic destination independently observed".into(),BrowserAction::Complete{summary:format!("Observed requested destination: {}",snapshot.title)},"semantic:stage_destination_receipt".into())
             } else if freshly_observed && !last_action_failed
+                && orchestrator.specialist()==Specialist::Research
+                && requirements.planning_review_ready()
+                && orchestrator.can_complete(&snapshot).is_ok()
+            {
+                // Open-ended planning has no explicit-source ObjectiveLedger, so
+                // objectives.complete() cannot signal source coverage. Once
+                // three genuine hours-and-prices source candidates are observed,
+                // hand them to independent synthesis instead of browsing forever.
+                // The report verifier still validates three exact source quotes,
+                // the arithmetic, and the user's numeric budget constraint.
+                ("Three attraction sources with admission prices and opening times have been observed; request independent itinerary and budget review".into(),
+                 BrowserAction::Complete{summary:"Verify the observed attraction hours and per-person prices; calculate the total for the full family and build the requested itinerary within budget.".into()},
+                 "planning:source_coverage_handoff".into())
+            } else if freshly_observed && !last_action_failed
                 && matches!(orchestrator.specialist(),Specialist::Research|Specialist::Comparison)
                 && crate::agent::course_comparison::count(&goal).is_some()
                 && requirements.ready()
@@ -2584,6 +2691,25 @@ async fn run_browser_loop(
                 ("All requested course-platform sources have evidence; verify the facts".into(),
                  BrowserAction::Complete{summary:"Check distinct course providers, certificate costs, and durations against captured sources".into()},
                  "course:source_coverage_handoff".into())
+            } else if freshly_observed
+                && orchestrator.specialist()==Specialist::Research
+                && !named_plan_recovery_attempted.contains(&orchestrator.current)
+                && orchestrator.can_complete(&snapshot).is_err()
+                && crate::agent::action_intelligence::observed_official_plan_link(
+                    &goal,&snapshot,orchestrator.current).is_none()
+                && crate::agent::policy::named_pricing_recovery_waypoint(
+                    &goal,orchestrator.current,&snapshot.origin).is_some()
+            {
+                // One bounded official-plan discovery query instead of
+                // spinning on the same feature-light homepage. This can only
+                // navigate to a public search engine, never a guessed vendor
+                // URL; actual site/pricing evidence must still be observed.
+                named_plan_recovery_attempted.insert(orchestrator.current);
+                let url=crate::agent::policy::named_pricing_recovery_waypoint(
+                    &goal,orchestrator.current,&snapshot.origin).expect("checked above");
+                ("Discover missing free-plan information for the current named official source".into(),
+                 BrowserAction::Navigate{url:url.to_string()},
+                 "research:named_plan_evidence_recovery".into())
             } else if freshly_observed
                 && orchestrator.specialist()==Specialist::Research
                 && crate::agent::action_intelligence::observed_named_site_result(&goal,&snapshot,orchestrator.current).is_some()
@@ -2808,6 +2934,14 @@ async fn run_browser_loop(
                     BrowserAction::Navigate { url: target.to_string() },
                     "direct_navigation:trusted_user_goal".to_string(),
                 )
+            } else if freshly_observed && !unspecified_music_search_attempted
+                && trusted_unspecified_music_search(&goal, &snapshot, orchestrator.specialist()).is_some()
+            {
+                unspecified_music_search_attempted=true;
+                ("Search for a concrete public-domain music performance selected from the user's open-ended request".into(),
+                    trusted_unspecified_music_search(&goal, &snapshot, orchestrator.specialist())
+                        .expect("checked observed homepage and explicit user request"),
+                    "music_discovery:concrete_search_query".into())
             } else if let Some(action) =
                 trusted_explicit_youtube_search(&goal, &snapshot, orchestrator.specialist())
             {
@@ -2924,9 +3058,11 @@ async fn run_browser_loop(
                 // A slow local CPU model needs a larger, but still finite action
                 // budget; cancellation remains immediate via tokio::select.
                 let r = router.lock().await.clone();
+                // A failed local action must leave time for an independent supervisor
+                // and a grounded recovery before the end-to-end task deadline.
                 let action_timeout_secs: u64 = if r.get_config().prefer_local_for_simple {
-                    180
-                } else { 90 };
+                    65
+                } else { 60 };
                 let stalled = run_core.stalled() || last_action_failed || duplicate_retries > 0
                     || (crate::agent::recovery::search_results(&snapshot) && auth_recovery_attempts > 0)
                     || recent_outcomes.last().is_some_and(|s| s.contains("no observed progress"));
@@ -2964,7 +3100,7 @@ async fn run_browser_loop(
                                 "Supervisor diagnosis: {diagnosis}\nSupervisor directive: Independently review the original goal, current live controls, prior model's recorded action outcomes, and any visual hint. Diagnose the stalled step. Propose ONE different safe next action grounded in the current observation. Avoid repeating failed actions. Do not bypass approvals or declare success without proof.\n{prompt_payload}");
                             let result = tokio::select! {
                                 _ = cancel.cancelled() => return Ok("cancelled".into()),
-                                result = tokio::time::timeout(std::time::Duration::from_secs(50),
+                                result = tokio::time::timeout(std::time::Duration::from_secs(35),
                                     second.propose_specialist_action(&snapshot.origin, &review_prompt,
                                         orchestrator.specialist().instructions(), &creds, voice_mode)) => result
                             };
@@ -2994,14 +3130,32 @@ async fn run_browser_loop(
                             // a bounded, native alternative. The ordinary DOM
                             // binder, route ledger, objective and policy gates
                             // below still decide whether it can be executed.
+                            let invalid_model_action=error.to_string()
+                                .contains("could not produce a valid browser action after two attempts")
+                                || error.to_string().contains("Lucia action model timed out");
                             let grounded=if freshly_observed
+                                && invalid_model_action
                                 && orchestrator.specialist()==Specialist::Research
-                                && crate::agent::course_comparison::count(&goal).is_some(){
+                                && crate::agent::deliberation::read_only(&goal){
                                 crate::agent::course_comparison::next_search(
                                     &goal,&orchestrator.evidence,&snapshot.origin)
                                     .map(|url|BrowserAction::Navigate{url:url.to_string()})
                                     .or_else(||crate::agent::action_intelligence::grounded_search_result(
                                         &goal,&snapshot))
+                                    .or_else(||{
+                                        // Reuse exactly the same grounded, stage-aware
+                                        // alternative selector used for stalled actions.
+                                        // Never guess a URL or execute a raw model
+                                        // response after malformed action JSON.
+                                        replacement.next_for_stage(
+                                            &goal,&semantic_focus,&snapshot,&objectives,&route_ledger)
+                                            .filter(|candidate|
+                                                !matches!(candidate,BrowserAction::Complete{..}|
+                                                    BrowserAction::Download{..}) &&
+                                                orchestrator.specialist().allows_on_page(candidate,&snapshot) &&
+                                                crate::agent::objective_gate::check(
+                                                    &goal,&initial_origin,&snapshot,&objectives,candidate).is_ok())
+                                    })
                             } else {None};
                             if let Some(action)=grounded {
                                 ("Recover an invalid model action with a live observed research route".into(),
@@ -3021,6 +3175,33 @@ async fn run_browser_loop(
                 }
             };
 
+        // Recovery for open-ended research: a model/supervisor can repeatedly
+        // navigate the currently observed attraction URL, making no progress
+        // toward the other required sources. Switch once per observed domain
+        // to a user-derived public search excluding that domain. This neither
+        // invents an attraction URL nor counts a search page as evidence.
+        if orchestrator.specialist()==Specialist::Research
+            && requirements.supported && !requirements.ready()
+            && planning_alternative_attempted.len()<4
+        {
+            let repeated_self_navigation=match &action{
+                BrowserAction::Navigate{url}=>url::Url::parse(url).ok()
+                    ==url::Url::parse(&snapshot.origin).ok(),
+                _=>false
+            };
+            if (repeated_self_navigation || run_core.stalled())
+                && !planning_alternative_attempted.contains(&snapshot.origin)
+            {
+                if let Some(search)=crate::agent::policy::public_planning_alternative_search(
+                    &goal,&snapshot.origin)
+                {
+                    planning_alternative_attempted.insert(snapshot.origin.clone());
+                    thought="The current attraction page is not enough for the itinerary; search for an alternative observed source".into();
+                    action=BrowserAction::Navigate{url:search.to_string()};
+                    model_route="research:planning_alternative_source".into();
+                }
+            }
+        }
         // If the model repeats exactly the same search text, use the fresh,
         // unambiguous Search control rather than typing the same query again.
         // This recovery never guesses a result or bypasses native policy.
@@ -3043,6 +3224,9 @@ async fn run_browser_loop(
         }
         let mut action_binding_error =
             bind_action_to_live_dom(&mut action, &snapshot, freshly_observed).err();
+        if duplicate_search_enter(&submitted_search_fields, &snapshot, &action) {
+            action_binding_error = Some("Search already submitted on this page; observe results instead of pressing Enter again".into());
+        }
         if matches!(action,BrowserAction::Navigate{..}) &&
             crate::agent::prerequisites::named_link(&goal,&snapshot).is_some() &&
             !(model_route=="objective:alternate_observed_link"&&intelligence.dispatch_target(&goal,&snapshot,&action).is_some()) {
@@ -3059,7 +3243,7 @@ async fn run_browser_loop(
             let reason = action_binding_error.as_deref().unwrap_or("invalid control");
             let repair_prompt = format!(
                 "Previous action outcomes: Native WebView rejected a proposed control: {}. \
-                 Select a DIFFERENT action using an exact currently observed node_id. \
+                 Correct the rejected action using an exact currently observed node_id. If typing, supply only literal field content, never instructions or control metadata. \
                  The page has not changed and the previous action did NOT execute.\n{}",
                 reason.chars().take(160).collect::<String>(),
                 prompt_payload
@@ -3147,10 +3331,11 @@ async fn run_browser_loop(
         if catalog.is_none()&&freshly_observed&&orchestrator.specialist()!=Specialist::Verification&&
             !model_route.contains("research:observed_named_site_navigation")&&
             !model_route.contains("named_research_waypoint:user_source")&&
-            (action_binding_error.is_some()||crate::agent::objective_gate::check(&goal,&initial_origin,&snapshot,&objectives,&action).is_err()||
-            (run_core.stalled()&&model_route.contains("supervisor_recovery"))) {
+            (crate::agent::action_intelligence::irrelevant_control(&goal,&snapshot,&action)||action_binding_error.is_some()||crate::agent::objective_gate::check(&goal,&initial_origin,&snapshot,&objectives,&action).is_err()||
+            (run_core.stalled()&&(model_route.contains("supervisor_recovery") || run_core.failed_before(&action,&snapshot,orchestrator.current)))) {
             if let Some(mut candidate)=replacement.next_for_stage(&goal,&semantic_focus,&snapshot,&objectives,&route_ledger){
                 if orchestrator.specialist().allows_on_page(&candidate,&snapshot)&&
+                    !crate::agent::action_intelligence::irrelevant_control(&goal,&snapshot,&candidate)&&
                     crate::agent::objective_gate::check(&goal,&initial_origin,&snapshot,&objectives,&candidate).is_ok()&&
                     bind_action_to_live_dom(&mut candidate,&snapshot,true).is_ok(){
                     action=candidate;action_binding_error=None;
@@ -3171,12 +3356,13 @@ async fn run_browser_loop(
             // by another superficially relevant link on the wrong page.
             && !model_route.contains("course:next_platform")
             && !model_route.contains("course:invalid_model_action_native_fallback")
+            && !model_route.contains("research:named_plan_evidence_recovery")
             && !model_route.contains("research:lost_query_fallback")
             && !model_route.contains("research:offtopic_public_search_fallback")
             && !(orchestrator.specialist()==Specialist::Research
                 && !crate::agent::deliberation::named_research_entities(&goal).is_empty()) {
             if let Some(mut candidate)=crate::agent::action_intelligence::better_observed_link(
-                &goal,&semantic_focus,&snapshot,&action,&std::collections::HashSet::new()) {
+                &goal,&semantic_focus,&snapshot,&action,&failed_choices.iter().filter_map(|item|item.get("node_id").and_then(|v|v.as_str())).map(str::to_owned).collect()) {
                 let route_ok=match &candidate {
                     BrowserAction::Navigate{url}=>route_ledger.allowed(url),
                     _=>true,
@@ -3232,7 +3418,7 @@ async fn run_browser_loop(
         let signature = action_state_signature(orchestrator.current, &action, &snapshot);
         let redundant_navigation = matches!(&action, BrowserAction::Navigate { url }
             if requested_navigation_url(&goal).is_none() && snapshot.origin.starts_with("http") && check_navigation_result(url, &snapshot).is_ok());
-        if redundant_navigation || !seen_signatures.insert(signature) {
+        if redundant_navigation || run_core.failed_before(&action,&snapshot,orchestrator.current) || !seen_signatures.insert(signature) {
             // A small local model can repeat a successful click instead of
             // announcing stage completion. Request independent, read-only
             // verification against real captured page excerpts before
@@ -3575,6 +3761,12 @@ async fn run_browser_loop(
                             }
                         }
                         Err(err) => {
+                            // Test-only local diagnostics; never emit the
+                            // model or source contents into UI or audit traces.
+                            if std::env::var("LUCIA_TEST_W1_VERIFIER_DIAGNOSTIC")
+                                .as_deref()==Ok("1") {
+                                eprintln!("LUCIA_TEST_W1_VERIFIER_ERROR: {}",err);
+                            }
                             factual_review_failed=true;
                             decision = PolicyDecision::Deny {
                                 reason: format!("Independent evidence verification failed: {err}"),
@@ -3620,6 +3812,13 @@ async fn run_browser_loop(
             }
             let approval_allowed=matches!(action,BrowserAction::Navigate{..})&&matches!(decision,PolicyDecision::RequireApproval{..});
             if !permitted||(!matches!(decision,PolicyDecision::Allow)&&!approval_allowed){anyhow::bail!("Intermediate browser specialist proposed an out-of-scope or consequential action");}
+        }
+        // Final enforcement after all model replans and recovery substitutions.
+        // No alternative planner may reintroduce the same submitted search.
+        if duplicate_search_enter(&submitted_search_fields, &snapshot, &action) {
+            decision = PolicyDecision::Deny {
+                reason: "Search submission already attempted on this page. Wait for fresh results or select a different observed action.".into()
+            };
         }
         let trace_id = Uuid::new_v4();
         let _ = app.emit("agent:activity", serde_json::json!({
@@ -3710,6 +3909,13 @@ async fn run_browser_loop(
         // successful. An ambiguous submit must NOT be retried automatically.
         if objective_target.is_some()&&!matches!(decision,PolicyDecision::Allow){intelligence.restrict();}
         else{intelligence.dispatched(&objective_source,objective_target,&action,ok);}
+        let action_search_key = match &action {
+            BrowserAction::PressKey { node_id, key } if key == "Enter" =>
+                Some(search_control_key(&snapshot, node_id)),
+            BrowserAction::TypeText { node_id, .. } =>
+                Some(search_control_key(&snapshot, node_id)),
+            _ => None,
+        };
         let navigation_from=snapshot.origin.clone();
         let navigation_dispatched = ok && matches!(action, BrowserAction::Navigate { .. });
         let named_search_submit = is_named_search_submit_click(&goal, &action, &snapshot);
@@ -3863,6 +4069,13 @@ async fn run_browser_loop(
         }
 
         if ok {
+            if let BrowserAction::TypeText { node_id, .. } = &action {
+                if let Some(key) = &action_search_key { submitted_search_fields.remove(key); }
+            } else if let BrowserAction::PressKey { node_id, key } = &action {
+                if key == "Enter" {
+                    if let Some(key) = &action_search_key { submitted_search_fields.insert(key.clone()); }
+                }
+            }
             if let Some(target)=clicked_named_link {named_link_destination=Some(target);}
             if model_route.starts_with("search_input:trusted_user_query")
                 && matches!(action, BrowserAction::TypeText { .. })
@@ -4695,6 +4908,18 @@ mod production_safety_tests {
         assert!(matches!(&type_query,
             BrowserAction::TypeText { node_id, .. } if node_id == "search-input"));
         bind_action_to_live_dom(&mut type_query, &page, true).unwrap();
+        let mut copied_instruction=BrowserAction::TypeText {
+            node_id:"search-input".into(),
+            text:"Type a short search query for a song or music".into(),
+            is_sensitive:false,
+        };
+        assert!(bind_action_to_live_dom(&mut copied_instruction,&page,true).is_err(),
+            "The model's own instruction must not become the actual website query");
+        let mut concrete_query=BrowserAction::TypeText {
+            node_id:"search-input".into(), text:"Beethoven Fur Elise piano performance".into(),
+            is_sensitive:false,
+        };
+        assert!(bind_action_to_live_dom(&mut concrete_query,&page,true).is_ok());
 
         let mut search_click = BrowserAction::Click {
             node_id: "obsolete".into(), element_label: "Search".into(),
@@ -4860,7 +5085,7 @@ mod live_loop_recovery_tests {
         let mut page = DomSnapshot {
             structure: Default::default(), origin: "https://example.org/search".into(), title: "Results".into(),
             text_excerpt: "Robotics video search results are now visible".into(),
-            interactive_nodes: vec![DomNodeSummary {
+            interactive_nodes: vec![crate::agent::dom_extractor::DomNodeSummary {
                 node_id: "result_1".into(), tag: "button".into(), role: "button".into(),
                 label: "Open robotics video".into(), href: None,
                 is_submit: false, is_sensitive: false, checked: None, search_state: None, options: vec![], bbox: None,
@@ -5035,7 +5260,7 @@ mod autonomous_live_form_tests {
             structure: Default::default(), origin: "https://example.org/feedback".into(),
             title: "Feedback".into(),
             text_excerpt: "Feedback form".into(),
-            interactive_nodes: vec![DomNodeSummary {
+            interactive_nodes: vec![crate::agent::dom_extractor::DomNodeSummary {
             href: None,
                 node_id: "button".into(), tag: "button".into(),
                 role: "button".into(), label: "Submit feedback".into(),
@@ -5256,7 +5481,10 @@ mod terminal_completion_regression {
     use super::*;
     #[test]
     fn only_fresh_verified_complete_runs_may_succeed() {
-        let mut report=VerificationReport{status:"evidence_checked",summary:"Verified result".into(),findings:vec![],limitations:String::new()};
+        let mut report=VerificationReport{status:"evidence_checked",summary:"Verified result".into(),findings:vec![crate::agent::evidence_verifier::GroundedFinding{claim:"Observed result".into(),url:"https://example.org/".into(),quote:"Observed result".into()}],limitations:String::new()};
+        let mut empty=report.clone();
+        empty.findings.clear();
+        assert!(!final_completion_allowed(false,true,true,Some(&empty)));
         assert!(final_completion_allowed(false,true,true,Some(&report)));
         assert!(!final_completion_allowed(true,true,true,Some(&report)));
         assert!(!final_completion_allowed(false,false,true,Some(&report)));
