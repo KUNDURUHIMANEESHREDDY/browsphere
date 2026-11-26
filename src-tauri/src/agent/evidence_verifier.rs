@@ -761,6 +761,9 @@ pub fn retryable_grounded_recommendation_error(reason:&str)->bool{
             |"Recommendation cites numerical limits missing from the selected evidence"
             |"Recommendation asserts an unlimited feature absent from its cited source"
             |"Rationale correction changed the recommended option or evidence passage IDs"
+            |"Recommendation acknowledges that the required comparison is incomplete"
+            |"Free-tier recommendation relies on paid-plan pricing or upgrades"
+            |"Recommendation lacks a distinguishing source-backed reason"
         )
 }
 pub fn retryable_named_comparison_selection_error(reason:&str)->bool{
@@ -773,6 +776,37 @@ pub fn retryable_named_comparison_selection_error(reason:&str)->bool{
         |"Selected quote does not discuss the requested free-plan comparison"
         |"Selected quote belongs to an upgraded or paid tier, not necessarily the free plan"
     ) || reason.starts_with("No explicitly free-tier passage selected for ")
+      || reason.starts_with("Missing source-grounded free-tier team limit for ")
+}
+/// A page may mention the word FREE while describing a paid upgrade.
+/// Normalize spacing in billing units before admitting a source quotation.
+fn paid_upgrade_passage(raw:&str)->bool{
+    let low=raw.to_ascii_lowercase().replace(" / ","/").replace(" /","/").replace("/ ","/");
+    ["everything in free, and","everything in free, plus",
+     "everything in free forever, plus","everything from free, plus",
+     "everything from free, and","regular price","billed yearly",
+     "billed annually","per user per month","per user/month",
+     "per member/month","enterprise plan","cancel anytime",
+     "cancellation","free trial","try for free"].iter().any(|word|low.contains(word))
+}
+/// A capacity claim requires a FREE-tier excerpt with an explicit nonzero
+/// seat/member count or unlimited members nearby. A $0 price or generic
+/// 'Team Included' marketing text is not a collaborator-limit receipt.
+pub fn free_team_capacity_passage(raw:&str)->bool{
+    if paid_upgrade_passage(raw){return false}
+    let words=raw.to_ascii_lowercase().split(|c:char|!c.is_alphanumeric())
+        .filter(|word|!word.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+    if !words.iter().any(|word|word=="free"){return false}
+    words.iter().enumerate().filter(|(_,word)|
+        ["member","collaborator","user","seat","guest","people","person"]
+            .iter().any(|prefix|word.starts_with(prefix)))
+        .any(|(i,_)|{
+            let start=i.saturating_sub(5);let end=(i+6).min(words.len());
+            words[start..end].iter().any(|w|
+                w.parse::<u32>().is_ok_and(|n|n>0) || w=="unlimited" ||
+                ["one","two","three","four","five","six","seven","eight","nine","ten",
+                 "twenty","fifty"].contains(&w.as_str()))
+        })
 }
 fn named_free_candidates(goal:&str,source:&SourceEvidence)->Vec<Passage>{
     // The generic passage extractor is goal-keyword ranked and capped at 14.
@@ -796,12 +830,7 @@ fn named_free_candidates(goal:&str,source:&SourceEvidence)->Vec<Passage>{
         let tier=low.contains("free")
             && ["plan","forever","tier","member","collaborat","workspace","board","storage","block","user"]
                 .iter().any(|x|low.contains(x));
-        let paid=["everything in free, and","everything in free forever, plus",
-          "everything in free, plus","regular price","billed yearly",
-          "billed annually","per user per month","enterprise plan",
-          "cancel anytime","cancellation","free trial","try for free"]
-          .iter().any(|x|low.contains(x));
-        tier&&!paid
+        tier&&!paid_upgrade_passage(&p.text)
     });
     // Show explicitly free-tier evidence first. Small local selectors may
     // otherwise spend their limited IDs on unrelated feature passages.
@@ -853,7 +882,9 @@ pub fn named_comparison_catalog(goal:&str,sources:&[SourceEvidence])->Option<ser
     for name in &names {
         let source=best_named_free_source(goal,sources,name)?;
         let candidates=named_free_candidates(goal,source);
-        if candidates.is_empty(){return None}
+        if candidates.is_empty() || (requires_named_free_evidence(goal)
+            && (goal.to_ascii_lowercase().contains("team")||goal.to_ascii_lowercase().contains("member"))
+            && !candidates.iter().any(|p|free_team_capacity_passage(&p.text))){return None}
         rows.push(serde_json::json!({"name":name,"title":source.title,
             "candidates":candidates}));
     }
@@ -899,6 +930,9 @@ pub fn grounded_named_comparison_catalog(goal:&str,sources:&[SourceEvidence])->O
         }else{None};
         let mut selected=vec![best];
         if let Some(capacity)=capacity {selected.push(capacity);}
+        if wants_team && !selected.iter().any(|p|free_team_capacity_passage(&p.text)){
+            return None;
+        }
         picks.push(serde_json::json!({"name":name,
             "ids":selected.iter().map(|p|p.id.clone()).collect::<Vec<_>>()}));
         evidence.push(serde_json::json!({"name":name,"source":page.url,
@@ -964,6 +998,7 @@ pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Re
         let page=best_named_free_source(goal,sources,name)
             .ok_or("Named source was not observed")?;
         let candidates=named_free_candidates(goal,page);
+        let first_finding=findings.len();
         let mut free_tier_quote=false;
         for id in &row.ids {
             if !selected.insert((name.to_ascii_lowercase(),id.clone())){return Err("Duplicate passage ID".into())}
@@ -976,9 +1011,7 @@ pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Re
                 &&!low.contains("collaborat")&&!low.contains("board")&&!low.contains("block"){
                 return Err("Selected quote does not discuss the requested free-plan comparison".into())
             }
-            if ["everything in free, and","everything in free forever, plus",
-                "everything in free, plus","regular price","per user per month",
-                "billed yearly","billed annually"].iter().any(|paid|low.contains(paid)){
+            if paid_upgrade_passage(&passage.text){
                 return Err("Selected quote belongs to an upgraded or paid tier, not necessarily the free plan".into())
             }
             findings.push(GroundedFinding{claim:passage.text.clone(),quote:passage.text.clone(),url:page.url.clone()});
@@ -991,14 +1024,16 @@ pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Re
             let observed_free=candidates.iter().find(|p| {
                 let low=p.text.to_ascii_lowercase();
                 low.contains("free") && page.excerpt.contains(&p.text)
-                    && !["everything in free, and","everything in free forever, plus",
-                        "everything in free, plus","regular price","per user per month",
-                        "billed yearly","billed annually"].iter().any(|paid|low.contains(paid))
+                    && !paid_upgrade_passage(&p.text)
             }).ok_or_else(||format!("No explicitly free-tier passage selected for {name}"))?;
             if !findings.iter().any(|f|f.url==page.url&&f.quote==observed_free.text){
                 findings.push(GroundedFinding{claim:observed_free.text.clone(),
                     quote:observed_free.text.clone(),url:page.url.clone()});
             }
+        }
+        if (goal.to_ascii_lowercase().contains("team")||goal.to_ascii_lowercase().contains("member"))
+            && !findings[first_finding..].iter().any(|f|free_team_capacity_passage(&f.quote)){
+            return Err(format!("Missing source-grounded free-tier team limit for {name}"));
         }
     }
     if choice.recommended.trim().is_empty()||!names.iter().any(|n|n.eq_ignore_ascii_case(choice.recommended.trim())){
@@ -1013,18 +1048,33 @@ pub fn named_comparison_report(goal:&str,sources:&[SourceEvidence],raw:&str)->Re
         "could not verify","unclear whether"].iter().any(|phrase|rationale_lower.contains(phrase)){
         return Err("Recommendation acknowledges that the required comparison is incomplete".into());
     }
-    // A reasoning model cannot claim numeric or capacity details absent from
-    // its selected supporting passages.
-    let quoted=findings.iter().map(|f|f.quote.as_str()).collect::<Vec<_>>().join(" ");
-    if !numbers(&choice.rationale).is_subset(&numbers(&quoted)){
-        return Err("Recommendation cites numerical limits missing from the selected evidence".into())
+    // The requested choice is FREE. A paid-plan price or upgrade cannot
+    // justify the winner even if a paid quote happens to share page keywords.
+    if requires_named_free_evidence(goal) &&
+        (["paid plan","paid tier","upgrade","premium","per user",
+          "per member","billed","/month","/mo","usd ","eur "]
+            .iter().any(|cue|rationale_lower.contains(cue)) ||
+            rationale_lower.chars().any(|c|matches!(c,'$'|'€'|'£'|'₹'))){
+        return Err("Free-tier recommendation relies on paid-plan pricing or upgrades".into());
     }
     let chosen=choice.recommended.trim();
     let winning_quotes=findings.iter().filter(|f|web_url(&f.url).and_then(|u|u.host_str().map(str::to_owned))
         .is_some_and(|host|host.strip_prefix("www.").unwrap_or(&host)
             .split('.').next()==Some(chosen.to_ascii_lowercase().replace([' ','-'],"").as_str())))
         .map(|f|f.quote.to_ascii_lowercase()).collect::<Vec<_>>().join(" ");
+    // Numeric limits must come from the WINNER's exact quotations, not an
+    // unrelated competitor. User-stated team size is context, not source proof.
+    let mut allowed_numbers=numbers(&winning_quotes);
+    allowed_numbers.extend(numbers(goal));
+    if !numbers(&choice.rationale).is_subset(&allowed_numbers){
+        return Err("Recommendation cites numerical limits missing from the selected evidence".into());
+    }
     let rationale=choice.rationale.to_ascii_lowercase();
+    if !["collaborat","member","users","seats","workspace","repository",
+         "branch","merge","review","project","task","board","storage","limit"]
+        .iter().any(|feature|rationale.contains(feature)&&winning_quotes.contains(feature)){
+        return Err("Recommendation lacks a distinguishing source-backed reason".into());
+    }
     let rationale_words=rationale.split(|c:char|!c.is_alphanumeric()).filter(|w|!w.is_empty())
         .collect::<Vec<_>>();
     for pair in rationale_words.windows(2){
@@ -1049,12 +1099,48 @@ mod named_comparison_selection_tests{
     fn sources()->Vec<SourceEvidence>{
         vec![
             SourceEvidence{url:"https://www.notion.com/pricing".into(),title:"Notion Free Pricing".into(),
-                excerpt:"Notion Free plan includes pages and limited collaboration for members. For teams, Notion Free plan offers workspace blocks.".into()},
+                excerpt:"Notion Free plan includes pages and collaboration for up to 5 members. For teams, Notion Free plan offers workspace blocks.".into()},
             SourceEvidence{url:"https://trello.com/en/pricing".into(),title:"Trello Free Pricing".into(),
                 excerpt:"Trello Free plan includes unlimited cards and up to 10 collaborators per workspace. Free workspaces include boards for small teams.".into()},
             SourceEvidence{url:"https://clickup.com/pricing".into(),title:"ClickUp Free Pricing".into(),
                 excerpt:"ClickUp Free Forever plan includes collaborative tasks for unlimited members. The Free plan offers limited storage.".into()}
         ]
+    }
+    #[test]
+    fn team_capacity_needs_source_exact_free_tier_seat_evidence(){
+        assert!(free_team_capacity_passage("Trello Free plan allows up to 10 collaborators per workspace."));
+        assert!(free_team_capacity_passage("ClickUp Free Forever allows unlimited members per workspace."));
+        assert!(!free_team_capacity_passage("GitHub Free Public repositories Team Included"));
+        assert!(!free_team_capacity_passage("Free pricing for unlimited public repositories with collaborative tools."));
+        assert!(!free_team_capacity_passage("Team Advanced costs $4 per user / month with Everything from Free, plus benefits"));
+        let mut incomplete=sources();
+        incomplete[0].excerpt="Notion Free plan includes pages and collaboration within workspaces.".into();
+        assert!(named_comparison_catalog(GOAL,&incomplete).is_none());
+    }
+    #[test]
+    fn vague_recommendation_cannot_pass_a_source_grounded_comparison(){
+        let observed=sources();
+        let catalog=grounded_named_comparison_catalog(GOAL,&observed).unwrap();
+        let decision=serde_json::json!({"picks":catalog["picks"],"recommended":"Trello",
+            "rationale":"Based on the free plan details for each platform."});
+        assert_eq!(named_comparison_report(GOAL,&observed,&decision.to_string()).unwrap_err(),
+            "Recommendation lacks a distinguishing source-backed reason");
+    }
+    #[test]
+    fn paid_team_upgrade_cannot_justify_a_free_plan_recommendation(){
+        let captured="Team Advanced collaboration for individuals and organizations $ 4 USD per user / month Continue with Team Everything from Free, plus: Access to repository rules.";
+        assert!(paid_upgrade_passage(captured));
+        let source=SourceEvidence{url:"https://notion.com/pricing".into(),
+            title:"Notion pricing".into(),excerpt:captured.into()};
+        assert!(named_free_candidates(GOAL,&source).is_empty(),
+            "Mentioning Free inside a paid upgrade does not prove a free offering");
+        let original=sources();
+        let catalog=grounded_named_comparison_catalog(GOAL,&original).unwrap();
+        let selection=serde_json::json!({"picks":catalog["picks"],
+            "recommended":"Trello",
+            "rationale":"Trello offers advanced collaboration for teams at $4 per user/month plus paid upgrades."});
+        assert_eq!(named_comparison_report(GOAL,&original,&selection.to_string()).unwrap_err(),
+            "Free-tier recommendation relies on paid-plan pricing or upgrades");
     }
     #[test]
     fn named_free_comparison_cannot_fall_back_to_paid_only_sources(){

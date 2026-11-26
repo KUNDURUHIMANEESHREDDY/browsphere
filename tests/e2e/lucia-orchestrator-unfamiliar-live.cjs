@@ -53,7 +53,7 @@ async function main(){
        const entry={goal:args[0],tab:args[3],runId:null};window.__orchestratorProbe.launches.push(entry);
        return Promise.resolve(original.apply(this,args)).then(runId=>{entry.runId=runId;return runId},error=>{entry.error=String(error);throw error});
      };
-     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan'])
+     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan','agent:verification_recovery'])
        await window.__TAURI__.event.listen(kind,event=>
          window.__orchestratorProbe.events.push({kind,payload:event.payload}));
      const config=await window.__TAURI__.core.invoke('get_router_config');
@@ -100,22 +100,36 @@ async function main(){
    const report=evs.filter(e=>e.kind==='agent:verification_report'&&e.payload.report?.status==='evidence_checked').at(-1)?.payload?.report;
    const errors=evs.filter(e=>e.kind==='agent:run_error').map(e=>e.payload.message);
    const replanCount=evs.filter(e=>e.kind==='agent:objective_replan').length;
+   const recoveryEvents=evs.filter(e=>e.kind==='agent:verification_recovery');
+   const recoveryStages=recoveryEvents.map(e=>e.payload.status);
    const progress=evs.filter(e=>e.kind==='agent:goal_progress').map(e=>e.payload.progress).at(-1);
    const hosts=[...new Set((report?.findings||[]).map(f=>{try{return new URL(f.url).hostname.toLowerCase().replace(/^www[.]/,'')}catch{return null}}).filter(Boolean))];
    const missingHosts=expected.filter(h=>!hosts.some(observed=>observed===h||observed.endsWith('.'+h)));
    const findings=report?.findings||[];
    const requiresFree=goal.split(/[^A-Za-z0-9]+/).some(w=>w.toLowerCase()==='free');
    const paidUpgradeQuote=requiresFree&&findings.some(f=>
-     /everything in free,\s*(?:plus|and)|per user per month|billed annually|billed yearly/i.test(f.quote||''));
+     /everything (?:in|from) free(?: forever)?,\s*(?:plus|and)|per user\s*(?:\/|per)\s*month|billed annually|billed yearly/i.test(f.quote||''));
+   const paidSummary=requiresFree&&(/everything (?:in|from) free(?: forever)?,\s*(?:plus|and)|per user\s*(?:\/|per)\s*month|paid (?:plan|tier|upgrade)|premium (?:plan|tier)|[$€£₹]\s*[1-9]\d*/i.test(report?.summary||''));
    const missingFreeProof=requiresFree?expected.filter(host=>!findings.some(f=>{
      try{const actual=new URL(f.url).hostname.toLowerCase();return (actual===host||actual.endsWith('.'+host))&&/\bfree\b/i.test(f.quote)}catch{return false}
    })):[];
-   const incompleteSummary=/need to compare|still need to compare|cannot determine|insufficient evidence|unclear whether/i.test(report?.summary||'');
+   const teamLimitNeeded=requiresFree&&/\b(team|members?)\b/i.test(goal);
+   const capacityQuote=quote=>{
+     const tokens=String(quote||'').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+     if(!tokens.includes('free')||/everything (?:in|from) free.*(?:plus|and)|per user\s*(?:\/|per)\s*month/i.test(quote))return false;
+     return tokens.some((word,i)=>/^(member|collaborator|user|seat|guest|people|person)/.test(word)&&
+       tokens.slice(Math.max(0,i-5),i+6).some(token=>(/^\d+$/.test(token)&&Number(token)>0)||
+         ['unlimited','one','two','three','four','five','six','seven','eight','nine','ten','twenty'].includes(token)));
+   };
+   const missingCapacityProof=teamLimitNeeded?expected.filter(host=>!findings.some(f=>{
+     try{const actual=new URL(f.url).hostname.toLowerCase().replace(/^www\./,'');return actual===host&&capacityQuote(f.quote)}catch{return false}
+   })):[];
+   const incompleteSummary=/need to compare|still need to compare|cannot determine|insufficient evidence|unclear whether|based on the free plan details/i.test(report?.summary||'');
    const passed=final.launches.length===1&&final.launches[0].goal===goal&&Boolean(runId)
      &&finalStatus==='completed'&&Boolean(report)&&!missingHosts.length
-     &&!paidUpgradeQuote&&!missingFreeProof.length&&!incompleteSummary
+     &&!paidUpgradeQuote&&!paidSummary&&!missingFreeProof.length&&!missingCapacityProof.length&&!incompleteSummary
      &&findings.every(f=>f.url&&f.quote&&f.claim);
-   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,progress,findings:findings.length,hosts,missingHosts,paidUpgradeQuote,missingFreeProof,incompleteSummary,summary:report?.summary?.slice(0,500)}));
+   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,recoveryStages,progress,findings:findings.length,hosts,missingHosts,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,summary:report?.summary?.slice(0,500)}));
    if(!passed)throw Error('Native task failed one or more end-to-end criteria');
  }finally{
    try{await evaluate("window.__TAURI__.core.invoke('cancel_agent_run')")}catch{}

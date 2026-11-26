@@ -1632,6 +1632,7 @@ async fn run_browser_loop(
     for (i,s) in orchestrator.plan.stages.iter().enumerate(){graph.describe(stage_nodes[i],&s.objective,&s.success_criteria)?;}
     let mut recovery_node:Option<usize>=None;
     let mut verification_recoveries=0u8;
+    let mut verifier_repair:Option<crate::agent::evidence_repair::Repair>=None;
     let mut recovery_observation:Option<usize>=None;
     let mut recovery_strategy:Option<crate::agent::replan::RecoveryPlan>=None;
     // A recovery entered because of missing goal evidence must not be closed
@@ -2211,7 +2212,23 @@ async fn run_browser_loop(
         let current_reference=crate::agent::execution_intelligence::current_reference_subject(&goal).is_some();
         let current_reference_ready=current_reference&&snapshot.origin==initial_origin&&
             crate::agent::execution_intelligence::current_reference_observed(&goal,&snapshot,&orchestrator.evidence);
-        let intelligence_next=if let Some(c)=catalog.as_mut().filter(|_|orchestrator.specialist()!=Specialist::Verification){
+        let intelligence_next=if let Some(repair)=verifier_repair.as_mut().filter(|_|orchestrator.specialist()!=Specialist::Verification){
+            if repair.has_new_fact(&orchestrator.evidence){
+                let _=app.emit("agent:verification_recovery",serde_json::json!({"run_id":run_id,"status":"new_candidate_observed","attempts":repair.attempted()}));
+                crate::agent::execution_intelligence::Next::Action(BrowserAction::Complete{
+                    summary:"Observed new relevant free-tier evidence; send the entire objective back to independent verification.".into()
+                },"verification:repaired_evidence_handoff")
+            }else if repair.should_settle(&snapshot){
+                let _=app.emit("agent:verification_recovery",serde_json::json!({
+                    "run_id":run_id,"status":"settling_public_search_results","attempts":repair.attempted()}));
+                crate::agent::execution_intelligence::Next::Wait
+            }else if let Some(action)=repair.next(&snapshot){
+                let _=app.emit("agent:verification_recovery",serde_json::json!({"run_id":run_id,"status":"acquiring_source_evidence","attempts":repair.attempted()}));
+                crate::agent::execution_intelligence::Next::Action(action,"verification:bounded_source_research")
+            }else{
+                crate::agent::execution_intelligence::Next::Stop("Independent verification rejected the comparison; no new supporting source facts were observed after bounded research. No completion is claimed.")
+            }
+        }else if let Some(c)=catalog.as_mut().filter(|_|orchestrator.specialist()!=Specialist::Verification){
             if freshly_observed&&!private_mode&&!is_child{
                 if let Some((site,host,query))=c.discovery_request(&snapshot){
                     let path=crate::resolve_data_dir().join("mcp-servers.json");
@@ -3442,6 +3459,41 @@ async fn run_browser_loop(
                 }
             }
         }
+        // When a read-only model repeats a failed target, try a distinct
+        // grounded live control before spending the entire repetition budget.
+        // This does not weaken loop detection or authorize the substitute:
+        // the ordinary DOM binder and native policy checks still run below.
+        let repeated_proposal=run_core.failed_before(&action,&snapshot,orchestrator.current)
+            ||seen_signatures.contains(&action_state_signature(orchestrator.current,&action,&snapshot));
+        if repeated_proposal&&freshly_observed&&!private_mode&&
+            catalog.is_none()&&skill.is_none()&&
+            orchestrator.specialist()!=Specialist::Verification&&
+            crate::agent::deliberation::read_only(&goal) {
+            let original_signature=action_state_signature(orchestrator.current,&action,&snapshot);
+            if let Some(alternative)=replacement.next_for_stage(
+                &goal,&semantic_focus,&snapshot,&objectives,&route_ledger)
+                .filter(|candidate|!matches!(candidate,
+                    BrowserAction::Complete{..}|BrowserAction::Download{..}|
+                    BrowserAction::Click{is_submit:true,..}|
+                    BrowserAction::TypeText{is_sensitive:true,..}|
+                    BrowserAction::SetChecked{..}))
+                .filter(|candidate|orchestrator.specialist().allows_on_page(candidate,&snapshot))
+                .filter(|candidate|crate::agent::objective_gate::check(
+                    &goal,&initial_origin,&snapshot,&objectives,candidate).is_ok())
+                .filter(|candidate|match candidate {
+                    BrowserAction::Navigate{url}=>route_ledger.allowed(url),_=>true
+                })
+                .filter(|candidate|{
+                    let signature=action_state_signature(orchestrator.current,candidate,&snapshot);
+                    signature!=original_signature&&!seen_signatures.contains(&signature)
+                }){
+                action=alternative;
+                thought="Recover repeated read-only action by selecting a distinct goal-relevant observed control".into();
+                model_route="action_recovery:distinct_observed_control".into();
+                let _=app.emit("agent:action_intelligence",serde_json::json!({
+                    "run_id":run_id,"step_index":step,"decision":"alternative_after_repeated_action"}));
+            }
+        }
         let before_effect=snapshot.clone();
         let semantic_attempt=run_core.prepare(&action,&snapshot,orchestrator.current);
         let signature = action_state_signature(orchestrator.current, &action, &snapshot);
@@ -3642,6 +3694,7 @@ async fn run_browser_loop(
         // The verification specialist does not execute arbitrary "complete"
         // assertions. A second LLM pass must return exact source quotes that
         // the Rust verifier can match to real captured WebView pages.
+        let mut verification_failure_reason:Option<String>=None;
         if orchestrator.specialist() == Specialist::Verification
             && matches!(decision, PolicyDecision::Allow)
         {
@@ -3781,6 +3834,7 @@ async fn run_browser_loop(
                         Ok(report) => {
                             if let Err(reason)=requirements.validate_report(&goal,&orchestrator.evidence,&report){
                                 factual_review_failed=true;
+                                verification_failure_reason=Some(reason.clone());
                                 decision=PolicyDecision::Deny{reason:format!("Requirement verification failed: {reason}")};
                             }else{
                             let _=app.emit("agent:requirement_state",serde_json::json!({"run_id":run_id,"step_index":step,"ledger":&requirements}));
@@ -3797,6 +3851,7 @@ async fn run_browser_loop(
                                 eprintln!("LUCIA_TEST_W1_VERIFIER_ERROR: {}",err);
                             }
                             factual_review_failed=true;
+                            verification_failure_reason=Some(err.to_string());
                             decision = PolicyDecision::Deny {
                                 reason: format!("Independent evidence verification failed: {err}"),
                             };
@@ -4266,7 +4321,10 @@ async fn run_browser_loop(
         }
         if orchestrator.specialist() == Specialist::Verification &&
             matches!(action_for_summary, BrowserAction::Complete { .. }) && !ok {
-            if factual_review_failed&&verification_recoveries==0&&!current_reference&&
+            let proposed_repair=verification_failure_reason.as_deref().and_then(|reason|
+                crate::agent::evidence_repair::Repair::from_failure(&goal,&orchestrator.evidence,reason));
+            let named_free=crate::agent::evidence_verifier::requires_named_free_evidence(&goal);
+            if factual_review_failed&&verification_recoveries==0&&(!named_free||proposed_repair.is_some())&&!current_reference&&
                 !objectives.active()&&orchestrator.can_reopen_research()&&
                 crate::agent::prerequisites::route_values(&goal).is_none()&&
                 crate::agent::prerequisites::filter_constraints(&goal).is_none()&&
@@ -4276,6 +4334,12 @@ async fn run_browser_loop(
                     if orchestrator.reopen_research(){
                         checkpoint_proof=None;
                         stage_nodes[orchestrator.current]=id;verification_recoveries+=1;last_action_failed=false;advisory=None;
+                        if let Some(repair)=proposed_repair {
+                            let _=app.emit("agent:verification_recovery",serde_json::json!({
+                                "run_id":run_id,"status":"targeted_research",
+                                "attempts":0,"scope":"read_only_observed_source"}));
+                            verifier_repair=Some(repair);
+                        }
                         recent_outcomes.push("Independent factual review found insufficient evidence. Locate the missing requested facts on relevant public source pages. Do not reuse the rejected summary.".into());
                         publish_graph!(&graph);
                         continue;
