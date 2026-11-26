@@ -204,7 +204,7 @@ pub struct Orchestrator {
     actions_in_stage: usize,
     fresh_observations: usize,
     last_action_failed: bool,
-    form_submitted: bool,
+    form_receipt: Option<super::form_proof::SubmissionReceipt>,
     confirmed_navigation: Option<String>,
     stage_entry_evidence: Vec<SourceEvidence>,
     starting_origin: Option<String>,
@@ -375,7 +375,7 @@ impl Orchestrator {
             completed_summaries: Vec::new(), successful_actions: 0,
             actions_in_stage: 0, fresh_observations: 0,
             last_action_failed: false,
-            form_submitted: false,
+            form_receipt: None,
             confirmed_navigation: None,
             stage_entry_evidence: Vec::new(),
             starting_origin: None,
@@ -446,12 +446,21 @@ impl Orchestrator {
         if success && !matches!(action, BrowserAction::Complete { .. }) {
             self.successful_actions += 1;
             self.actions_in_stage += 1;
-            if matches!(action, BrowserAction::Click { is_submit: true, .. }) {
-                self.form_submitted = true;
-            }
+            // Native submit dispatch does NOT create a receipt. The live
+            // post-action snapshot must independently confirm the intended
+            // form before the runner records a submission receipt.
         }
     }
 
+    pub fn record_form_receipt(&mut self,receipt:super::form_proof::SubmissionReceipt){
+        if self.specialist()==Specialist::Form {self.form_receipt=Some(receipt);}
+    }
+    pub fn form_receipt(&self)->Option<&super::form_proof::SubmissionReceipt>{
+        self.form_receipt.as_ref()
+    }
+    pub fn form_stage_has_activity(&self)->bool{
+        self.specialist()==Specialist::Form&&self.actions_in_stage>0
+    }
     pub fn prior_evidence(&self) -> String {
         let summaries = self.completed_summaries.iter()
             .map(|s| format!("- Earlier stage summary (not independent evidence): {s}"))
@@ -610,12 +619,17 @@ impl Orchestrator {
                 return Err("Observed pages do not yet contain relevant goal evidence".into());
             }
         }
-        if is_verifier || self.specialist() == Specialist::Form {
-            let goal = self.plan.goal.to_lowercase();
-            let needs_submit = contains_any(&goal,
+        if (is_verifier || self.specialist()==Specialist::Form)
+            &&self.plan.stages.iter().any(|s|s.specialist==Specialist::Form){
+            let goal=self.plan.goal.to_ascii_lowercase();
+            let needs_submit=contains_any(&goal,
                 &["submit", "apply ", "register", "sign up", "confirm application"]);
-            if needs_submit && !self.form_submitted {
-                return Err("The requested form submission has not been acknowledged as successful".into());
+            if needs_submit {
+                let receipt=self.form_receipt.as_ref().ok_or(
+                    "Requested Form stage needs an observed intended submit and a fresh success confirmation")?;
+                if !super::form_proof::receipt_visible(receipt,snapshot){
+                    return Err("The intended form confirmation is not visible in the current native page".into())
+                }
             }
         }
         // A repeated acquisition specialist represents a distinct objective.
@@ -977,6 +991,35 @@ mod tests {
         assert!(parse_generated_plan(goal,&raw).is_err());
     }
     #[test]
+    fn form_stage_and_verification_both_require_visible_intended_receipt(){
+        let goal="On the current local test website, submit the feedback form, then report the visible feedback confirmation. Do not submit the application form.";
+        let mut run=Orchestrator::new(goal);
+        run.begin();
+        assert_eq!(run.specialist(),Specialist::Form);
+        let before=snapshot("http://127.0.0.1:18764/",
+            "Feedback form is ready. The application form is unrelated. Feedback not sent yet.");
+        run.observe(&before);
+        run.action_outcome(&BrowserAction::TypeText{
+            node_id:"note".into(),text:"A test note".into(),is_sensitive:false
+        },true);
+        assert!(run.can_complete(&before).is_err());
+        run.action_outcome(&BrowserAction::Click{
+            node_id:"feedback".into(),element_label:"Submit feedback".into(),is_submit:true
+        },true);
+        assert!(run.can_complete(&before).is_err(),"A submit dispatch cannot complete the stage");
+        let confirmed=snapshot("http://127.0.0.1:18764/",
+            "Feedback sent successfully on the local test page.");
+        run.record_form_receipt(crate::agent::form_proof::SubmissionReceipt{
+            origin:confirmed.origin.clone(),confirmation:"feedback sent".into(),target:"feedback".into()
+        });
+        run.observe(&confirmed);
+        assert!(run.can_complete(&confirmed).is_ok());
+        assert!(!run.complete_stage("Native form receipt confirmed"));
+        assert_eq!(run.specialist(),Specialist::Verification);
+        assert!(run.can_complete(&confirmed).is_ok());
+        assert!(run.can_complete(&before).is_err(),"Stale page cannot satisfy receipt");
+    }
+    #[test]
     fn form_specialist_cannot_report_submission_without_successful_submit() {
         let mut o = Orchestrator::new("Submit my application form");
         o.begin();
@@ -991,7 +1034,14 @@ mod tests {
         o.action_outcome(&BrowserAction::Click {
             node_id: "n_3".into(), element_label: "Submit".into(), is_submit: true
         }, true);
-        assert!(o.can_complete(&form).is_ok());
+        assert!(o.can_complete(&form).is_err(),"Click acknowledgment is not a receipt");
+        let confirmed=snapshot("https://apply.example",
+            "The internship application form is complete. Application received. Thank you for submitting.");
+        o.record_form_receipt(crate::agent::form_proof::SubmissionReceipt{
+            origin:confirmed.origin.clone(),confirmation:"application received".into(),target:"application".into()
+        });
+        o.observe(&confirmed);
+        assert!(o.can_complete(&confirmed).is_ok());
     }
 
     #[test]

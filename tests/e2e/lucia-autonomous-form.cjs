@@ -24,7 +24,7 @@ async function main(){
     window.__luciaGateUnlisten?.forEach(unlisten=>unlisten());
     window.__luciaGateEvents=[];
     window.__luciaGateUnlisten=[];
-    for(const name of ['agent:plan','agent:stage','agent:trace','agent:approval_required','agent:approval_closed','agent:run_error','agent:verification_report','agent:run_status']){
+    for(const name of ['agent:plan','agent:stage','agent:trace','agent:approval_required','agent:approval_closed','agent:run_error','agent:verification_report','agent:form_submission_proof','agent:run_status']){
       const unlisten=await window.__TAURI__.event.listen(name, ev => window.__luciaGateEvents.push({event:name,payload:ev.payload}));
       window.__luciaGateUnlisten.push(unlisten);
     }
@@ -102,12 +102,18 @@ async function main(){
     url:snapshot?.origin,
     detailsVisible:snapshot?.text_excerpt?.includes('The fixture details are visible'),
     feedbackVisible:snapshot?.text_excerpt?.includes('Feedback sent successfully on the local test page.'),
+    unrelatedApplicationUntouched:snapshot?.text_excerpt?.includes('No sample application has been submitted.'),
     controlCount:snapshot?.interactive_nodes?.length
   }));
   const verified=relevant.find(x=>x.event==='agent:verification_report');
+  const submissionProofs=relevant.filter(x=>x.event==='agent:form_submission_proof');
+  assert.equal(submissionProofs.length,1,'Exactly one native intended-form proof is required');
+  assert.equal(submissionProofs[0]?.payload?.status,'confirmed');
+  assert.equal(submissionProofs[0]?.payload?.readback_verified,true);
   assert.equal(relevant.some(x=>x.event==='agent:approval_required'),false,'Routine feedback should not need user approval');
   assert.equal(ended.payload.status,'completed','Real model must complete all stages');
   assert.ok(snapshot?.text_excerpt?.includes('Feedback sent successfully on the local test page.'),'Routine feedback was not submitted');
+  assert.ok(snapshot?.text_excerpt?.includes('No sample application has been submitted.'),'Unrelated application form was altered');
   assert.ok(verified?.payload?.report?.status==='evidence_checked','Real verification report missing');
   console.log('PASS autonomous routine form submission, no approval, live verification');
  }finally{ws.close()}

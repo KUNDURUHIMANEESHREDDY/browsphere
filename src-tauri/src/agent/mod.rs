@@ -5,6 +5,7 @@ pub mod policy;
 pub mod memory;
 pub mod orchestrator;
 pub mod evidence_verifier;
+pub mod form_proof;
 pub mod intent_router;
 pub mod native_eval;
 pub mod vision;

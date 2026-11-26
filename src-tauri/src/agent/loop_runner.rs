@@ -2329,6 +2329,16 @@ async fn run_browser_loop(
             }
             crate::agent::execution_intelligence::Next::Unmanaged=>None
         };
+        // A clearly identified form, already interacted with, may have an
+        // exact user-authorized submit control. Prefer that observed control
+        // over irrelevant model downloads/navigation. This is not success:
+        // the normal action policy and fresh post-submit proof are mandatory.
+        if native_objective_action.is_none()&&freshly_observed
+            &&orchestrator.form_stage_has_activity()&&orchestrator.form_receipt().is_none(){
+            if let Some(action)=crate::agent::form_proof::observed_intended_submit(&goal,&snapshot){
+                native_objective_action=Some((action,"form:observed_intended_submit"));
+            }
+        }
 
         // Include only relevant user-saved notes, scoped to the current site or global.
         // Notes are context, not instructions: policy and user approvals remain authoritative.
@@ -3682,6 +3692,19 @@ async fn run_browser_loop(
                 reason:"This control is unrelated to the requested read-only objective".into()
             };
         }
+        // A user's request to submit one form cannot authorize another
+        // button on the same page. Do this BEFORE dispatch; the later
+        // receipt check alone cannot undo an unintended submission.
+        if orchestrator.specialist()==Specialist::Form {
+            if let BrowserAction::Click{is_submit:true,..}=&action {
+                if orchestrator.form_receipt().is_some(){
+                    decision=PolicyDecision::Deny{
+                        reason:"Requested form submission is already confirmed; do not submit twice".into()};
+                }else if let Err(reason)=crate::agent::form_proof::authorize_submit(&goal,&snapshot,&action){
+                    decision=PolicyDecision::Deny{reason:format!("Intended form policy: {reason}")};
+                }
+            }
+        }
         // Download permission cannot be introduced by a planner, supervisor
         // or downloaded page. Block proposals without the user's request
         // and a matching live link or exact URL they explicitly supplied.
@@ -3751,7 +3774,17 @@ async fn run_browser_loop(
                     let is_comparison = orchestrator.plan.stages.iter()
                         .any(|stage| stage.specialist == Specialist::Comparison)
                         || !crate::agent::deliberation::explicit_research_sources(&goal).is_empty();
-                    let result = if crate::agent::policy::requested_wikipedia_article_url(&goal).is_some(){
+                    let result = if orchestrator.plan.stages.iter().any(|stage|
+                        stage.specialist==Specialist::Form){
+                        // Form verification is read-only, deterministic and
+                        // tied to the prior native submit receipt. No model
+                        // may claim success from an unrelated form or banner.
+                        orchestrator.form_receipt()
+                            .ok_or_else(||anyhow::anyhow!("No verified intended-form submission receipt"))
+                            .and_then(|receipt|crate::agent::form_proof::verified_report(
+                                receipt,&snapshot,&orchestrator.evidence
+                            ).map_err(anyhow::Error::msg))
+                    }else if crate::agent::policy::requested_wikipedia_article_url(&goal).is_some(){
                         crate::agent::evidence_verifier::verify_wikipedia_article(
                             &goal,&snapshot,&orchestrator.evidence)
                             .map_err(anyhow::Error::msg)
@@ -4057,6 +4090,7 @@ async fn run_browser_loop(
             && matches!(&action,BrowserAction::Click{is_submit:true,..})
             && crate::agent::prerequisites::language(&goal,&snapshot).is_some();
         let mut submission_unconfirmed = false;
+        let mut observed_form_receipt:Option<crate::agent::form_proof::SubmissionReceipt>=None;
         let _ = app.emit("agent:activity", serde_json::json!({
             "run_id": run_id, "phase": "checking", "step_index": step
         }));
@@ -4095,6 +4129,12 @@ async fn run_browser_loop(
                                 // button in a narrow read-only title lookup.
                                 // Search navigation is *not* transaction success.
                                 check_named_search_transition(&goal, &before, &after)
+                            } else if orchestrator.specialist()==Specialist::Form {
+                                match crate::agent::form_proof::verify_submission(
+                                    &goal,&action,&before,&after){
+                                    Ok(receipt)=>{observed_form_receipt=Some(receipt);Ok(())},
+                                    Err(reason)=>Err(reason)
+                                }
                             } else {
                                 check_submission_result(&before, &after)
                             },
@@ -4231,6 +4271,14 @@ async fn run_browser_loop(
         }
 
         orchestrator.action_outcome(&action, ok);
+        if ok {
+            if let Some(receipt)=observed_form_receipt.take(){
+                orchestrator.record_form_receipt(receipt);
+                let _=app.emit("agent:form_submission_proof",serde_json::json!({
+                    "run_id":run_id,"status":"confirmed","readback_verified":true
+                }));
+            }
+        }
         // Do not claim navigation from an API dispatch: only a fresh native
         // snapshot whose final URL and readable page passed the postcondition
         // can transition a direct-navigation stage.
