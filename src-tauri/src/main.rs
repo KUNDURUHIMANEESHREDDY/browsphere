@@ -2152,6 +2152,9 @@ async fn route_lucia_intent(
             reason: "Explicit website navigation requested by the user".into(),
         });
     }
+    if let Some(intent) = agent::intent_router::LuciaIntent::explicit_search_task(&message) {
+        return Ok(intent);
+    }
     // Explicit playback requests should launch the browser task pipeline,
     // rather than returning advice from a text-only chat model.
     if let Some(intent) = agent::intent_router::LuciaIntent::explicit_media_task(&message) {
