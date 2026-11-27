@@ -1740,6 +1740,10 @@ User text: <text>{}</text>"#,
                         "prompt_bytes":prompt.len(),
                         "system_bytes":system_prompt.len(),
                         "schema_constrained":tiny.is_some(),
+                        "kind": Self::local_action_response_shape(
+                            val.get("response").and_then(|v|v.as_str()).unwrap_or("")),
+                        "action": Self::local_action_response_kind(
+                            val.get("response").and_then(|v|v.as_str()).unwrap_or("")),
                         "prompt_tokens":val.get("prompt_eval_count").and_then(|v|v.as_u64()),
                         "cached_prompt_tokens":val.get("prompt_eval_cached_count").and_then(|v|v.as_u64()),
                         "generated_tokens":val.get("eval_count").and_then(|v|v.as_u64()),
@@ -2442,6 +2446,36 @@ User text: <text>{}</text>"#,
         out
     }
 
+    // Diagnose MODEL RESPONSE SHAPE without retaining user text, page content,
+    // free-form model output, URLs, prompts, or sensitive values. A bounded
+    // static classification is persisted only by the opt-in isolated CI path.
+    fn local_action_response_shape(raw: &str) -> &'static str {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else { return "invalid_json"; };
+        match v {
+            serde_json::Value::Object(map) => match map.get("action") {
+                Some(serde_json::Value::Object(_)) => "wrapped_object",
+                Some(serde_json::Value::String(_)) => "wrapped_string",
+                Some(_) => "wrapped_other",
+                None if map.get("type").is_some() => "root_action",
+                _ => "missing_action",
+            },
+            _ => "nonobject_json",
+        }
+    }
+
+    fn local_action_response_kind(raw: &str) -> &'static str {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else { return "unknown"; };
+        let kind=v.get("action").and_then(|action|
+            action.as_str().or_else(||action.get("type").and_then(serde_json::Value::as_str)))
+            .or_else(||v.get("type").and_then(serde_json::Value::as_str)).unwrap_or("");
+        match kind {
+            "navigate"=>"navigate","click"=>"click","type_text"=>"type_text",
+            "press_key"=>"press_key","select_option"=>"select_option",
+            "set_checked"=>"set_checked","scroll"=>"scroll",
+            "download"=>"download","complete"=>"complete",_=>"unknown",
+        }
+    }
+
     fn parse_model_json(raw: &str) -> Option<(String, BrowserAction)> {
         let cleaned = raw
             .trim()
@@ -2455,7 +2489,33 @@ User text: <text>{}</text>"#,
             .and_then(|t| t.as_str())
             .unwrap_or("Inspecting current view")
             .chars().take(500).collect::<String>();
-        let mut action = v.get("action")?.clone();
+        // Ollama JSON-object mode guarantees syntax, NOT a particular action
+        // wrapper. Some small models produce {"type":"click","node_id":"c1"}
+        // or {"action":"click","node_id":"c1"} instead of the canonical
+        // {"action":{"type":"click","node_id":"c1"}}. Normalize those
+        // familiar envelopes; NEVER execute here. The caller still applies
+        // the full native allowed-choice schema, exact observed alias,
+        // freshly observed DOM binding, permissions and independent verifier.
+        let mut action = match v.get("action") {
+            Some(serde_json::Value::Object(_)) => v.get("action")?.clone(),
+            Some(serde_json::Value::String(kind)) => {
+                let mut obj=v.get("parameters").or_else(||v.get("arguments"))
+                    .and_then(serde_json::Value::as_object).cloned().unwrap_or_default();
+                for key in ["node_id","text","url","summary","key","delta_y",
+                    "amount","is_sensitive","is_submit","option_label",
+                    "checked","element_label"] {
+                    if let Some(value)=v.get(key){obj.insert(key.into(),value.clone());}
+                }
+                obj.insert("type".into(),serde_json::Value::String(kind.clone()));
+                serde_json::Value::Object(obj)
+            }
+            None if v.get("type").and_then(serde_json::Value::as_str).is_some() => {
+                let mut obj=v.as_object()?.clone();
+                obj.remove("thought");
+                serde_json::Value::Object(obj)
+            }
+            _ => return None,
+        };
         let obj = action.as_object_mut()?;
         let kind = obj.get("type")?.as_str()?.to_string();
         // Small local models frequently use "amount"/"deltaY" instead of
@@ -3436,6 +3496,50 @@ Interactive nodes JSON: {}"#,serde_json::to_string(&nodes).unwrap());
         assert!(
             matches!(action, BrowserAction::Navigate { url } if url == "https://www.youtube.com/")
         );
+    }
+
+    #[test]
+    fn qwen_json_envelopes_are_normalized_without_authorizing_unknown_actions() {
+        for raw in [
+            r#"{"type":"scroll","delta_y":120}"#,
+            r#"{"action":"scroll","delta_y":120}"#,
+            r#"{"action":"scroll","parameters":{"delta_y":120}}"#,
+            r#"{"action":{"type":"scroll","delta_y":120}}"#,
+        ] {
+            let (_,a)=ModelRouter::parse_model_json(raw)
+                .expect("known, valid JSON envelope must decode");
+            assert!(matches!(a,BrowserAction::Scroll{delta_y:120}));
+        }
+        for raw in [
+            r#"{"action":"exec_shell","command":"echo forbidden"}"#,
+            r#"{"type":"exec_shell","command":"echo forbidden"}"#,
+            r#"{"action":{"type":"exec_shell","command":"echo forbidden"}}"#,
+            r#"{"action":"click","node_id":"c1"}"#,
+        ] {
+            // Unknown kinds and missing execution receipts never become a
+            // verified browser action simply by JSON-envelope normalization.
+            if raw.contains("exec_shell") {
+                assert!(ModelRouter::parse_model_json(raw).is_none());
+            }
+        }
+        assert_eq!(ModelRouter::local_action_response_shape(
+            r#"{"action":"scroll","delta_y":120}"#),"wrapped_string");
+        assert_eq!(ModelRouter::local_action_response_shape(
+            r#"{"type":"scroll","delta_y":120}"#),"root_action");
+        assert_eq!(ModelRouter::local_action_response_kind(
+            r#"{"action":"eval","command":"secret"}"#),"unknown");
+        let raw=format!("Original user goal: Read a public document\nOrigin: https://example.org/\nInteractive nodes JSON: {}",json!([
+            {"node_id":"native1","tag":"a","role":"link","label":"Example public guide","is_sensitive":false}
+        ]));
+        let (_,schema,aliases)=ModelRouter::tiny_action_context_with_limit(&raw,8);
+        let (_,mut allowed)=ModelRouter::parse_model_json(
+            r#"{"action":"click","node_id":"c1"}"#).unwrap();
+        assert!(ModelRouter::tiny_choice_allowed(&allowed,&schema));
+        assert!(ModelRouter::resolve_tiny_action(&mut allowed,&aliases));
+        assert!(matches!(allowed,BrowserAction::Click{node_id,..} if node_id=="native1"));
+        let (_,forged)=ModelRouter::parse_model_json(
+            r#"{"action":"click","node_id":"c99"}"#).unwrap();
+        assert!(!ModelRouter::tiny_choice_allowed(&forged,&schema));
     }
 
     #[test]
