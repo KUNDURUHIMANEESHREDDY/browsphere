@@ -74,6 +74,10 @@ try {
     ['Wikipedia', 'https://www.wikipedia.org/'],
     ['Hacker News', 'https://news.ycombinator.com/']
   ];
+  if (process.env.BROWSER_COMPAT_UNFAMILIAR === '1') {
+    sites.push(['web.dev Accessibility', 'https://web.dev/learn/accessibility/']);
+    sites.push(['W3C Image Tutorials', 'https://www.w3.org/WAI/tutorials/images/']);
+  }
   for (const [label, url] of sites) {
     await main.evaluate(`window.browsphereApp.navigate(${JSON.stringify(url)})`);
     let match;

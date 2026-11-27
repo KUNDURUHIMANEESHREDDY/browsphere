@@ -625,6 +625,17 @@ fn trusted_youtube_watch_link_followup(
     Some(BrowserAction::Navigate { url: clicked_url.to_string() })
 }
 
+// A rejected verification may be retried only after the orchestrator has
+// explicitly reopened research once. This bypasses duplicate *action*
+// suppression, not evidence validation or the bounded recovery budget.
+fn bounded_verification_recheck(
+    specialist: Specialist, action: &BrowserAction, completed_recoveries: u8,
+) -> bool {
+    specialist == Specialist::Verification
+        && completed_recoveries == 1
+        && matches!(action, BrowserAction::Complete { .. })
+}
+
 fn retryable_verifier_format_error(error: &str) -> bool {
     // A malformed LLM quote/claim may be repaired by a second independent
     // review. Do not retry missing evidence, unobserved source URLs, or the
@@ -1479,6 +1490,31 @@ pub async fn run_react_loop(
         let _=app.emit("agent:run_completed",summary);
         return Ok("completed".into());
     }
+    if crate::agent::mcp::calendar_requested(&goal) || crate::agent::mcp::calendar_natural_requested(&goal) {
+        anyhow::ensure!(!private_mode, "MCP is disabled in Private Browsing");
+        while *pause_rx.borrow() {
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok("cancelled".into()),
+                changed = pause_rx.changed() => { changed?; }
+            }
+        }
+        let _ = app.emit("agent:stage", serde_json::json!({"run_id":run_id,"specialist":"MCP Agent","objective":"Create calendar event once and independently read it back","status":"active","index":0}));
+        let result = crate::agent::mcp::execute_calendar(&goal,&crate::resolve_data_dir().join("mcp-servers.json"),cancel.clone()).await;
+        match result {
+            Ok(summary) => {
+                let report=VerificationReport{status:"evidence_checked",summary:summary.clone(),findings:vec![],limitations:"Verified against a fresh read-only request to the configured calendar provider; not an independent provider.".into()};
+                let _=app.emit("agent:verification_report",serde_json::json!({"run_id":run_id,"report":report}));
+                let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"MCP Agent","status":"completed","index":0,"summary":summary}));
+                let _=app.emit("agent:run_completed",summary);
+                return Ok("completed".into());
+            }
+            Err(e) => {
+                let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"MCP Agent","status":"unverified","index":0}));
+                let _=app.emit("agent:run_error",serde_json::json!({"run_id":run_id,"message":format!("{e:#}")}));
+                return Ok("unverified".into());
+            }
+        }
+    }
     if crate::agent::mcp::requested(&goal) {
         anyhow::ensure!(!private_mode, "MCP is disabled in Private Browsing");
         while *pause_rx.borrow() {
@@ -1539,6 +1575,9 @@ async fn run_browser_loop(
     let mut replacement=crate::agent::objective_gate::ReplacementPlanner::default();
     let mut skill=crate::agent::skills::SkillRun::compile(&goal);
     let mut requirements=crate::agent::requirements::Ledger::compile(&goal);
+    let fact_contract=crate::agent::fact_research::Contract::compile(&goal);
+    let mut fact_research=crate::agent::fact_research::Research::default();
+    let mut fact_graph=crate::agent::fact_graph::FactGraph::compile(&goal);
     let mut acquisition=crate::agent::evidence_acquisition::Acquisition::default();
     let mut explicit_focus_attempts=std::collections::HashMap::<String,usize>::new();
     let mut explicit_revisits=std::collections::HashSet::<String>::new();
@@ -1561,6 +1600,7 @@ async fn run_browser_loop(
     let mut auth_recovery_attempts: u8 = 0;
     let mut supervisor_reviews: u8 = 0;
     let mut run_core=crate::agent::semantic_core::RunCore::default();
+    let mut goal_progress=crate::agent::goal_progress::Tracker::default();
     let mut route_ledger=crate::agent::semantic_core::RouteLedger::default();
     let mut review_budget=4u8;
     let mut last_review_step=0u32;
@@ -1616,11 +1656,13 @@ async fn run_browser_loop(
     // planning call. The LLM still chooses the concrete webpage interactions;
     // live browser actions and independent evidence checks are mandatory.
     let model_plan = if requested_navigation_url(&goal).is_some()
+        || crate::agent::policy::requested_compound_page_entry_url(&goal).is_some()
         || requested_music_entry_url(&goal).is_some()
         || is_simple_named_title_task(&goal)
         || intelligence.managed()
         || crate::agent::execution_intelligence::current_reference_subject(&goal).is_some()
         || requested_named_link_title(&goal).is_some()
+        || crate::agent::orchestrator::current_page_form(&goal)
         || crate::agent::prerequisites::named_link(&goal,&snapshot).is_some()
         || crate::agent::prerequisites::route_values(&goal).is_some()
         || crate::agent::prerequisites::filter_constraints(&goal).is_some()
@@ -1678,8 +1720,12 @@ async fn run_browser_loop(
     // independent review. Kept only in memory for the current run.
     let mut rejected_verification_sources:
         Option<Vec<crate::agent::orchestrator::SourceEvidence>> = None;
+    let mut verifier_repair:Option<crate::agent::evidence_repair::Repair>=None;
     let mut recovery_observation:Option<usize>=None;
     let mut recovery_strategy:Option<crate::agent::replan::RecoveryPlan>=None;
+    // A recovery entered because of missing goal evidence must not be closed
+    // merely because a page changed; require a new native evidence gain.
+    let mut goal_recovery_pending=false;
     publish_graph!(&graph);
     orchestrator.begin();
     let _ = app.emit("agent:plan", serde_json::json!({
@@ -2229,7 +2275,7 @@ async fn run_browser_loop(
             && requirements.missing_fact_sources().contains(&snapshot.origin)
             && crate::agent::browser_skills::readable(&snapshot)
             && !crate::agent::search_discovery::human_verification(&snapshot.origin,&snapshot.title,&snapshot.text_excerpt){
-            let terms=crate::agent::evidence_verifier::comparison_focus_terms(&goal);
+            let terms=crate::agent::evidence_verifier::fact_focus_terms(&goal);
             let attempts=explicit_focus_attempts.entry(snapshot.origin.clone()).or_default();
             while !terms.is_empty()&&*attempts<3&&requirements.missing_fact_sources().contains(&snapshot.origin){
                 *attempts+=1;
@@ -2251,10 +2297,58 @@ async fn run_browser_loop(
             }
         }
         let _=app.emit("agent:requirement_state",serde_json::json!({"run_id":run_id,"step_index":step,"ledger":&requirements}));
+        if let Some(graph)=fact_graph.as_mut(){
+            graph.observe(&orchestrator.evidence);
+            let _=app.emit("agent:fact_graph",serde_json::json!({
+                "run_id":run_id,"step_index":step,"nodes":graph.nodes(),
+                "candidate_ready":graph.can_synthesize(),"next_gap":graph.next_gap()
+            }));
+        }
+        if let Some(facts)=fact_contract.as_ref(){
+            let missing=facts.missing(&goal,&orchestrator.evidence);
+            let _=app.emit("agent:fact_dependencies",serde_json::json!({
+                "run_id":run_id,"step_index":step,"remaining":missing.len(),
+                "missing":missing,"eligible_for_synthesis":facts.ready(&goal,&orchestrator.evidence)
+            }));
+        }
         let current_reference=crate::agent::execution_intelligence::current_reference_subject(&goal).is_some();
         let current_reference_ready=current_reference&&snapshot.origin==initial_origin&&
             crate::agent::execution_intelligence::current_reference_observed(&goal,&snapshot,&orchestrator.evidence);
-        let intelligence_next=if let Some(c)=catalog.as_mut().filter(|_|orchestrator.specialist()!=Specialist::Verification){
+        let fact_direction=fact_contract.as_ref().and_then(|contract|{
+            if orchestrator.specialist()==Specialist::Research{
+                fact_research.decide(&goal,contract,orchestrator.current,
+                    &orchestrator.evidence,&snapshot)
+            }else if orchestrator.specialist()==Specialist::Comparison
+                && !contract.ready(&goal,&orchestrator.evidence){
+                Some(crate::agent::fact_research::Decision::Stop)
+            }else{None}
+        });
+        let intelligence_next=if let Some(repair)=verifier_repair.as_mut().filter(|_|orchestrator.specialist()!=Specialist::Verification){
+            if repair.has_new_fact(&orchestrator.evidence){
+                let _=app.emit("agent:verification_recovery",serde_json::json!({"run_id":run_id,"status":"new_candidate_observed","attempts":repair.attempted()}));
+                crate::agent::execution_intelligence::Next::Action(BrowserAction::Complete{
+                    summary:"Observed new relevant free-tier evidence; send the entire objective back to independent verification.".into()
+                },"verification:repaired_evidence_handoff")
+            }else if repair.should_settle(&snapshot){
+                let _=app.emit("agent:verification_recovery",serde_json::json!({
+                    "run_id":run_id,"status":"settling_public_search_results","attempts":repair.attempted()}));
+                crate::agent::execution_intelligence::Next::Wait
+            }else if let Some(action)=repair.next(&snapshot){
+                let _=app.emit("agent:verification_recovery",serde_json::json!({"run_id":run_id,"status":"acquiring_source_evidence","attempts":repair.attempted()}));
+                crate::agent::execution_intelligence::Next::Action(action,"verification:bounded_source_research")
+            }else{
+                crate::agent::execution_intelligence::Next::Stop("Independent verification rejected the comparison; no new supporting source facts were observed after bounded research. No completion is claimed.")
+            }
+        }else if let Some(direction)=fact_direction{
+            match direction{
+                crate::agent::fact_research::Decision::Action(action)=>
+                    crate::agent::execution_intelligence::Next::Action(action,"facts:directed_source_acquisition"),
+                crate::agent::fact_research::Decision::Wait=>crate::agent::execution_intelligence::Next::Wait,
+                crate::agent::fact_research::Decision::Stop=>
+                    crate::agent::execution_intelligence::Next::Stop(
+                        "Required free-tier facts are still missing after bounded, source-specific research. No recommendation was generated."),
+            }
+        }else if let Some(c)=catalog.as_mut().filter(|_|orchestrator.specialist()!=Specialist::Verification){
             if freshly_observed&&!private_mode&&!is_child{
                 if let Some((site,host,query))=c.discovery_request(&snapshot){
                     let path=crate::resolve_data_dir().join("mcp-servers.json");
@@ -2319,6 +2413,16 @@ async fn run_browser_loop(
             }
             crate::agent::execution_intelligence::Next::Unmanaged=>None
         };
+        // A clearly identified form, already interacted with, may have an
+        // exact user-authorized submit control. Prefer that observed control
+        // over irrelevant model downloads/navigation. This is not success:
+        // the normal action policy and fresh post-submit proof are mandatory.
+        if native_objective_action.is_none()&&freshly_observed
+            &&orchestrator.form_stage_has_activity()&&orchestrator.form_receipt().is_none(){
+            if let Some(action)=crate::agent::form_proof::observed_intended_submit(&goal,&snapshot){
+                native_objective_action=Some((action,"form:observed_intended_submit"));
+            }
+        }
 
         // Include only relevant user-saved notes, scoped to the current site or global.
         // Notes are context, not instructions: policy and user approvals remain authoritative.
@@ -2438,11 +2542,19 @@ async fn run_browser_loop(
         }
         // Keep every preferred grounded visual control inside the compact
         // action model's native candidate list, not only in a prose hint.
-        let semantic_focus=match requirements.next_research_objective(){
-            Some(missing) if orchestrator.specialist()==Specialist::Research =>
-                format!("{} | Outstanding evidence objective: {missing}",orchestrator.semantic_focus()),
-            _=>orchestrator.semantic_focus(),
-        };
+        let semantic_focus=if orchestrator.specialist()==Specialist::Research{
+            let gap=fact_graph.as_ref().and_then(|graph|{
+                let stage_source=fact_contract.as_ref().and_then(|contract|
+                    contract.stage_name(orchestrator.current));
+                stage_source.and_then(|source|graph.next_gap_for_source(source))
+                    .or_else(||graph.next_gap())
+            });
+            if let Some(gap)=gap{
+                format!("{} | Fact-directed research: {} at source {} ({:?}); capture exact supporting passages, not generic navigation.",orchestrator.semantic_focus(),gap.dimension,gap.source,gap.state)
+            }else if let Some(missing)=requirements.next_research_objective(){
+                format!("{} | Outstanding evidence objective: {missing}",orchestrator.semantic_focus())
+            }else{orchestrator.semantic_focus()}
+        }else{orchestrator.semantic_focus()};
         let semantic_hint=orchestrator.semantic_hint();
         // Reuse semantic_core's existing stage-aware DOM ranker for every
         // multi-stage task, not just research. Otherwise form/comparison
@@ -2493,7 +2605,21 @@ async fn run_browser_loop(
         route_ledger.observe(orchestrator.current,&snapshot.origin);
         replacement.set_stage(orchestrator.current);
         let changed=run_core.observe(&snapshot,orchestrator.current);
+        let evidence_gain=goal_progress.observe(orchestrator.current,&requirements);
+        if goal_recovery_pending && evidence_gain {
+            if let Some(id)=recovery_node.take(){
+                graph.complete(id,GraphReceipt::ObservedProgress)?;
+                graph.start(stage_nodes[orchestrator.current])?;
+                recovery_strategy=None;
+                goal_recovery_pending=false;
+                publish_graph!(&graph);
+            }
+        }
         if freshly_observed {objectives.observe(&orchestrator.evidence);}
+        let _=app.emit("agent:goal_progress",serde_json::json!({
+            "run_id":run_id,"step_index":step,"stage":orchestrator.current,
+            "evidence_gain":evidence_gain,"progress":goal_progress.telemetry()
+        }));
         if changed {advisory=None;}
         let (observed_sources,total_sources)=objectives.counts();
         let _=app.emit("agent:objective_state",serde_json::json!({"run_id":run_id,"revision":crate::agent::objective_gate::REVISION,
@@ -2534,7 +2660,7 @@ async fn run_browser_loop(
         if let Some(s)=skill.as_mut(){s.observe(&snapshot);
             let _=app.emit("agent:skill_state",serde_json::json!({"run_id":run_id,"step_index":step,"phase":s.phase,"diagnosis":s.diagnosis,"recovery_strategy":s.recovery_strategy()}));
         }
-        let task_state=format!("{} {} {} {} {} Next objective: {}",run_core.hint(&snapshot,orchestrator.current,orchestrator.plan.stages.len()),objectives.hint(),skill.as_ref().map(|s|s.hint()).unwrap_or_default(),if intelligence.managed(){intelligence.hint()}else{String::new()},requirements.hint(),requirements.next_research_objective().unwrap_or("Independent final verification"));
+        let task_state=format!("{} {} {} {} {} {} Next objective: {}",run_core.hint(&snapshot,orchestrator.current,orchestrator.plan.stages.len()),objectives.hint(),skill.as_ref().map(|s|s.hint()).unwrap_or_default(),if intelligence.managed(){intelligence.hint()}else{String::new()},requirements.hint(),goal_progress.hint(),requirements.next_research_objective().unwrap_or("Independent final verification"));
         let failed_choices=run_core.blocked(&snapshot,orchestrator.current);
         let _=app.emit("agent:orchestration",serde_json::json!({"run_id":run_id,"step_index":step,"page_changed":changed,"stage":orchestrator.current,"stalled":run_core.stalled(),"excluded_choices":failed_choices.len()}));
         // Keep unsupported completion out of the action proposer's choices.
@@ -2583,9 +2709,16 @@ async fn run_browser_loop(
         } else {
             "eligible for independent verification only; never proof of success".to_string()
         };
+        // Stage-scoped coverage: do not replan an already-observed named
+        // source merely because future research stages remain outstanding.
+        let goal_plateau=goal_progress.stalled_for_stage(&requirements,
+            orchestrator.current,
+            orchestrator.specialist()==Specialist::Research);
         // Replan only the unfinished objective after repeated lack of progress.
         if native_objective_action.is_none()&&freshly_observed&&
-            run_core.can_replan(&snapshot,orchestrator.current,step_budget.max(orchestrator.plan.stages.len() as u32*4).saturating_sub(step))&&
+            run_core.can_replan_with_goal_signal(&snapshot,orchestrator.current,
+                step_budget.max(orchestrator.plan.stages.len() as u32*4).saturating_sub(step),
+                goal_plateau)&&
             recovery_node.is_none()&&orchestrator.specialist()!=Specialist::Verification&&
             catalog.is_none()&&!authentication_blocked&&!private_mode&&
             crate::agent::multimodal_perception::independent_discovery_allowed(&snapshot)&&
@@ -2618,6 +2751,10 @@ async fn run_browser_loop(
                 if let Some(plan)=plan{
                 if let Ok((observation,recovery))=graph.replan_with(stage_nodes[orchestrator.current],&plan){
                     run_core.mark_replanned(&snapshot,orchestrator.current);
+                    if goal_plateau{
+                        goal_progress.record_replan();
+                        goal_recovery_pending=true;
+                    }
                     recovery_observation=Some(observation);recovery_node=Some(recovery);recovery_strategy=Some(plan.clone());
                     let _=app.emit("agent:objective_replan",serde_json::json!({"run_id":run_id,"step_index":step,"stage":orchestrator.current,"strategy":strategy,"objective":plan.objective(),"basis":plan.basis(),"revision":graph.revision}));
                     publish_graph!(&graph);
@@ -2924,6 +3061,18 @@ async fn run_browser_loop(
                     "result_navigation:observed_stage_handoff".into(),
                 )
             } else if freshly_observed
+                && orchestrator.specialist()==Specialist::Browser
+                && crate::agent::policy::requested_compound_page_entry_url(&goal)
+                    .is_some_and(|url|check_navigation_result(url.as_str(),&snapshot).is_ok())
+                && orchestrator.evidence.iter().any(|e|e.url==snapshot.origin&&e.excerpt.trim().len()>=80)
+                && orchestrator.can_complete(&snapshot).is_ok()
+            {
+                // Hand the exactly observed source to the independent reviewer.
+                // Never mark the entire fact-finding objective complete here.
+                ("Exact source page and readable evidence observed; hand off for factual verification".into(),
+                 BrowserAction::Complete{summary:"Observed the requested source; independently verify the requested fact".into()},
+                 "compound_source:observed_page_handoff".into())
+            } else if freshly_observed
                 && orchestrator.specialist() == Specialist::Browser
                 && requested_navigation_url(&goal).is_some()
                 && orchestrator.can_complete(&snapshot).is_ok()
@@ -2948,6 +3097,19 @@ async fn run_browser_loop(
                 (format!("Discover the official website for the explicitly named source in stage {}",orchestrator.current+1),
                     BrowserAction::Navigate{url:url.to_string()},
                     "named_research_waypoint:user_source".into())
+            } else if !direct_navigation_attempted
+                && matches!(orchestrator.specialist(),Specialist::Browser|Specialist::Research)
+                && crate::agent::policy::requested_compound_page_entry_url(&goal).is_some()
+            {
+                // Navigate to the *full explicit path*, never an inferred site
+                // homepage. Arrival is only an intermediate research receipt;
+                // the independent verifier still must establish the fact.
+                direct_navigation_attempted=true;
+                let url=crate::agent::policy::requested_compound_page_entry_url(&goal)
+                    .expect("checked read-only explicit source");
+                ("Open the exact user-supplied public source page".into(),
+                 BrowserAction::Navigate{url:url.to_string()},
+                 "compound_source:trusted_user_url".into())
             } else if !direct_navigation_attempted
                 && orchestrator.specialist() == Specialist::Browser
                 && requested_music_entry_url(&goal).is_some()
@@ -3323,6 +3485,13 @@ async fn run_browser_loop(
         }
         let mut action_binding_error =
             bind_action_to_live_dom(&mut action, &snapshot, freshly_observed).err();
+        if crate::agent::action_intelligence::outside_requested_source_page(
+            &goal, &snapshot, &action
+        ) {
+            action_binding_error = Some(
+                "The proposed link leaves the exact user-requested source page; retain the requested page or an observed descendant until its evidence is verified".into()
+            );
+        }
         if duplicate_search_enter(&submitted_search_fields, &snapshot, &action) {
             action_binding_error = Some("Search already submitted on this page; observe results instead of pressing Enter again".into());
         }
@@ -3332,8 +3501,12 @@ async fn run_browser_loop(
             action_binding_error=Some("User requested an observed link click, not a guessed URL".into());
         }
 
+        let source_path_repair = crate::agent::action_intelligence::outside_requested_source_page(
+            &goal, &snapshot, &action
+        ) && ["ollama:","litellm:","groq:","bedrock:"]
+            .iter().any(|prefix|model_route.starts_with(prefix));
         if catalog.is_none()&&freshly_observed && action_binding_error.is_some()
-            && should_replan_invalid_control(&model_route, &action)
+            && (should_replan_invalid_control(&model_route, &action)||source_path_repair)
         {
             // The first model response was not executed. Allow one bounded
             // replan on the SAME freshly observed page, then run the native
@@ -3342,7 +3515,7 @@ async fn run_browser_loop(
             let reason = action_binding_error.as_deref().unwrap_or("invalid control");
             let repair_prompt = format!(
                 "Previous action outcomes: Native WebView rejected a proposed control: {}. \
-                 Correct the rejected action using an exact currently observed node_id. If typing, supply only literal field content, never instructions or control metadata. \
+                 Correct the rejected action using an exact currently observed node_id, or return to the exact user-supplied URL if a proposed link left that source's path. If typing, supply only literal field content, never instructions or control metadata. \
                  The page has not changed and the previous action did NOT execute.\n{}",
                 reason.chars().take(160).collect::<String>(),
                 prompt_payload
@@ -3361,8 +3534,16 @@ async fn run_browser_loop(
             };
             if let Ok(Ok((new_thought, mut candidate, new_route))) = retry {
                 let _ = rebind_unambiguous_live_control(&mut candidate, &snapshot, &goal);
-                if should_replan_invalid_control(&new_route, &candidate)
+                if (should_replan_invalid_control(&new_route, &candidate)
+                    || (source_path_repair
+                        && ["ollama:","litellm:","groq:","bedrock:"]
+                            .iter().any(|prefix|new_route.starts_with(prefix))
+                        && matches!(candidate, BrowserAction::Navigate{..}
+                            |BrowserAction::Scroll{..}|BrowserAction::Click{is_submit:false,..})))
                     && bind_action_to_live_dom(&mut candidate, &snapshot, true).is_ok()
+                    && !crate::agent::action_intelligence::outside_requested_source_page(
+                        &goal, &snapshot, &candidate
+                    )
                 {
                     thought = new_thought;
                     action = candidate;
@@ -3558,12 +3739,56 @@ async fn run_browser_loop(
                 break;
             }
         }
+        // When a read-only model repeats a failed target, try a distinct
+        // grounded live control before spending the entire repetition budget.
+        // This does not weaken loop detection or authorize the substitute:
+        // the ordinary DOM binder and native policy checks still run below.
+        let repeated_proposal=run_core.failed_before(&action,&snapshot,orchestrator.current)
+            ||seen_signatures.contains(&action_state_signature(orchestrator.current,&action,&snapshot));
+        if repeated_proposal&&freshly_observed&&!private_mode&&
+            catalog.is_none()&&skill.is_none()&&
+            orchestrator.specialist()!=Specialist::Verification&&
+            crate::agent::deliberation::read_only(&goal) {
+            let original_signature=action_state_signature(orchestrator.current,&action,&snapshot);
+            if let Some(alternative)=replacement.next_for_stage(
+                &goal,&semantic_focus,&snapshot,&objectives,&route_ledger)
+                .filter(|candidate|!matches!(candidate,
+                    BrowserAction::Complete{..}|BrowserAction::Download{..}|
+                    BrowserAction::Click{is_submit:true,..}|
+                    BrowserAction::TypeText{is_sensitive:true,..}|
+                    BrowserAction::SetChecked{..}))
+                .filter(|candidate|orchestrator.specialist().allows_on_page(candidate,&snapshot))
+                .filter(|candidate|crate::agent::objective_gate::check(
+                    &goal,&initial_origin,&snapshot,&objectives,candidate).is_ok())
+                .filter(|candidate|match candidate {
+                    BrowserAction::Navigate{url}=>route_ledger.allowed(url),_=>true
+                })
+                .filter(|candidate|{
+                    let signature=action_state_signature(orchestrator.current,candidate,&snapshot);
+                    signature!=original_signature&&!seen_signatures.contains(&signature)
+                }){
+                action=alternative;
+                thought="Recover repeated read-only action by selecting a distinct goal-relevant observed control".into();
+                model_route="action_recovery:distinct_observed_control".into();
+                let _=app.emit("agent:action_intelligence",serde_json::json!({
+                    "run_id":run_id,"step_index":step,"decision":"alternative_after_repeated_action"}));
+            }
+        }
         let before_effect=snapshot.clone();
         let semantic_attempt=run_core.prepare(&action,&snapshot,orchestrator.current);
         let signature = action_state_signature(orchestrator.current, &action, &snapshot);
         let redundant_navigation = matches!(&action, BrowserAction::Navigate { url }
             if requested_navigation_url(&goal).is_none() && snapshot.origin.starts_with("http") && check_navigation_result(url, &snapshot).is_ok());
-        if redundant_navigation || run_core.failed_before(&action,&snapshot,orchestrator.current) || !seen_signatures.insert(signature) {
+        // A verifier retry after one bounded research recovery must reach the
+        // independent evidence checker, even when the final Complete action
+        // has the same signature as the previously rejected verification.
+        // Never exempt browser actions or authorize a second recovery.
+        let verification_recheck = bounded_verification_recheck(
+            orchestrator.specialist(), &action, verification_recoveries
+        );
+        let failed_before = run_core.failed_before(&action,&snapshot,orchestrator.current);
+        let previously_seen = !seen_signatures.insert(signature);
+        if redundant_navigation || (!verification_recheck && (failed_before || previously_seen)) {
             // A small local model can repeat a successful click instead of
             // announcing stage completion. Request independent, read-only
             // verification against real captured page excerpts before
@@ -3683,6 +3908,16 @@ async fn run_browser_loop(
         if crate::agent::action_intelligence::irrelevant_control(&goal,&snapshot,&action) {
             decision=PolicyDecision::Deny{reason:"Action intelligence: selected control does not advance the requested objective".into()};
         }
+        // Re-check after every planner, supervisor and native recovery
+        // substitution. No route may leave a single explicitly requested deep
+        // source before source-backed verification.
+        if crate::agent::action_intelligence::outside_requested_source_page(
+            &goal, &snapshot, &action
+        ) {
+            decision=PolicyDecision::Deny{
+                reason:"Navigation leaves the exact user-requested source page".into()
+            };
+        }
         if current_reference&&(!current_reference_ready||!matches!(action,BrowserAction::Complete{..})){
             decision=PolicyDecision::Deny{reason:"Current-reference research permits only review of the original observed page".into()};
         }
@@ -3701,6 +3936,19 @@ async fn run_browser_loop(
             decision=PolicyDecision::Deny{
                 reason:"This control is unrelated to the requested read-only objective".into()
             };
+        }
+        // A user's request to submit one form cannot authorize another
+        // button on the same page. Do this BEFORE dispatch; the later
+        // receipt check alone cannot undo an unintended submission.
+        if orchestrator.specialist()==Specialist::Form {
+            if let BrowserAction::Click{is_submit:true,..}=&action {
+                if orchestrator.form_receipt().is_some(){
+                    decision=PolicyDecision::Deny{
+                        reason:"Requested form submission is already confirmed; do not submit twice".into()};
+                }else if let Err(reason)=crate::agent::form_proof::authorize_submit(&goal,&snapshot,&action){
+                    decision=PolicyDecision::Deny{reason:format!("Intended form policy: {reason}")};
+                }
+            }
         }
         // Download permission cannot be introduced by a planner, supervisor
         // or downloaded page. Block proposals without the user's request
@@ -3758,6 +4006,7 @@ async fn run_browser_loop(
         // The verification specialist does not execute arbitrary "complete"
         // assertions. A second LLM pass must return exact source quotes that
         // the Rust verifier can match to real captured WebView pages.
+        let mut verification_failure_reason:Option<String>=None;
         if orchestrator.specialist() == Specialist::Verification
             && matches!(decision, PolicyDecision::Allow)
         {
@@ -3770,7 +4019,17 @@ async fn run_browser_loop(
                     let is_comparison = orchestrator.plan.stages.iter()
                         .any(|stage| stage.specialist == Specialist::Comparison)
                         || !crate::agent::deliberation::explicit_research_sources(&goal).is_empty();
-                    let result = if crate::agent::policy::requested_wikipedia_article_url(&goal).is_some(){
+                    let result = if orchestrator.plan.stages.iter().any(|stage|
+                        stage.specialist==Specialist::Form){
+                        // Form verification is read-only, deterministic and
+                        // tied to the prior native submit receipt. No model
+                        // may claim success from an unrelated form or banner.
+                        orchestrator.form_receipt()
+                            .ok_or_else(||anyhow::anyhow!("No verified intended-form submission receipt"))
+                            .and_then(|receipt|crate::agent::form_proof::verified_report(
+                                receipt,&snapshot,&orchestrator.evidence
+                            ).map_err(anyhow::Error::msg))
+                    }else if crate::agent::policy::requested_wikipedia_article_url(&goal).is_some(){
                         crate::agent::evidence_verifier::verify_wikipedia_article(
                             &goal,&snapshot,&orchestrator.evidence)
                             .map_err(anyhow::Error::msg)
@@ -3884,7 +4143,7 @@ async fn run_browser_loop(
                                 // Rust independently validates every quote and
                                 // URL again; missing evidence still fails closed.
                                 let guidance = format!(
-                                    "Retry source review with a contiguous exact quote from the observed page. Previous format/grounding error: {}",
+                                    "Repair the rejected source finding, not the browser history. Cite only an exact contiguous sentence in the observed page. State one short claim that repeats the sentence's actual recommendation, preferably using the sentence itself without paraphrase. The claim MUST be supported by that same quote; do not substitute the page title, task prompt, or an inferred fact. If no relevant supporting sentence is observed, report insufficient evidence. Previous format/grounding error: {}",
                                     error.to_string().chars().take(180).collect::<String>()
                                 );
                                 router.verify_browser_task(&goal, &guidance, &evidence,
@@ -3895,8 +4154,12 @@ async fn run_browser_loop(
                     };
                     match result {
                         Ok(report) => {
-                            if let Err(reason)=requirements.validate_report(&goal,&orchestrator.evidence,&report){
+                            let review_error=requirements.validate_report(&goal,&orchestrator.evidence,&report)
+                                .err().or_else(||fact_graph.as_mut().and_then(|graph|
+                                    graph.validate_report(&orchestrator.evidence,&report).err()));
+                            if let Some(reason)=review_error{
                                 factual_review_failed=true;
+                                verification_failure_reason=Some(reason.clone());
                                 decision=PolicyDecision::Deny{reason:format!("Requirement verification failed: {reason}")};
                             }else{
                             let _=app.emit("agent:requirement_state",serde_json::json!({"run_id":run_id,"step_index":step,"ledger":&requirements}));
@@ -3913,6 +4176,7 @@ async fn run_browser_loop(
                                 eprintln!("LUCIA_TEST_W1_VERIFIER_ERROR: {}",err);
                             }
                             factual_review_failed=true;
+                            verification_failure_reason=Some(err.to_string());
                             decision = PolicyDecision::Deny {
                                 reason: format!("Independent evidence verification failed: {err}"),
                             };
@@ -4071,6 +4335,7 @@ async fn run_browser_loop(
             && matches!(&action,BrowserAction::Click{is_submit:true,..})
             && crate::agent::prerequisites::language(&goal,&snapshot).is_some();
         let mut submission_unconfirmed = false;
+        let mut observed_form_receipt:Option<crate::agent::form_proof::SubmissionReceipt>=None;
         let _ = app.emit("agent:activity", serde_json::json!({
             "run_id": run_id, "phase": "checking", "step_index": step
         }));
@@ -4109,6 +4374,12 @@ async fn run_browser_loop(
                                 // button in a narrow read-only title lookup.
                                 // Search navigation is *not* transaction success.
                                 check_named_search_transition(&goal, &before, &after)
+                            } else if orchestrator.specialist()==Specialist::Form {
+                                match crate::agent::form_proof::verify_submission(
+                                    &goal,&action,&before,&after){
+                                    Ok(receipt)=>{observed_form_receipt=Some(receipt);Ok(())},
+                                    Err(reason)=>Err(reason)
+                                }
                             } else {
                                 check_submission_result(&before, &after)
                             },
@@ -4245,6 +4516,14 @@ async fn run_browser_loop(
         }
 
         orchestrator.action_outcome(&action, ok);
+        if ok {
+            if let Some(receipt)=observed_form_receipt.take(){
+                orchestrator.record_form_receipt(receipt);
+                let _=app.emit("agent:form_submission_proof",serde_json::json!({
+                    "run_id":run_id,"status":"confirmed","readback_verified":true
+                }));
+            }
+        }
         // Do not claim navigation from an API dispatch: only a fresh native
         // snapshot whose final URL and readable page passed the postcondition
         // can transition a direct-navigation stage.
@@ -4267,7 +4546,7 @@ async fn run_browser_loop(
         let stage_acknowledged =
             (ok && matches!(action, BrowserAction::Complete { .. })) || confirmed_submit
                 || (confirmed_navigation && orchestrator.can_complete(&snapshot).is_ok());
-        let is_complete = stage_acknowledged && !cancel.is_cancelled()
+        let is_complete = stage_acknowledged && !goal_recovery_pending && !cancel.is_cancelled()
             && (orchestrator.specialist()!=Specialist::Verification
                 || (matches!(action,BrowserAction::Complete{..})
                     && final_completion_allowed(cancel.is_cancelled(),freshly_observed,true,verified_report.as_ref())));
@@ -4323,7 +4602,8 @@ async fn run_browser_loop(
                 route_ledger.failed_transition(&navigation_from,url);
             }
         }
-        if ok&&progress=="executed"&&(!matches!(action,BrowserAction::Complete{..})||is_complete){
+        if ok&&progress=="executed"&&!goal_recovery_pending&&
+            (!matches!(action,BrowserAction::Complete{..})||is_complete){
             if let Some(id)=recovery_node.take(){
                 graph.complete(id,GraphReceipt::ObservedProgress)?;
                 graph.start(stage_nodes[orchestrator.current])?;
@@ -4332,6 +4612,7 @@ async fn run_browser_loop(
             }
         }
         run_core.record(semantic_attempt,ok && progress=="executed");
+        goal_progress.action_attempted(!matches!(&action,BrowserAction::Complete{..}));
         recent_outcomes.push(format!("{action_kind}: {progress} | {}",
             sanitize_untrusted_page_text(&outcome, 200)));
         if recent_outcomes.len() > 5 {
@@ -4380,7 +4661,10 @@ async fn run_browser_loop(
         }
         if orchestrator.specialist() == Specialist::Verification &&
             matches!(action_for_summary, BrowserAction::Complete { .. }) && !ok {
-            if factual_review_failed&&verification_recoveries==0&&!current_reference&&
+            let proposed_repair=verification_failure_reason.as_deref().and_then(|reason|
+                crate::agent::evidence_repair::Repair::from_failure(&goal,&orchestrator.evidence,reason));
+            let named_free=crate::agent::evidence_verifier::requires_named_free_evidence(&goal);
+            if factual_review_failed&&verification_recoveries==0&&(!named_free||proposed_repair.is_some())&&!current_reference&&
                 !objectives.active()&&orchestrator.can_reopen_research()&&
                 crate::agent::prerequisites::route_values(&goal).is_none()&&
                 crate::agent::prerequisites::filter_constraints(&goal).is_none()&&
@@ -4392,6 +4676,12 @@ async fn run_browser_loop(
                         rejected_verification_sources=Some(rejected_sources);
                         checkpoint_proof=None;
                         stage_nodes[orchestrator.current]=id;verification_recoveries+=1;last_action_failed=false;advisory=None;
+                        if let Some(repair)=proposed_repair {
+                            let _=app.emit("agent:verification_recovery",serde_json::json!({
+                                "run_id":run_id,"status":"targeted_research",
+                                "attempts":0,"scope":"read_only_observed_source"}));
+                            verifier_repair=Some(repair);
+                        }
                         recent_outcomes.push("Independent factual review found insufficient evidence. Locate the missing requested facts on relevant public source pages. Do not reuse the rejected summary.".into());
                         publish_graph!(&graph);
                         continue;
@@ -4460,6 +4750,16 @@ async fn run_browser_loop(
                     if let Some(checks)=inherited_checks.as_ref(){
                         report.summary=format!("{}\nEarlier workflow: {}",report.summary,checks.chars().take(1500).collect::<String>());
                         report.limitations.push_str(" Earlier tool steps passed their user-defined checks; they are not external factual verification.");
+                    }
+                    if crate::agent::report_artifact::requested(&goal){
+                        anyhow::ensure!(!private_mode&&!is_child,
+                            "Local research report persistence is disabled for private or child tasks");
+                        let receipt=crate::agent::report_artifact::save(
+                            &goal,&report,&orchestrator.evidence,&crate::resolve_data_dir())?;
+                        report.summary.push_str(&format!("\nSaved research report: {} (verified readback)",receipt.path));
+                        let _=app.emit("agent:document_artifact",serde_json::json!({
+                            "run_id":run_id,"artifact":receipt,"status":"readback_verified"
+                        }));
                     }
                     if !is_child{
                         let _ = app.emit("agent:verification_report", serde_json::json!({"run_id": run_id,"report": report}));
@@ -5337,6 +5637,18 @@ mod live_loop_recovery_tests {
         assert!(bind_action_to_live_dom(&mut typed, &page, true).is_err());
         let mut click = BrowserAction::Click {node_id:"date".into(),element_label:"Journey date".into(),is_submit:false};
         assert!(bind_action_to_live_dom(&mut click, &page, true).is_ok());
+    }
+
+    #[test]
+    fn verification_recheck_is_bounded_and_never_exempts_browser_actions() {
+        let finish = BrowserAction::Complete { summary: "Check captured passage".into() };
+        let navigate = BrowserAction::Navigate { url: "https://docs.example.test/".into() };
+        assert!(!bounded_verification_recheck(Specialist::Verification, &finish, 0));
+        assert!(bounded_verification_recheck(Specialist::Verification, &finish, 1));
+        assert!(!bounded_verification_recheck(Specialist::Verification, &finish, 2));
+        assert!(!bounded_verification_recheck(Specialist::Browser, &finish, 1));
+        assert!(!bounded_verification_recheck(Specialist::Research, &finish, 1));
+        assert!(!bounded_verification_recheck(Specialist::Verification, &navigate, 1));
     }
 
     #[test]

@@ -1,0 +1,48 @@
+name: Lucia unified model contract — Windows Rust acceptance
+
+on:
+  push:
+    branches:
+      - verify/lucia-unified-model-contract-20261127
+    paths:
+      - 'src-tauri/**'
+      - '.github/workflows/lucia-unified-model-contract.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lucia-unified-model-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shared-orchestration:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check model/router Rust parser
+        shell: pwsh
+        run: |
+          rustfmt --edition 2021 --emit stdout src-tauri/src/router/model_router.rs > $null
+          if ($LASTEXITCODE -ne 0) { throw 'Model router failed to parse' }
+
+      - name: Check the same source-grounded action contract for all model routes
+        shell: pwsh
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --locked unified_model_contract_accepts_grounded_proposals_without_model_names -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Shared contract action/alias validation failed' }
+
+      - name: Run complete Rust regression tests
+        shell: pwsh
+        run: |
+          cargo test --workspace --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Shared-orchestration regression suite failed' }

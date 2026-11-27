@@ -173,6 +173,9 @@ pub fn requested_navigation_url(goal: &str) -> Option<Url> {
         .or_else(|| value.strip_suffix(" in a new tab")).unwrap_or(value);
     let value = value.strip_suffix(" website").or_else(|| value.strip_suffix(" site"))
         .unwrap_or(value).trim();
+    // A compound request is not navigation-only. URL parsers may percent-encode
+    // whitespace and silently absorb the rest of an instruction into a path.
+    if value.split_whitespace().count()!=1 {return None;}
     let url = match value {
         "youtube" | "youtube.com" | "www.youtube.com" => "https://www.youtube.com/".to_string(),
         "google" => "https://www.google.com/".to_string(),
@@ -199,6 +202,34 @@ pub fn requested_navigation_url(goal: &str) -> Option<Url> {
         || host.parse::<std::net::IpAddr>().is_ok()
     { return None; }
     Some(parsed)
+}
+
+/// For a compound *read-only* objective, enter the exact public URL supplied
+/// by the user, without treating arrival there as completion of the task.
+/// This is not permission to invent destinations or to perform site actions.
+pub fn requested_compound_page_entry_url(goal: &str) -> Option<Url> {
+    if !super::deliberation::read_only(goal) || requested_navigation_url(goal).is_some()
+        || goal.len() > 1300 || goal.chars().any(char::is_control)
+    { return None; }
+    let lower=goal.trim().to_ascii_lowercase();
+    let prefix=["visit ","open ","go to ","navigate to "]
+        .into_iter().find(|p|lower.starts_with(p))?;
+    let remainder=goal.trim().get(prefix.len()..)?;
+    let (token,rest)=remainder.split_once(char::is_whitespace)?;
+    if !rest.trim_start().to_ascii_lowercase().starts_with("and ")
+        && !rest.trim_start().starts_with(',') { return None; }
+    let token=token.trim_end_matches(['.',',',';',')',']']);
+    if !token.starts_with("https://") || goal.matches("https://").count()!=1
+        || goal.contains("http://") { return None; }
+    let url=Url::parse(token).ok()?;
+    let host=url.host_str()?;
+    if url.scheme()!="https" || !url.username().is_empty()
+        || url.password().is_some() || url.port().is_some()
+        || url.query().is_some() || url.fragment().is_some()
+        || !host.contains('.') || host=="localhost" || host.ends_with(".local")
+        || host.parse::<std::net::IpAddr>().is_ok()
+    { return None; }
+    Some(url)
 }
 
 /// Unlike requested_navigation_url, this only authorizes entering a site
@@ -280,7 +311,7 @@ pub fn requested_search_entry_url(goal: &str) -> Option<Url> {
 /// observed, bound to the actual destination, and independently verified.
 pub fn named_pricing_recovery_waypoint(goal:&str,stage:usize,origin:&str)->Option<Url>{
     if !super::deliberation::read_only(goal) ||
-        !goal.to_ascii_lowercase().contains("free plan"){return None;}
+        !super::evidence_verifier::requires_named_free_evidence(goal){return None;}
     let names=super::deliberation::named_research_entities(goal);
     let name=names.get(stage)?;
     let current=Url::parse(origin).ok()?;
@@ -592,6 +623,7 @@ pub fn evaluate_user_navigation_policy(
     }
     let user_explicitly_named_destination = requested_navigation_url(goal)
         .is_some_and(|expected| actual == expected)
+        || requested_compound_page_entry_url(goal).is_some_and(|expected|actual==expected)
         || crate::agent::deliberation::explicit_research_sources(goal).iter().any(|expected| &actual==expected)
         || crate::agent::catalog_research::entry_allowed(goal,url)
         || crate::agent::catalog_research::discovery_navigation_allowed(goal,active_origin,url);
@@ -871,6 +903,19 @@ mod tests {
     fn cross_origin_requires_approval() {
         let (_, decision) = evaluate_policy("https://example.com", &BrowserAction::Navigate { url: "https://another.example/path".into() }, &[]);
         assert!(matches!(decision, PolicyDecision::RequireApproval { .. }));
+    }
+
+    #[test]
+    fn compound_read_only_url_preserves_exact_path_and_requires_fact_verification() {
+        let goal="Visit https://web.dev/learn/accessibility and report one specific recommendation from the official Learn Accessibility guide, citing a supporting passage from that exact website.";
+        assert!(requested_navigation_url(goal).is_none(),"Compound research must not be treated as navigation-only");
+        let exact=requested_compound_page_entry_url(goal).expect("Explicit read-only source must be retained");
+        assert_eq!(exact.as_str(),"https://web.dev/learn/accessibility");
+        let action=BrowserAction::Navigate{url:exact.to_string()};
+        assert!(matches!(evaluate_user_navigation_policy("browsphere://start",&action,&[],goal).1,PolicyDecision::Allow));
+        assert!(!matches!(evaluate_user_navigation_policy("browsphere://start",&BrowserAction::Navigate{url:"https://web.dev/".into()},&[],goal).1,PolicyDecision::Allow));
+        assert!(requested_compound_page_entry_url("Visit https://web.dev/learn/accessibility and submit a form").is_none());
+        assert!(requested_compound_page_entry_url("Visit https://localhost/admin and report results").is_none());
     }
 
     #[test]

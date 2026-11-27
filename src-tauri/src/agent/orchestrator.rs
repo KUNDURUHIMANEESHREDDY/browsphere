@@ -176,8 +176,22 @@ pub fn parse_generated_plan(goal: &str, raw: &str) -> anyhow::Result<TaskPlan> {
         status: "pending",
     });
     let mut semantic=semantic;
-    if let Some(task)=semantic.as_mut(){task.ground_spelling(goal)?;task.validate(goal,stages.len()-1)?;}
-    let semantic_provenance=semantic.as_ref().map(|_|"model_proposed");
+    let mut rejected_ungrounded_advisory=false;
+    if let Some(task)=semantic.as_mut(){
+        if let Err(error)=task.ground_spelling(goal).and_then(|_|task.validate(goal,stages.len()-1)){
+            // Advisory semantic labels cannot abort an otherwise schema-valid
+            // staged plan solely because a model invented a literal span.
+            // This changes no action permission: the exact original goal,
+            // staged native policy and independent verification stay active.
+            if super::semantic_task::ungrounded_advisory_can_fall_back(goal,&error.to_string(),Some(task)){
+                semantic=None;
+                rejected_ungrounded_advisory=true;
+            }else{return Err(error)}
+        }
+    }
+    let semantic_provenance=if rejected_ungrounded_advisory{
+        Some("rejected_ungrounded_advisory_native_policy")
+    }else{semantic.as_ref().map(|_|"model_proposed")};
     Ok(TaskPlan { goal: goal.to_string(), stages, semantic, semantic_provenance })
 }
 
@@ -190,7 +204,7 @@ pub struct Orchestrator {
     actions_in_stage: usize,
     fresh_observations: usize,
     last_action_failed: bool,
-    form_submitted: bool,
+    form_receipt: Option<super::form_proof::SubmissionReceipt>,
     confirmed_navigation: Option<String>,
     stage_entry_evidence: Vec<SourceEvidence>,
     starting_origin: Option<String>,
@@ -251,6 +265,14 @@ pub(crate) fn is_simple_named_title_task(goal: &str) -> bool {
     ])
 }
 
+/// Explicitly current-page forms need no destination discovery stage. The
+/// ordinary native Form specialist and post-submit verifier remain mandatory.
+pub fn current_page_form(goal:&str)->bool{
+    let lower=goal.to_ascii_lowercase();
+    ["on the current","on this page","current website","current page"].iter()
+        .any(|term|lower.contains(term)) && lower.contains("form") &&
+        contains_any(&lower,&["fill ","submit ","apply ","register ","complete the form","sign up"])
+}
 /// A deterministic minimum plan, built from the user's intent.
 /// The selected LLM decides actual actions for each specialist at runtime.
 pub fn plan_task(goal: &str) -> TaskPlan {
@@ -274,7 +296,14 @@ pub fn plan_task(goal: &str) -> TaskPlan {
     } else if contains_any(
         &lower, &["fill ", "submit ", "apply ", "register ", "complete the form", "sign up"],
     ) {
-        vec![Specialist::Browser, Specialist::Form]
+        // A user who explicitly assigned a form on the CURRENT page should
+        // not be forced through a navigation specialist first. It can only
+        // propose unrelated URLs and stall despite a visible, authorized
+        // control. The Form stage still must satisfy native action permissions
+        // and observe a post-submission confirmation before verification.
+        if current_page_form(goal){
+            vec![Specialist::Form]
+        }else{vec![Specialist::Browser, Specialist::Form]}
     } else if contains_any(
         &lower, &["extract", "collect", "scrape", "table", "dataset", "spreadsheet", "list of"],
     ) {
@@ -346,7 +375,7 @@ impl Orchestrator {
             completed_summaries: Vec::new(), successful_actions: 0,
             actions_in_stage: 0, fresh_observations: 0,
             last_action_failed: false,
-            form_submitted: false,
+            form_receipt: None,
             confirmed_navigation: None,
             stage_entry_evidence: Vec::new(),
             starting_origin: None,
@@ -417,12 +446,21 @@ impl Orchestrator {
         if success && !matches!(action, BrowserAction::Complete { .. }) {
             self.successful_actions += 1;
             self.actions_in_stage += 1;
-            if matches!(action, BrowserAction::Click { is_submit: true, .. }) {
-                self.form_submitted = true;
-            }
+            // Native submit dispatch does NOT create a receipt. The live
+            // post-action snapshot must independently confirm the intended
+            // form before the runner records a submission receipt.
         }
     }
 
+    pub fn record_form_receipt(&mut self,receipt:super::form_proof::SubmissionReceipt){
+        if self.specialist()==Specialist::Form {self.form_receipt=Some(receipt);}
+    }
+    pub fn form_receipt(&self)->Option<&super::form_proof::SubmissionReceipt>{
+        self.form_receipt.as_ref()
+    }
+    pub fn form_stage_has_activity(&self)->bool{
+        self.specialist()==Specialist::Form&&self.actions_in_stage>0
+    }
     pub fn prior_evidence(&self) -> String {
         let summaries = self.completed_summaries.iter()
             .map(|s| format!("- Earlier stage summary (not independent evidence): {s}"))
@@ -465,7 +503,38 @@ impl Orchestrator {
             return Err("Compiled target acquisition objective has not been independently observed".into());
         }
         let mut requirements=super::requirements::Ledger::compile(&self.plan.goal);
-        if requirements.supported{
+        // A multi-source research plan acquires ONE named site per specialist
+        // stage. Requiring the global source ledger to be complete in stage 1
+        // deadlocks the plan before stages 2 and 3 can run. Each acquisition
+        // stage still needs its own observed site (checked below); only the
+        // comparison/verification stages require all source requirements.
+        let staged_named_research=self.specialist()==Specialist::Research &&
+            !super::deliberation::named_research_entities(&self.plan.goal).is_empty();
+        // Compile factual dependencies before allowing a named source stage to
+        // hand off. A visited homepage or generic 'Free' banner cannot stand in
+        // for the user's requested free-tier team capacity. Later stages require
+        // every named provider's source-exact candidate; independent verification
+        // remains the only mechanism that can approve the final recommendation.
+        if let Some(facts)=super::fact_research::Contract::compile(&self.plan.goal){
+            let missing=if staged_named_research{
+                facts.missing_stage(&self.plan.goal,&self.evidence,self.current)
+                    .into_iter().collect::<Vec<_>>()
+            }else if matches!(self.specialist(),Specialist::Comparison|Specialist::Verification){
+                facts.missing(&self.plan.goal,&self.evidence)
+            }else{Vec::new()};
+            if let Some(next)=missing.first(){
+                let facet=if next.needs_team_capacity{"free-tier collaborator/member limit"}
+                    else{"free-tier plan details"};
+                return Err(format!("Missing source-exact {facet} for {} before synthesis",next.source));
+            }
+        }
+        if matches!(self.specialist(),Specialist::Comparison|Specialist::Verification){
+            if let Some(mut graph)=super::fact_graph::FactGraph::compile(&self.plan.goal){
+                graph.observe(&self.evidence);
+                if !graph.can_synthesize(){return Err(graph.hint());}
+            }
+        }
+        if requirements.supported&&!staged_named_research{
             requirements.refresh(&self.plan.goal,&self.evidence);
             requirements.can_review()?;
         }
@@ -550,12 +619,17 @@ impl Orchestrator {
                 return Err("Observed pages do not yet contain relevant goal evidence".into());
             }
         }
-        if is_verifier || self.specialist() == Specialist::Form {
-            let goal = self.plan.goal.to_lowercase();
-            let needs_submit = contains_any(&goal,
+        if (is_verifier || self.specialist()==Specialist::Form)
+            &&self.plan.stages.iter().any(|s|s.specialist==Specialist::Form){
+            let goal=self.plan.goal.to_ascii_lowercase();
+            let needs_submit=contains_any(&goal,
                 &["submit", "apply ", "register", "sign up", "confirm application"]);
-            if needs_submit && !self.form_submitted {
-                return Err("The requested form submission has not been acknowledged as successful".into());
+            if needs_submit {
+                let receipt=self.form_receipt.as_ref().ok_or(
+                    "Requested Form stage needs an observed intended submit and a fresh success confirmation")?;
+                if !super::form_proof::receipt_visible(receipt,snapshot){
+                    return Err("The intended form confirmation is not visible in the current native page".into())
+                }
             }
         }
         // A repeated acquisition specialist represents a distinct objective.
@@ -666,6 +740,43 @@ mod explicit_wikipedia_article_plan_tests{
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn each_named_site_stage_can_finish_before_global_source_coverage(){
+        let goal="Visit the official websites of Alpha, Beta and Gamma. Compare their free plans for a team of four and recommend one.";
+        let mut run=Orchestrator::from_plan(plan_task(goal));
+        run.begin();
+        let alpha=snapshot("https://alpha.com/pricing",
+            &"Alpha Free plan includes up to 10 members per team workspace. ".repeat(4));
+        run.observe(&alpha);
+        run.action_outcome(&BrowserAction::Navigate{url:alpha.origin.clone()},true);
+        assert!(run.can_complete(&alpha).is_ok(),"first source stage must not require Beta and Gamma: {:?}",run.can_complete(&alpha));
+        assert!(!run.complete_stage("Observed Alpha"));
+        assert!(run.can_complete(&alpha).is_err(),"second stage cannot reuse Alpha as Beta");
+        let beta=snapshot("https://beta.net/pricing",
+            &"Beta Free plan includes up to four members per team workspace. ".repeat(4));
+        run.observe(&beta);
+        run.action_outcome(&BrowserAction::Navigate{url:beta.origin.clone()},true);
+        assert!(run.can_complete(&beta).is_ok(),"second source should be eligible once Beta observed: {:?}",run.can_complete(&beta));
+        assert!(!run.complete_stage("Observed Beta"));
+        assert!(run.can_complete(&beta).is_err(),"third stage cannot reuse Beta as Gamma");
+    }
+    #[test]
+    fn named_research_stage_blocks_premature_completion_until_exact_team_fact(){
+        let goal="Visit the official websites of Alpha, Beta and Gamma. Compare their free plans for a team of four and recommend one.";
+        let mut run=Orchestrator::from_plan(plan_task(goal));
+        run.begin();
+        let weak=snapshot("https://alpha.com/pricing",
+            &"Alpha Free plan has collaborative tools for small teams. ".repeat(4));
+        run.observe(&weak);
+        run.action_outcome(&BrowserAction::Navigate{url:weak.origin.clone()},true);
+        assert!(run.can_complete(&weak).unwrap_err().contains("collaborator/member limit"));
+        let stronger=snapshot("https://alpha.com/pricing",
+            &"Alpha Free plan allows up to 10 team members in one shared workspace. ".repeat(4));
+        run.observe(&stronger);
+        assert!(run.can_complete(&stronger).is_ok(),"observed source-exact member limit should release only this stage: {:?}",run.can_complete(&stronger));
+        run.complete_stage("Source Alpha facts captured");
+        assert!(run.can_complete(&stronger).is_err(),"Alpha receipt must not satisfy Beta");
+    }
     #[test]
     fn named_websites_require_separate_research_stages() {
         let goal="Visit the official websites of Notion, Trello and ClickUp. Compare their free plans for a five-member team and recommend the most suitable option.";
@@ -848,6 +959,67 @@ mod tests {
     }
 
     #[test]
+    fn current_page_form_does_not_require_unrelated_navigation(){
+        let goal="On the current local test website, submit the feedback form, then report the visible feedback confirmation. Do not submit the application form.";
+        let stages=plan_task(goal).stages;
+        assert_eq!(stages.len(),2);
+        assert_eq!(stages[0].specialist,Specialist::Form);
+        assert_eq!(stages[1].specialist,Specialist::Verification);
+        let remote=plan_task("Open the company website and submit its feedback form").stages;
+        assert_eq!(remote[0].specialist,Specialist::Browser);
+        assert_eq!(remote[1].specialist,Specialist::Form);
+    }
+    #[test]
+    fn invented_advisory_span_does_not_abort_valid_form_stages(){
+        let goal="On the current local test website, submit the feedback form, then report the visible feedback confirmation. Do not submit the application form.";
+        let raw=serde_json::json!({"stages":[{"specialist":"form","objective":"Submit only the requested feedback form","success_criteria":"Visible feedback confirmation"}],
+            "semantic":{"concepts":[{"kind":"objective","span":"Submit the unrelated application immediately","stages":[1]}],"relations":[]}}).to_string();
+        let p=parse_generated_plan(goal,&raw).unwrap();
+        assert!(p.semantic.is_none());
+        assert_eq!(p.semantic_provenance,Some("rejected_ungrounded_advisory_native_policy"));
+        assert_eq!(p.goal,goal);
+        assert_eq!(p.stages.len(),2);
+        assert_eq!(p.stages[0].specialist,Specialist::Form);
+        assert_eq!(p.stages[1].specialist,Specialist::Verification);
+    }
+    #[test]
+    fn explicit_order_cannot_be_discarded_on_an_invented_span(){
+        let goal="First inspect the public guide, then submit the feedback form. Do not submit the application form.";
+        let raw=serde_json::json!({"stages":[{"specialist":"research","objective":"Inspect the public guide","success_criteria":"Guide observed"},
+           {"specialist":"form","objective":"Submit feedback","success_criteria":"Confirmed submitted feedback"}],
+           "semantic":{"concepts":[{"kind":"objective","span":"Submit an unrelated application","stages":[1]}],"relations":[]}}).to_string();
+        assert!(parse_generated_plan(goal,&raw).is_err());
+    }
+    #[test]
+    fn form_stage_and_verification_both_require_visible_intended_receipt(){
+        let goal="On the current local test website, submit the feedback form, then report the visible feedback confirmation. Do not submit the application form.";
+        let mut run=Orchestrator::new(goal);
+        run.begin();
+        assert_eq!(run.specialist(),Specialist::Form);
+        let before=snapshot("http://127.0.0.1:18764/",
+            "Feedback form is ready. The application form is unrelated. Feedback not sent yet.");
+        run.observe(&before);
+        run.action_outcome(&BrowserAction::TypeText{
+            node_id:"note".into(),text:"A test note".into(),is_sensitive:false
+        },true);
+        assert!(run.can_complete(&before).is_err());
+        run.action_outcome(&BrowserAction::Click{
+            node_id:"feedback".into(),element_label:"Submit feedback".into(),is_submit:true
+        },true);
+        assert!(run.can_complete(&before).is_err(),"A submit dispatch cannot complete the stage");
+        let confirmed=snapshot("http://127.0.0.1:18764/",
+            "Feedback sent successfully on the local test page.");
+        run.record_form_receipt(crate::agent::form_proof::SubmissionReceipt{
+            origin:confirmed.origin.clone(),confirmation:"feedback sent".into(),target:"feedback".into()
+        });
+        run.observe(&confirmed);
+        assert!(run.can_complete(&confirmed).is_ok());
+        assert!(!run.complete_stage("Native form receipt confirmed"));
+        assert_eq!(run.specialist(),Specialist::Verification);
+        assert!(run.can_complete(&confirmed).is_ok());
+        assert!(run.can_complete(&before).is_err(),"Stale page cannot satisfy receipt");
+    }
+    #[test]
     fn form_specialist_cannot_report_submission_without_successful_submit() {
         let mut o = Orchestrator::new("Submit my application form");
         o.begin();
@@ -862,7 +1034,14 @@ mod tests {
         o.action_outcome(&BrowserAction::Click {
             node_id: "n_3".into(), element_label: "Submit".into(), is_submit: true
         }, true);
-        assert!(o.can_complete(&form).is_ok());
+        assert!(o.can_complete(&form).is_err(),"Click acknowledgment is not a receipt");
+        let confirmed=snapshot("https://apply.example",
+            "The internship application form is complete. Application received. Thank you for submitting.");
+        o.record_form_receipt(crate::agent::form_proof::SubmissionReceipt{
+            origin:confirmed.origin.clone(),confirmation:"application received".into(),target:"application".into()
+        });
+        o.observe(&confirmed);
+        assert!(o.can_complete(&confirmed).is_ok());
     }
 
     #[test]

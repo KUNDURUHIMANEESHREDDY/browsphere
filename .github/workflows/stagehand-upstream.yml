@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/browsphere-stagehand-mcp-upstream-20261127
+      - verify/lucia-upstream-stagehand-playwright-20261127
     paths:
       - 'integrations/stagehand-mcp/**'
       - '.github/workflows/stagehand-upstream.yml'
@@ -32,7 +33,7 @@ jobs:
         shell: pwsh
         working-directory: integrations/stagehand-mcp
         run: |
-          npm install --ignore-scripts --no-audit --no-fund --package-lock=false
+          npm ci --ignore-scripts --no-audit --no-fund
           if($LASTEXITCODE -ne 0){throw "Official Stagehand/MCP packages could not be installed."}
       - name: Syntax validation
         shell: pwsh

@@ -24,7 +24,7 @@ async function main(){
     window.__luciaGateUnlisten?.forEach(unlisten=>unlisten());
     window.__luciaGateEvents=[];
     window.__luciaGateUnlisten=[];
-    for(const name of ['agent:plan','agent:stage','agent:trace','agent:approval_required','agent:approval_closed','agent:run_error','agent:verification_report','agent:run_status']){
+    for(const name of ['agent:plan','agent:stage','agent:trace','agent:approval_required','agent:approval_closed','agent:run_error','agent:verification_report','agent:form_submission_proof','agent:run_status']){
       const unlisten=await window.__TAURI__.event.listen(name, ev => window.__luciaGateEvents.push({event:name,payload:ev.payload}));
       window.__luciaGateUnlisten.push(unlisten);
     }
@@ -36,8 +36,24 @@ async function main(){
   })()`);
   assert.equal(listeners,'ready');
   const runId=await ev(`(async()=>{
-    const snapshot=await window.__TAURI__.core.invoke('capture_live_snapshot');
-    if(!snapshot?.origin?.startsWith('http://127.0.0.1:18764/'))throw Error('Unexpected active website');
+    let snapshot;
+    // Navigation command success means WebView2 accepted a URL, NOT that the
+    // actual fixture form has loaded. Wait for observed live controls before
+    // asking Lucia to act, or a 404/loading page looks like agent failure.
+    for(let i=0;i<35;i++){
+      snapshot=await window.__TAURI__.core.invoke('capture_live_snapshot');
+      if(snapshot?.origin?.startsWith('http://127.0.0.1:18764/')&&
+        snapshot?.text_excerpt?.includes('Lucia Browser Fixture')&&
+        (snapshot?.interactive_nodes||[]).some(n=>n.label==='Submit feedback'))break;
+      await new Promise(resolve=>setTimeout(resolve,250));
+    }
+    if(!snapshot?.text_excerpt?.includes('Lucia Browser Fixture') ||
+       !(snapshot?.interactive_nodes||[]).some(n=>n.label==='Submit feedback')){
+      throw Error('Local fixture form not loaded: '+JSON.stringify({
+        origin:snapshot?.origin,title:snapshot?.title,
+        controls:snapshot?.interactive_nodes?.length,
+        excerpt:String(snapshot?.text_excerpt||'').slice(0,180)}));
+    }
     return await window.__TAURI__.core.invoke('start_agent_run',{
       goal:'On the current local test website, submit the feedback form, then report the visible feedback confirmation. Do not submit the application form.',
       snapshot,allowedDomains:['127.0.0.1'],maxSteps:14,allowLearning:false,isPrivate:true,voiceMode:false
@@ -59,6 +75,22 @@ async function main(){
     if(ended)break;
   }
   if(!ended){
+    const relevant=events.filter(x=>x.payload?.run_id===runId);
+    console.log('TIMEOUT_DIAGNOSTIC',JSON.stringify({
+      runId,
+      recent:relevant.slice(-35).map(x=>({
+        event:x.event,status:x.payload?.status,
+        specialist:x.payload?.specialist,
+        action:x.payload?.action?.type,
+        decision:x.payload?.decision,
+        outcome:x.payload?.outcome,
+        message:String(x.payload?.message||'').slice(0,240)
+      }))
+    }).slice(0,12500));
+    try{
+      const page=await ev("(async()=>{const s=await window.__TAURI__.core.invoke('capture_live_snapshot');return {origin:s?.origin,title:s?.title,controlCount:s?.interactive_nodes?.length,feedbackVisible:s?.text_excerpt?.includes('Feedback sent successfully on the local test page.')}})()");
+      console.log('TIMEOUT_PAGE',JSON.stringify(page));
+    }catch(error){console.log('TIMEOUT_PAGE_ERROR',String(error).slice(0,300))}
     await ev("window.__TAURI__.core.invoke('cancel_agent_run')");
     throw Error('Agent run timed out without final status');
   }
@@ -66,11 +98,22 @@ async function main(){
   console.log('FINAL',JSON.stringify(ended.payload));
   console.log('EVENTS',JSON.stringify(relevant.map(e=>({event:e.event,status:e.payload?.status,specialist:e.payload?.specialist,outcome:e.payload?.outcome,action:e.payload?.action?.type,message:e.payload?.message?.slice(0,170)}))));
   const snapshot=await ev("(async()=>await window.__TAURI__.core.invoke('capture_live_snapshot'))()");
-  console.log('FINAL_PAGE',JSON.stringify({url:snapshot?.origin,detailsVisible:snapshot?.text_excerpt?.includes('The fixture details are visible')}));
+  console.log('FINAL_PAGE',JSON.stringify({
+    url:snapshot?.origin,
+    detailsVisible:snapshot?.text_excerpt?.includes('The fixture details are visible'),
+    feedbackVisible:snapshot?.text_excerpt?.includes('Feedback sent successfully on the local test page.'),
+    unrelatedApplicationUntouched:snapshot?.text_excerpt?.includes('No sample application has been submitted.'),
+    controlCount:snapshot?.interactive_nodes?.length
+  }));
   const verified=relevant.find(x=>x.event==='agent:verification_report');
+  const submissionProofs=relevant.filter(x=>x.event==='agent:form_submission_proof');
+  assert.equal(submissionProofs.length,1,'Exactly one native intended-form proof is required');
+  assert.equal(submissionProofs[0]?.payload?.status,'confirmed');
+  assert.equal(submissionProofs[0]?.payload?.readback_verified,true);
   assert.equal(relevant.some(x=>x.event==='agent:approval_required'),false,'Routine feedback should not need user approval');
   assert.equal(ended.payload.status,'completed','Real model must complete all stages');
   assert.ok(snapshot?.text_excerpt?.includes('Feedback sent successfully on the local test page.'),'Routine feedback was not submitted');
+  assert.ok(snapshot?.text_excerpt?.includes('No sample application has been submitted.'),'Unrelated application form was altered');
   assert.ok(verified?.payload?.report?.status==='evidence_checked','Real verification report missing');
   console.log('PASS autonomous routine form submission, no approval, live verification');
  }finally{ws.close()}

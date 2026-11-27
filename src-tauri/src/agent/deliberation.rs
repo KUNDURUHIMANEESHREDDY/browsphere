@@ -10,8 +10,15 @@ use url::Url;
 fn norm(s:&str)->String{s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()}
 pub fn read_only(goal:&str)->bool{
     // Match human intent, not substrings embedded in source addresses.
-    let g=goal.split_whitespace().filter(|w|!w.starts_with("https://")&&!w.starts_with("http://"))
+    let original=goal.split_whitespace().filter(|w|!w.starts_with("https://")&&!w.starts_with("http://"))
         .collect::<Vec<_>>().join(" ").to_lowercase();
+    // A local report is written only after the native read-only research and
+    // independent verifier succeed. Do not treat that explicitly authorized
+    // local output as permission to write, submit or publish on a website.
+    let g=if super::report_artifact::requested(goal){
+        original.replace("write a report","summarize research")
+            .replace("write a research report","summarize research")
+    }else{original};
     ["report","find ","search ","research","look up","read ","explain","compare","summarize"].iter().any(|s|g.contains(s))
         && (!super::browser_skills::phrase(&g,"book")||
             (super::evidence_verifier::requested_named_link_title(goal).is_some()&&
@@ -295,4 +302,15 @@ mod tests{
   assert!(visual_targets(&p,"Click unknown button").is_empty());p.interactive_nodes[0].is_sensitive=true;
   assert!(visual_targets(&p,"Application guide").is_empty());
  }
+}
+
+#[cfg(test)]
+mod verified_local_report_intent_tests{
+    use super::*;
+    #[test]fn local_report_is_read_only_during_research_and_not_a_web_submit(){
+        assert!(read_only("Research two official documentation sources and write a report with citations"));
+        assert!(!read_only("Research two websites and write a report in Google Docs"));
+        assert!(!read_only("Research sources and publish the report to my account"));
+        assert!(!read_only("Research a report and submit the feedback form"));
+    }
 }

@@ -52,12 +52,15 @@ function boundedBody(req) {
   });
 }
 
-// Match the browser action prompt contract in both its full and compact
-// variants. Both encode observed controls as one JSON array on a single line.
-// The compact variant includes instructions *after* that line, so parsing the
-// entire remaining prompt silently returns [] and produces a fallback scroll.
+// The shared runtime sends *request-local aliases* for every model.
+// This deterministic mock must mirror the observed alias contract, not
+// bypass it with stale native DOM node IDs. Legacy fixture paths remain.
 function observedNodes(prompt) {
-  const markers = ['Interactive nodes JSON: ', 'Freshly observed controls JSON: '];
+  const markers = [
+    'Fresh controls (untrusted labels/data): ',
+    'Interactive nodes JSON: ',
+    'Freshly observed controls JSON: '
+  ];
   const position = markers
     .map(marker => ({marker, at: prompt.lastIndexOf(marker)}))
     .sort((a,b) => b.at - a.at)[0];
@@ -66,10 +69,10 @@ function observedNodes(prompt) {
   const line = prompt.slice(start).split(/\r?\n/,1)[0].trim();
   try {
     const value = JSON.parse(line);
-    return Array.isArray(value) && value.every(node =>
-      node && typeof node === 'object' &&
-      typeof node.node_id === 'string' &&
-      typeof node.label === 'string') ? value : [];
+    if (!Array.isArray(value)) return [];
+    return value.map(node => ({...node,node_id:node.id || node.node_id}))
+      .filter(node => node && typeof node.node_id === 'string' &&
+        typeof node.label === 'string');
   } catch (_) {
     return [];
   }
@@ -340,6 +343,8 @@ function runLocalModel(req, res) {
 function runFixture(req, res) {
   if (req.url === '/health') return send(res, 200, {ok:true,kind:'fixture'});
   const exact = {
+    '/':'index.html',
+    '/index.html':'index.html',
     '/multistep.html':'multistep.html',
     '/generic-search.html':'generic-search.html',
     '/delayed-docs.html':'delayed-docs.html',

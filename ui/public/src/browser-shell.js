@@ -939,6 +939,7 @@
             case 'mcp-lucia-revoke':
             case 'mcp-preset-exa':
             case 'mcp-preset-tavily':
+            case 'mcp-preset-google':
             case 'mcp-provider-key-save':
             case 'mcp-provider-key-clear':
             case 'mcp-oauth-begin':
@@ -3973,6 +3974,15 @@
         };
         mcpBusy = true;
         try {
+          if (action === 'mcp-preset-google') {
+            endpoint = 'https://calendarmcp.googleapis.com/mcp/v1self';
+            document.getElementById('cfgMcpUrl').value = endpoint;
+            document.getElementById('cfgMcpIssuer').value = 'https://accounts.google.com/';
+            document.getElementById('cfgMcpScope').value = 'https://www.googleapis.com/auth/calendar.events';
+            document.getElementById('cfgMcpAlias').value = 'calendar';
+            render('Google Calendar endpoint configured. Create a Google Cloud Desktop OAuth client marked for an AI-powered agent, enter its client ID and secret, then select Start authorization. Browsphere cannot authorize without your Google sign-in.');
+            return;
+          }
           if (action === 'mcp-preset-exa' || action === 'mcp-preset-tavily') {
             var exa = action === 'mcp-preset-exa';
             endpoint = exa ? 'https://mcp.exa.ai/mcp/oauth' : 'https://mcp.tavily.com/mcp';
@@ -3994,13 +4004,17 @@
           } else if (action === 'mcp-oauth-begin') {
             var issuer = document.getElementById('cfgMcpIssuer')?.value.trim();
             var clientId = document.getElementById('cfgMcpClientId')?.value.trim();
+            var secretField = document.getElementById('cfgMcpClientSecret');
+            var clientSecret = secretField?.value.trim() || '';
             var scope = document.getElementById('cfgMcpScope')?.value.trim() || '';
             if (!window.confirm('Authorize this trusted MCP resource using the specified issuer?\n'+endpoint+'\n'+issuer)) return;
             var browser = await chooseMcpOAuthBrowser();
             if (!browser) return;
             mcpAuthorization = null;
             render('Checking authorization metadata...');
-            var flow = await window.aetherBridge.beginMcpOAuth(endpoint,issuer,clientId,scope);
+            var flow;
+            try { flow = await window.aetherBridge.beginMcpOAuth(endpoint,issuer,clientId,scope,clientSecret); }
+            finally { if (secretField) secretField.value = ''; clientSecret = ''; }
             mcpAuthorization = {id:flow.id,url:flow.authorizationUrl,endpoint:endpoint};
             render('Opening your chosen browser. Complete sign-in and approve access. If it does not open, use Open sign-in browser or Copy authorization URL.');
             await window.aetherBridge.openMcpOAuthBrowser(flow.id,browser);

@@ -15,7 +15,7 @@ pub struct Requirement{
     #[serde(skip)] scope:Scope,
 }
 #[derive(Clone,Debug)]
-enum Scope{Source(String),Target,Fact{source:Option<String>,facet:&'static str},CoursePlatform(usize),OpenResearch}
+enum Scope{Source(String),NamedSource(String),Target,Fact{source:Option<String>,facet:&'static str},CoursePlatform(usize),OpenResearch}
 #[derive(Clone,Debug,Default,Serialize)]
 pub struct Ledger{
     pub requirements:Vec<Requirement>,
@@ -27,6 +27,16 @@ fn add(rows:&mut Vec<Requirement>,kind:&'static str,scope:Scope){
 }
 fn web(s:&str)->Option<Url>{browser_skills::public_url(s)}
 fn source_matches(s:&SourceEvidence,wanted:&str)->bool{web(&s.url).is_some()&&web(&s.url)==web(wanted)}
+/// Match a user-named source only to an actually observed primary domain.
+/// This is not destination discovery or a claim that any page is factual.
+fn named_source_observed(s:&SourceEvidence,name:&str)->bool{
+    let Some(u)=web(&s.url)else{return false};
+    let Some(host)=u.host_str()else{return false};
+    let bare=host.strip_prefix("www.").unwrap_or(host);
+    let parts=bare.split('.').collect::<Vec<_>>();
+    let expected=name.to_ascii_lowercase().replace([' ','-'],"");
+    parts.len()==2&&parts[0]==expected&&browser_skills::readable(&page(s))
+}
 fn page(s:&SourceEvidence)->DomSnapshot{DomSnapshot{structure:Default::default(),origin:s.url.clone(),title:s.title.clone(),text_excerpt:s.excerpt.clone(),interactive_nodes:vec![]}}
 /// The exact root of a compiled target is anchored in native recorded evidence.
 /// GitHub target identity must be visible, and the user explicitly named GitHub.
@@ -149,6 +159,10 @@ impl Ledger{
                 add(&mut l.requirements,"source_observed",Scope::Source(url.clone()));
                 for facet in &facets{add(&mut l.requirements,facet,Scope::Fact{source:Some(url.clone()),facet});}
             }
+        }else if !deliberation::named_research_entities(goal).is_empty(){
+            for name in deliberation::named_research_entities(goal){
+                add(&mut l.requirements,"named_source_observed",Scope::NamedSource(name));
+            }
         }else if TaskSpec::compile(goal).is_some(){
             add(&mut l.requirements,"target_identity",Scope::Target);
             for facet in facets{add(&mut l.requirements,facet,Scope::Fact{source:None,facet});}
@@ -171,6 +185,11 @@ impl Ledger{
                     if candidates.len()>=3{r.state=State::Candidate;}
                 },
                 Scope::CoursePlatform(i)=>{if course_hosts.len()>*i{r.state=State::Observed;}},
+                Scope::NamedSource(name)=>{
+                    if sources.iter().any(|source|named_source_observed(source,name)){
+                        r.state=State::Observed;
+                    }
+                },
                 Scope::Target=>{if self.target_scope.is_some(){r.state=State::Observed;}},
                 Scope::Source(url)=>{if sources.iter().any(|s|source_matches(s,url)&&browser_skills::readable(&page(s))){r.state=State::Observed;}},
                 Scope::Fact{source,facet}=>{
@@ -215,6 +234,7 @@ impl Ledger{
                 "budget_constraint"=>"Collect itemized costs before calculating the total budget",
                 "itinerary"=>"Collect verified locations and hours before arranging an itinerary",
                 "course_platform_certificate_duration"=>"Find another independent course platform with certificate and duration evidence",
+                "named_source_observed"=>"Find another missing user-named primary source and capture readable factual evidence",
                 _=>"Collect primary-source evidence for the next missing requirement",
             })
     }
@@ -440,4 +460,35 @@ mod tests{
   assert!(!Ledger::compile("Open https://example.org").supported);
   assert!(!Ledger::compile("Buy a product and report its price").supported);
  }
+}
+
+#[cfg(test)]
+mod named_source_progress_tests {
+    use super::*;
+    fn source(url:&str)->SourceEvidence {
+        SourceEvidence {
+            url:url.into(),
+            title:"Public software plans and collaboration".into(),
+            excerpt:"A published free tier includes workspace features and documented team limits. ".repeat(5),
+        }
+    }
+    #[test]
+    fn named_comparison_requires_each_observed_primary_source(){
+        let goal="Visit the official websites of Alpha, Beta and Gamma. Compare their free plans for a team.";
+        let mut requirements=Ledger::compile(goal);
+        assert_eq!(requirements.requirements.len(),3);
+        assert!(!requirements.ready());
+        let alpha=source("https://alpha.org/pricing");
+        let beta=source("https://www.beta.com/plans");
+        requirements.refresh(goal,&[alpha.clone(),beta.clone()]);
+        assert_eq!(requirements.missing().len(),1);
+        assert!(!requirements.ready());
+        let lookalike=source("https://gamma.phishing.example.com/plans");
+        requirements.refresh(goal,&[alpha.clone(),beta.clone(),lookalike]);
+        assert_eq!(requirements.missing().len(),1,"subdomains cannot impersonate a named primary site");
+        requirements.refresh(goal,&[alpha,beta,source("https://gamma.net/pricing")]);
+        assert!(requirements.ready());
+        // Source observation only: no claim that any free-plan fact is verified.
+        assert!(requirements.requirements.iter().all(|r|r.state==State::Observed));
+    }
 }
