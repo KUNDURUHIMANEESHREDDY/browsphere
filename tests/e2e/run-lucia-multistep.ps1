@@ -3,6 +3,9 @@
 param(
     [string]$ExecutablePath = "",
     [switch]$CloudCompat,
+    [switch]$PlaywrightSmoke,
+    [switch]$LiveVisionSmoke,
+    [int]$McpPort = 18931,
     [int]$CdpPort = 9272,
     [int]$ModelPort = 18766,
     [int]$FixturePort = 18764,
@@ -35,6 +38,7 @@ $profileEnv = @{}
 foreach ($key in @('APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER',
     'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT',
     'LUCIA_MODEL_PORT','LUCIA_FIXTURE_PORT',
+    'LUCIA_MCP_PORT','LUCIA_PLAYWRIGHT_NATIVE_PAGE_FILE',
     'BROWSPHERE_STAGEHAND_ENABLE','BROWSPHERE_STAGEHAND_CI_FIXTURE','BROWSPHERE_STAGEHAND_MCP_PORT')) {
     $profileEnv[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
 }
@@ -51,6 +55,7 @@ New-Item -ItemType Directory -Force $env:APPDATA, $env:LOCALAPPDATA, $env:WEBVIE
 
 $modelProcess = $null
 $stagehandProcess = $null
+$mcpProcess = $null
 $appProcess = $null
 $startupMilliseconds = $null
 $startupWatch = $null
@@ -63,6 +68,8 @@ $cdpPolicyName = [IO.Path]::GetFileName($ExecutablePath)
 $createdCdpPolicy = $false
 $serverOut = Join-Path $profile 'mock-model.stdout.log'
 $serverErr = Join-Path $profile 'mock-model.stderr.log'
+$mcpOut = Join-Path $profile 'playwright-mcp.stdout.log'
+$mcpErr = Join-Path $profile 'playwright-mcp.stderr.log'
 
 function Wait-ForLoopback($url, $tries = 35) {
     for ($i=0; $i -lt $tries; $i++) {
@@ -156,6 +163,40 @@ try {
         throw
     }
 
+    if ($LiveVisionSmoke) {
+        if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Live visual smoke requires a disposable Windows CI runner' }
+        Write-Host 'LUCIA_LIVE_VISUAL_STREAM_START'
+        & node (Join-Path $root 'tests\e2e\lucia-live-vision.cjs')
+        if ($LASTEXITCODE -ne 0) { throw "Native CDP + BRPR live visual integration failed ($LASTEXITCODE)" }
+        Write-Host 'LUCIA_LIVE_VISUAL_STREAM_VERIFIED'
+        return
+    }
+
+    if ($PlaywrightSmoke) {
+        if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Playwright MCP smoke requires isolated Windows CI' }
+        # Reuse the exact upstream Microsoft Playwright MCP npm package.
+        # Never start this on a user profile or expose consumer CDP ports.
+        $npx = Get-Command npx.cmd -ErrorAction Stop
+        $mcpArgs = @(
+            '--yes', '@playwright/mcp@0.0.86',
+            '--host', '127.0.0.1',
+            '--port', "$McpPort",
+            '--cdp-endpoint', "http://127.0.0.1:$CdpPort"
+        )
+        $mcpProcess = Start-Process -FilePath $npx.Source -ArgumentList $mcpArgs -WorkingDirectory $root -PassThru -RedirectStandardOutput $mcpOut -RedirectStandardError $mcpErr
+        $env:LUCIA_MCP_PORT = "$McpPort"
+        $env:LUCIA_PLAYWRIGHT_NATIVE_PAGE_FILE = Join-Path $profile 'playwright-target.url'
+        Write-Host 'LUCIA_UPSTREAM_PLAYWRIGHT_WEBVIEW2_START'
+        & node (Join-Path $root 'tests\e2e\lucia-playwright-mcp-native.cjs')
+        if ($LASTEXITCODE -ne 0) { throw "Real upstream Microsoft MCP WebView2 smoke failed ($LASTEXITCODE)" }
+        # The live server must also pass Lucia's existing Rust MCP gateway,
+        # exact URL binding, read-only permission and bounded-role checks.
+        & cargo test --workspace --locked live_upstream_playwright_webview2 -- --ignored --nocapture
+        if ($LASTEXITCODE -ne 0) { throw "Lucia native MCP gateway rejected the upstream server ($LASTEXITCODE)" }
+        Write-Host 'LUCIA_UPSTREAM_PLAYWRIGHT_WEBVIEW2_VERIFIED'
+        return
+    }
+
     if ($PlaywrightInterop) {
         if ($env:GITHUB_ACTIONS -ne 'true') {
             throw 'Upstream CDP interop is CI-only, not enabled for end users.'
@@ -233,6 +274,14 @@ try {
     }
     Write-Host 'PASS: multi-step native browsing, recovery, tab closure, and evidence checks'
 } finally {
+    if ($mcpProcess) {
+        & taskkill.exe /PID $mcpProcess.Id /T /F 2>$null | Out-Null
+    }
+    if (Test-Path $mcpOut) { Get-Content $mcpOut -Tail 10 }
+    if (Test-Path $mcpErr) {
+        $mcpMessages = Get-Content $mcpErr -Tail 10
+        if ($mcpMessages) { Write-Warning ($mcpMessages -join [Environment]::NewLine) }
+    }
     $processTreeSamples = @()
     if ($treeSampler) {
         Stop-Job -Job $treeSampler -ErrorAction SilentlyContinue
