@@ -55,8 +55,8 @@ pub fn explicit_research_sources(goal:&str)->Vec<Url>{
     let g=goal.to_lowercase();
     let one_source_citation=g.contains("visit https://") &&
         ["cite","citing","supporting passage"].iter().any(|x|g.contains(x));
-    if !read_only(goal)||!one_source_citation&&
-        !["compare","comparison","both sources","each source","all sources","reconcile","cite","official documentation"].iter().any(|x|g.contains(x)){return vec![];}
+    if !read_only(goal)||(!one_source_citation &&
+        !["compare","comparison","both sources","each source","all sources","reconcile","cite","official documentation"].iter().any(|x|g.contains(x))){return vec![];}
     let mut out=Vec::new();
     for word in goal.split_whitespace(){
         let w=word.trim_matches(['(',')','[',']','"', '\'', ',', ';']).trim_end_matches('.');
@@ -242,7 +242,7 @@ mod tests{
   let g="Visit https://example.org/docs/guide and report one specific recommendation from the guide, citing a supporting passage from that exact website.";
   assert_eq!(explicit_research_sources(g).iter().map(Url::as_str).collect::<Vec<_>>(),
       vec!["https://example.org/docs/guide"]);
-  assert!(super::semantic_core::ObjectiveLedger::new(g).active());
+  assert!(crate::agent::semantic_core::ObjectiveLedger::new(g).active());
   assert!(explicit_research_sources("Visit https://example.org/docs/guide").is_empty());
   assert!(explicit_research_sources("Visit https://example.org/docs/guide and buy a subscription, citing the page").is_empty());
   assert!(explicit_research_sources("Visit http://127.0.0.1/admin and report one result, citing its page").is_empty());
