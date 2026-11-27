@@ -209,21 +209,22 @@ try {
     }
 
     if ($UpstreamMcpInterop) {
-        if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Stagehand WebView2 CDP attachment is restricted to disposable CI profiles' }
-        # Stagehand's upstream localBrowser.connect API, not our CDP protocol
-        # implementation. Observe shell metadata only; never act on the UI.
-        $env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI='1'
-        try {
-            Write-Host 'Checking official Stagehand localBrowser.connect read-only attachment (full extension init is a separate experimental probe)'
-            & node (Join-Path $root 'integrations\stagehand-mcp\webview2-attach.ci.mjs')
-            if ($LASTEXITCODE -ne 0) {
-                throw 'Official Stagehand localBrowser.connect failed against installed WebView2; full Stagehand extension initialization remains unverified'
-            }
-        } finally { Remove-Item Env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI -ErrorAction SilentlyContinue }
+        if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Upstream native interop is restricted to disposable CI profiles' }
+        # Stagehand's full initialization against installed WebView2 times
+        # out after 60s (reproduced in two Windows runs). Do not invent a
+        # custom CDP actuator, silently skip the test, or falsely mark
+        # Stagehand native compatibility as proven. Its isolated Chromium
+        # research/act engine is verified in the separate upstream SDK job.
+        Write-Host 'STAGEHAND_NATIVE_WEBVIEW2_UNSUPPORTED: official Playwright owns native WebView2 actions'
         Write-Host 'Checking official Stagehand MCP tools through actual installed Lucia chatbox'
         & node (Join-Path $root 'tests\interop\upstream-stagehand-native.cjs')
         if ($LASTEXITCODE -ne 0) {
             throw 'Native Lucia-to-upstream-Stagehand MCP end-to-end acceptance failed'
+        }
+        Write-Host 'Checking actual Microsoft Playwright actions with native Browsphere state readback'
+        & node (Join-Path $root 'tests\interop\playwright-native-actions.cjs')
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Official Playwright actions did not pass independent native-WebView2 readback'
         }
     }
 
