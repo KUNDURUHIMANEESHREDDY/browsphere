@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test",
-    "check": "node --check server.mjs && node --check stagehand-readonly.mjs"
+    "check": "node --check server.mjs && node --check stagehand-readonly.mjs",
+    "smoke": "node stagehand.smoke.mjs"
   },
   "dependencies": {
     "@browserbasehq/stagehand": "4.5.0",
