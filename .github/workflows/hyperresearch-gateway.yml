@@ -5,6 +5,10 @@ on:
     paths:
       - 'tools/hyperresearch_*.py'
       - 'tests/test_hyperresearch_*.py'
+      - 'tests/run_hyperresearch_rust_ci.py'
+      - 'src-tauri/src/agent/mcp.rs'
+      - 'tests/run_hyperresearch_rust_ci.py'
+      - 'src-tauri/src/agent/mcp.rs'
       - '.github/workflows/hyperresearch-gateway.yml'
   push:
     branches: [main]
@@ -32,3 +36,28 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_hyperresearch_gateway.py' -v
       - name: Run real local Hyperresearch MCP transport test
         run: python -m unittest discover -s tests -p 'test_hyperresearch_mcp_live.py' -v
+
+  windows-native-mcp:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Prepare Tauri UI assets
+        working-directory: ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build:css
+      - name: Install real Hyperresearch MCP runtime
+        run: python -m pip install "hyperresearch==0.13.3" "mcp>=1.8,<2"
+      - name: Native Lucia client against actual Hyperresearch server
+        run: python tests/run_hyperresearch_rust_ci.py
