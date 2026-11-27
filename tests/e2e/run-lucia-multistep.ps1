@@ -184,6 +184,17 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw 'Native Lucia-to-upstream-Stagehand MCP end-to-end acceptance failed'
         }
+        # Execute the real upstream Stagehand act() engine on the one disposable
+        # fixture tab, then independently read back the native WebView2 DOM.
+        # This cannot run against an installed user's browsing profile.
+        $env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI='1'
+        try {
+            Write-Host 'Verifying official Stagehand actions via native WebView2 postconditions'
+            & node (Join-Path $root 'integrations\stagehand-mcp\webview2-native-actions.ci.mjs')
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Stagehand action on installed WebView2 was not independently verified'
+            }
+        } finally { Remove-Item Env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI -ErrorAction SilentlyContinue }
     }
 
     # Optional public-site diagnostic. Do not bypass Google challenges or
