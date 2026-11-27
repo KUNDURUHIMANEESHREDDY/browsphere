@@ -116,11 +116,12 @@ fn stagehand_read_timeout(url:&Url,method:&str,params:&Value)->Option<Duration>{
 impl Session {
     async fn post(&mut self, method: &str, params: Value, notification: bool) -> Result<Value> {
         self.id += 1;
+        let stagehand_budget=stagehand_read_timeout(&self.url,method,&params);
         let mut body = json!({"jsonrpc":"2.0","method":method,"params":params});
         if !notification { body["id"] = json!(self.id); }
         let mut req = self.client.post(self.url.clone())
             .header("Accept", "application/json, text/event-stream").json(&body);
-        if let Some(budget)=stagehand_read_timeout(&self.url,method,&params){
+        if let Some(budget)=stagehand_budget {
             req=req.timeout(budget);
         }
         if method != "initialize" {
