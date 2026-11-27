@@ -16,6 +16,13 @@ const STREAM_WAIT:Duration=Duration::from_secs(4);
 static REGISTERED_RECEIVERS:AtomicU64=AtomicU64::new(0);
 static FRAME_EVENTS:AtomicU64=AtomicU64::new(0);
 static ACCEPTED_FRAMES:AtomicU64=AtomicU64::new(0);
+// Keep the COM event source alive on the WebView2 UI thread. The source is
+// released when that tab closes; never retain it across browser profiles.
+#[cfg(windows)]
+thread_local! {
+    static COM_RECEIVERS:std::cell::RefCell<HashMap<String,Box<dyn std::any::Any>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
 
 #[derive(Default)]
 struct Slot {
@@ -79,6 +86,7 @@ pub fn attach(child:&tauri::Webview,label:String)->Result<(),String>{
     use webview2_com::{CallDevToolsProtocolMethodCompletedHandler,CoTaskMemPWSTR,
         DevToolsProtocolEventReceivedEventHandler};
     child.with_webview(move |native|{
+        let receiver_label=label.clone();
         let Ok(core)=(unsafe{native.controller().CoreWebView2()}) else{return;};
         let name=CoTaskMemPWSTR::from("Page.screencastFrame");
         let Ok(receiver)=(unsafe{core.GetDevToolsProtocolEventReceiver(*name.as_ref().as_pcwstr())}) else {
@@ -115,13 +123,33 @@ pub fn attach(child:&tauri::Webview,label:String)->Result<(),String>{
         }));
         let mut token=Default::default();
         match unsafe{receiver.add_DevToolsProtocolEventReceived(&handler,&mut token)} {
-            Ok(_) => { REGISTERED_RECEIVERS.fetch_add(1,Ordering::Relaxed); },
+            Ok(_) => {
+                // Don't drop this COM source when the with_webview closure
+                // returns; some WebView2 builds stop delivering events then.
+                COM_RECEIVERS.with(|saved| {
+                    saved.borrow_mut().insert(receiver_label,Box::new(receiver));
+                });
+                REGISTERED_RECEIVERS.fetch_add(1,Ordering::Relaxed);
+            },
             Err(e) => { tracing::warn!("Live WebView2 frame subscription failed: {e}"); }
         }
     }).map_err(|_|"Could not register native visual event receiver".to_owned())
 }
 #[cfg(not(windows))]
 pub fn attach(_child:&tauri::Webview,_label:String)->Result<(),String>{Ok(())}
+
+/// Release the native COM subscription on the same WebView2 UI thread
+/// before closing the child tab. The slot cache is cleared by forget().
+#[cfg(windows)]
+pub fn detach(child:&tauri::Webview,label:&str) {
+    let key=label.to_owned();
+    let _=child.with_webview(move |_|{
+        COM_RECEIVERS.with(|saved|{saved.borrow_mut().remove(&key);});
+    });
+}
+#[cfg(not(windows))]
+pub fn detach(_: &tauri::Webview,_:&str) {}
+
 
 #[cfg(windows)]
 async fn cdp(app:&tauri::AppHandle,label:&str,method_name:&'static str,parameters:&'static str)->Result<(),String>{
