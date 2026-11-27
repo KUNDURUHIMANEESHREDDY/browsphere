@@ -2538,6 +2538,33 @@ mod tests {
     }
 
     #[test]
+    fn qwen_reuses_compact_native_control_aliases_not_full_page_text() {
+        let controls: Vec<_> = (0..36).map(|i| json!({
+            "node_id":format!("native-control-{i}"), "tag":"button",
+            "role":"button", "label":format!("Read source section {i}"),
+            "is_sensitive":false, "is_submit":false
+        })).collect();
+        let source = "Untrusted visible accessibility source text. ".repeat(120);
+        let raw = format!(
+            "Original user goal: Read a specific official source and cite evidence.\\n\
+             Assigned stage objective: Navigate to observed source section.\\n\
+             Origin: https://www.w3.org/WAI/tutorials/images/\\n\
+             Title: W3C accessibility guide\\n\
+             <untrusted_page_data origin=\\\"https://www.w3.org/WAI/tutorials/images/\\\">\n{source}\n</untrusted_page_data>\\n\
+             Interactive nodes JSON: {}",
+            json!(controls)
+        );
+        let (prompt, schema, aliases) = ModelRouter::tiny_action_context(&raw);
+        assert!(ModelRouter::bounded_local_action_model("qwen2.5:3b-instruct"));
+        assert!(prompt.len() * 2 < raw.len(), "Qwen context was not meaningfully reduced");
+        assert!(prompt.contains("Original user goal:"));
+        assert!(!prompt.contains("native-control-25"), "Raw IDs must not reach the schema model");
+        assert!(schema["properties"]["action"]["anyOf"].as_array().is_some());
+        assert_eq!(aliases.get("c1").map(String::as_str), Some("native-control-0"));
+        assert!(!aliases.values().any(|id| id=="invented-control"));
+    }
+
+    #[test]
     fn media_goal_prioritizes_observed_search_over_navigation() {
         let raw=format!("Native completion gate: blocked - playback missing\nOriginal user goal: Open YouTube and play any song\nOrigin: https://www.youtube.com/\nAllowed navigation JSON: [\"https://www.youtube.com/\"]\nInteractive nodes JSON: {}",json!([
             {"node_id":"search","tag":"input","role":"searchbox","label":"Search","search_state":"empty","is_sensitive":false}
