@@ -57,11 +57,22 @@ async function main(){
       await sleep(250);
     }
     assert.equal(ready?.tauri,true,'The isolated target never exposed the trusted Tauri API');
+    const fixtureUrl='http://127.0.0.1:18764/';
     await evalMain("window.__TAURI__.core.invoke('open_or_navigate_tab',{tabId:'live-visual-fixture',url:'http://127.0.0.1:18764/',isPrivate:true})");
-    // The frontend can switch the active UI tab while the fixture loads.
-    // run_live_visual_smoke uses the fixture's exact native WebView2 label,
-    // verifies its origin/readiness, then checks a NEW BRPR signal after
-    // mutating that same page. Do not gate on active-tab BRPR cache here.
+    // WebView2's tab creation resolves before the child has necessarily
+    // navigated. An immediate visual capture was correctly rejected by the
+    // native EXACT-localhost guard; wait for a fresh *native* tab observation,
+    // never disable or retry around that security policy.
+    let observed=null;
+    for(let i=0;i<45;i++){
+      observed=await evalMain("window.__TAURI__.core.invoke('capture_tab_snapshot',{tabId:'live-visual-fixture'})").catch(()=>null);
+      if(observed?.origin===fixtureUrl)break;
+      await sleep(220);
+    }
+    assert.equal(observed?.origin,fixtureUrl,
+      'Live-vision fixture never loaded at the exact native-approved localhost URL');
+    // run_live_visual_smoke still checks the trusted window and EXACT fixture
+    // URL independently, then verifies NEW frames and BRPR after mutation.
     const resultData=await evalMain("window.__TAURI__.core.invoke('run_live_visual_smoke')");
     assert.equal(resultData.changed,true,'Live CDP frames did not reflect a DOM visual change');
     assert.equal(resultData.brpr_signaled,true,'BRPR did not signal that visual change');
