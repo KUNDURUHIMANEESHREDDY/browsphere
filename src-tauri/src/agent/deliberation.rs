@@ -47,11 +47,16 @@ mod named_sources_tests {
     }
 }
 
-/// Track explicit public source addresses in a bounded read-only comparison.
-/// This does not grant navigation permissions or authorize external actions.
+/// Track user-authored HTTPS sources for read-only research. One explicit
+/// source also counts when the user asks to visit it and cite an observed
+/// passage; merely visiting a URL must never satisfy a factual research goal.
+/// This is a source-acquisition objective, not permission or completion proof.
 pub fn explicit_research_sources(goal:&str)->Vec<Url>{
     let g=goal.to_lowercase();
-    if !read_only(goal)||!["compare","comparison","both sources","each source","all sources","reconcile","cite","official documentation"].iter().any(|x|g.contains(x)){return vec![];}
+    let one_source_citation=g.contains("visit https://") &&
+        ["cite","citing","supporting passage"].iter().any(|x|g.contains(x));
+    if !read_only(goal)||!one_source_citation&&
+        !["compare","comparison","both sources","each source","all sources","reconcile","cite","official documentation"].iter().any(|x|g.contains(x)){return vec![];}
     let mut out=Vec::new();
     for word in goal.split_whitespace(){
         let w=word.trim_matches(['(',')','[',']','"', '\'', ',', ';']).trim_end_matches('.');
@@ -63,7 +68,7 @@ pub fn explicit_research_sources(goal:&str)->Vec<Url>{
         if !out.contains(&u){out.push(u);}
         if out.len()>4{return vec![];}
     }
-    if out.len()<2{vec![]}else{out}
+    if out.len()<2 && !(out.len()==1 && one_source_citation){vec![]}else{out}
 }
 pub fn source_observed(url:&Url,sources:&[super::orchestrator::SourceEvidence])->bool{
     super::browser_skills::research::observed(url,sources)
@@ -233,6 +238,17 @@ mod tests{
  use super::*;
  use crate::agent::dom_extractor::{DomNodeSummary,BoundingBox};
  fn page()->DomSnapshot{DomSnapshot{structure: Default::default(), origin:"https://example.org/search".into(),title:"Public guide".into(),text_excerpt:"The public guide describes how to use the application correctly.".into(),interactive_nodes:vec![DomNodeSummary{node_id:"native1".into(),tag:"a".into(),role:"link".into(),label:"Application guide".into(),options:vec![],checked:None,search_state:None,href:Some("https://example.org/guide".into()),is_submit:false,is_sensitive:false,bbox:Some(BoundingBox{x:1.,y:1.,width:100.,height:40.,in_viewport:true})}]}}
+ #[test]fn cited_single_public_source_requires_source_ledger_not_navigation_only(){
+  let g="Visit https://example.org/docs/guide and report one specific recommendation from the guide, citing a supporting passage from that exact website.";
+  assert_eq!(explicit_research_sources(g).iter().map(Url::as_str).collect::<Vec<_>>(),
+      vec!["https://example.org/docs/guide"]);
+  assert!(super::semantic_core::ObjectiveLedger::new(g).active());
+  assert!(explicit_research_sources("Visit https://example.org/docs/guide").is_empty());
+  assert!(explicit_research_sources("Visit https://example.org/docs/guide and buy a subscription, citing the page").is_empty());
+  assert!(explicit_research_sources("Visit http://127.0.0.1/admin and report one result, citing its page").is_empty());
+  assert!(explicit_research_sources("Visit https://user:pass@example.org/docs and report one result, citing the page").is_empty());
+  assert!(explicit_research_sources("Visit https://example.org/docs?secret=123 and report one result, citing the page").is_empty());
+ }
  #[test]fn exact_benchmark_three_sources_are_preserved(){
   let g="Research and compare three HTTP client libraries using their official documentation: https://requests.readthedocs.io/en/latest/user/quickstart/ https://www.python-httpx.org/async/ https://docs.aiohttp.org/en/stable/client_quickstart.html . Explain a useful feature and one limitation or usage caveat for each library. Cite both properties from each of the three sources.";
   assert!(read_only(g));assert_eq!(explicit_research_sources(g).len(),3);
