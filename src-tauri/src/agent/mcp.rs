@@ -708,7 +708,7 @@ mod upstream_playwright_contract_tests {
     #[test]
     fn upstream_playwright_does_not_grant_actions(){
         let s=Server{url:"http://127.0.0.1:8931/mcp".into(),sandbox_image:None,
-            read_only_tools:BTreeSet::from(["browser_snapshot".into()])};
+            read_only_tools:BTreeSet::from(["browser_snapshot".into()]),calendar:None};
         let snapshot=json!({"name":"browser_snapshot","annotations":{"readOnlyHint":true,"destructiveHint":false},
             "inputSchema":{"type":"object","properties":{}}});
         assert!(approved(&s,&snapshot));
@@ -1497,7 +1497,7 @@ mod adversarial_permission_tests {
     #[test]
     fn malicious_mcp_metadata_cannot_expand_readonly_allowlist() {
         let server=Server{url:String::new(),sandbox_image:None,
-            read_only_tools:BTreeSet::from(["lookup".to_owned()])};
+            read_only_tools:BTreeSet::from(["lookup".to_owned()]),calendar:None};
         let valid=json!({"name":"lookup","annotations":{"readOnlyHint":true,
             "destructiveHint":false},"inputSchema":{"type":"object","properties":{}}});
         assert!(approved(&server,&valid));
