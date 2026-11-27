@@ -1617,7 +1617,7 @@ User text: <text>{}</text>"#,
                 voice_mode,
             );
             let verification_specialist = specialist_instructions == crate::lucia_prompts::VERIFICATION_SPECIALIST;
-            let tiny = if self.config.ollama_model == "qwen3.5:0.8b" || self.config.ollama_model == "lfm3" || self.config.ollama_model.starts_with("lfm3:") || prompt_payload.lines().any(|line| line.starts_with("Supervisor directive:") || line.strip_prefix("Original user goal: ").is_some_and(|g|crate::agent::policy::requested_music_entry_url(g).is_some())) {
+            let tiny = if Self::constrained_action_model(&self.config.ollama_model) || prompt_payload.lines().any(|line| line.starts_with("Supervisor directive:") || line.strip_prefix("Original user goal: ").is_some_and(|g|crate::agent::policy::requested_music_entry_url(g).is_some())) {
                 Some(Self::tiny_action_context(prompt_payload, verification_specialist))
             } else { None };
             let concise = tiny.as_ref().map(|(prompt,_,_)| prompt.clone())
@@ -1772,6 +1772,15 @@ User text: <text>{}</text>"#,
     /// A compact, constrained protocol for the 0.8B local model. Short IDs
     /// are request-local aliases, never selectors or executable authority.
     /// The native fresh-DOM binder and policy still run after resolution.
+    // Qwen 2.5 3B previously emitted valid JSON with an unrecognized action
+    // shape on two independently executed unfamiliar-site trials. Reuse the
+    // existing observed-control JSON schema rather than accepting arbitrary
+    // model-written commands. Native DOM and policy checks still decide.
+    fn constrained_action_model(name: &str) -> bool {
+        matches!(name, "qwen3.5:0.8b" | "qwen2.5:3b-instruct" | "lfm3")
+            || name.starts_with("lfm3:")
+    }
+
     fn completion_blocked(raw: &str) -> bool {
         raw.lines().any(|line| line.starts_with("Native completion gate: blocked"))
     }
@@ -2299,6 +2308,15 @@ User text: <text>{}</text>"#,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qwen_3b_uses_existing_observed_control_action_schema() {
+        assert!(ModelRouter::constrained_action_model("qwen2.5:3b-instruct"));
+        assert!(ModelRouter::constrained_action_model("qwen3.5:0.8b"));
+        assert!(ModelRouter::constrained_action_model("lfm3:1.7b"));
+        assert!(!ModelRouter::constrained_action_model("lucia-local-e2e"));
+        assert!(!ModelRouter::constrained_action_model("other-provider-model"));
+    }
 
     #[test]
     fn verifier_can_request_independent_review_when_browser_completion_is_blocked() {
