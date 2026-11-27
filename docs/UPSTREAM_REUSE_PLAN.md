@@ -87,3 +87,40 @@ frame stream have independent *real WebView2* acceptance gates. Neither
 requires Stagehand's extension handshake. The intent is to reuse working
 upstream capabilities while isolating incomplete upstream integration—not
 reimplement Stagehand internally.
+
+## Confirmed installed-WebView2 Stagehand issue and non-deceptive gate
+
+Two separate fresh-runner checks failed at the **upstream Stagehand**
+extension handshake, including the supposed connect-only test:
+[45969144624](https://github.com/KUNDURUHIMANEESHREDDY/browsphere/actions/runs/45969144624)
+and [45971391182](https://github.com/KUNDURUHIMANEESHREDDY/browsphere/actions/runs/45971391182).
+Official Playwright Core successfully attached and observed 120 native controls
+before the Stagehand timeout, which points to a Stagehand-specific
+compatibility/initialization failure, not general WebView2/CDP unavailability.
+Stagehand's issue [#2782](https://github.com/browserbase/stagehand/issues/2782)
+has the same timeout symptom, but does not establish its exact cause here.
+
+**Correction to the earlier connect-only hypothesis:** Stagehand
+`localBrowser.connect()` can itself participate in extension-worker
+initialization, and is not a proven lightweight CDP-only API for WebView2.
+Never describe it as a passed integrated native capability.
+
+Windows clean-install E2E keeps the independently tested
+`UpstreamMcpInterop` route: installed Lucia chatbox → existing Rust MCP
+permissions → official Stagehand read-only MCP server → isolated Chromium
+research fixture. It still requires the task's actual native terminal result,
+policy enforcement and readback; no verifier is weakened and no synthetic
+completion is substituted.
+
+`-StagehandWebView2Experimental` is a separate opt-in CI-only compatibility
+probe that calls the actual upstream `localBrowser.connect` and **fails on a
+timeout**. It is not run in consumer releases or used as a dependency of the
+working read-only MCP workflow. Its result must remain **unverified/failed**
+until real native WebView2 evidence passes.
+
+The real-Qwen unfamiliar-site run
+[45969137732](https://github.com/KUNDURUHIMANEESHREDDY/browsphere/actions/runs/45969137732)
+also failed: 5 explicitly unsuccessful attempts (3 web.dev, 2 W3C), then the
+30-minute step deadline ended the sixth. The existing harness did not upload
+its final JSON when killed at that deadline. Do not report 0/6 executed
+completed failures without noting that sixth-run interruption.
