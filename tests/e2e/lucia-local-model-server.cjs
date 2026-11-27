@@ -18,7 +18,8 @@ const providerStats = {planner:0,actions:0,verifier:0,other:0,ollama:0};
 function cloudPhase(messages) {
   const system = String((messages || []).find(m=>m.role==='system')?.content || '').toLowerCase();
   if (system.includes('autonomous browser task planner')) return 'planner';
-  if (system.includes('independent, read-only evidence-review specialist')) return 'verifier';
+  if (system.includes('independent, read-only evidence-review specialist') ||
+      system.includes('check whether these source-backed findings answer the user')) return 'verifier';
   if (system.includes('browser agent working under lucia')) return 'actions';
   return 'other';
 }
