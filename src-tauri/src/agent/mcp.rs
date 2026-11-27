@@ -336,6 +336,40 @@ pub async fn playwright_page_hints(
 }
 
 #[cfg(test)]
+mod upstream_playwright_native_windows_test {
+    use super::*;
+    /// This test exercises Lucia's ACTUAL MCP client and role-count parser
+    /// against the running Microsoft process, not a mocked MCP response.
+    /// The GitHub CI script starts a disposable WebView2 profile and writes
+    /// the matching CDP page URL after checking the upstream snapshot.
+    #[tokio::test]
+    #[ignore = "requires pinned Microsoft MCP + isolated live Windows WebView2"]
+    async fn live_upstream_playwright_webview2() {
+        assert_eq!(std::env::var("GITHUB_ACTIONS").ok().as_deref(),Some("true"),
+            "Run only in an ephemeral CI worker");
+        let url_path=std::env::var("LUCIA_PLAYWRIGHT_NATIVE_PAGE_FILE")
+            .expect("CI must provide a disposable CDP URL file");
+        let url=std::fs::read_to_string(&url_path)
+            .expect("Native Playwright target URL file not written");
+        let port=std::env::var("LUCIA_MCP_PORT")
+            .expect("Microsoft MCP port missing");
+        let port:u16=port.parse().expect("Invalid MCP port");
+        let config=std::env::temp_dir()
+            .join(format!("lucia-playwright-live-{}.json",uuid::Uuid::new_v4()));
+        std::fs::write(&config,json!({"playwright":{
+            "url":format!("http://127.0.0.1:{port}/mcp"),
+            "read_only_tools":["browser_snapshot"]
+        }}).to_string()).unwrap();
+        let hints=playwright_page_hints(&config,url.trim(),CancellationToken::new()).await;
+        let _=std::fs::remove_file(config);
+        let h=hints.expect("Native Lucia MCP adapter could not read and match live Playwright WebView2 snapshot");
+        assert!(u32::from(h.buttons)+u32::from(h.links)+u32::from(h.searchboxes)
+            +u32::from(h.comboboxes)+u32::from(h.dialogs)+u32::from(h.options)>0,
+            "Real upstream accessibility snapshot lacked observable roles");
+    }
+}
+
+#[cfg(test)]
 mod upstream_playwright_contract_tests {
     use super::*;
     #[test]
