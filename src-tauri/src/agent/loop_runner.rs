@@ -1606,7 +1606,7 @@ async fn run_browser_loop(
         let result=tokio::select!{
             _=cancel.cancelled()=>return Ok("cancelled".into()),
             result=tokio::time::timeout(std::time::Duration::from_secs(120),
-                selected_model.plan_for_origin(&goal,&snapshot.origin,&creds))=>result
+                selected_model.plan_for_origin_with_page(&goal,&snapshot.origin,&creds,&snapshot))=>result
         };
         match result{
             Ok(Ok(plan))=>plan,
