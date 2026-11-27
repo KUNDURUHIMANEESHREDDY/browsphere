@@ -219,6 +219,27 @@ try {
         Write-Host 'Checking official Stagehand MCP tools through actual installed Lucia chatbox'
         & node (Join-Path $root 'tests\interop\upstream-stagehand-native.cjs')
         if ($LASTEXITCODE -ne 0) {
+            # Never treat an MCP transport failure as success. Report only
+            # private-data-free process/liveness classifications from this
+            # disposable runner to distinguish node crash from a slow request.
+            if ($stagehandProcess) {
+                $stagehandProcess.Refresh()
+                Write-Host ("STAGEHAND_SIDECAR_LIVENESS exited={0} code={1}" -f
+                    $stagehandProcess.HasExited,
+                    $(if($stagehandProcess.HasExited){$stagehandProcess.ExitCode}else{'running'}))
+            }
+            $stagehandErr=Join-Path $profile 'stagehand.err'
+            if (Test-Path -LiteralPath $stagehandErr) {
+                $diagnostic=@(Get-Content -LiteralPath $stagehandErr -Tail 40 | ForEach-Object {
+                    if($_ -match 'EADDRINUSE'){'port_in_use'}
+                    elseif($_ -match 'ECONNRESET|ECONNREFUSED'){'connection_error'}
+                    elseif($_ -match 'EPIPE'){'broken_pipe'}
+                    elseif($_ -match 'ERR_UNHANDLED_REJECTION|UnhandledPromiseRejection'){'unhandled_rejection'}
+                    elseif($_ -match 'timed out|TimeoutError'){'timeout'}
+                    elseif($_ -match 'Stagehand upstream MCP ready'){'ready_log_observed'}
+                } | Where-Object {$null -ne $_} | Select-Object -Unique)
+                Write-Host ("STAGEHAND_SIDECAR_ERRORS classes={0}" -f ($diagnostic -join ','))
+            }
             throw 'Native Lucia-to-upstream-Stagehand MCP end-to-end acceptance failed'
         }
         Write-Host 'Checking actual Microsoft Playwright actions with native Browsphere state readback'
