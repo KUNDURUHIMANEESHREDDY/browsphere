@@ -63,7 +63,7 @@ async function main(){
        const entry={goal:args[0],tab:args[3],runId:null};window.__orchestratorProbe.launches.push(entry);
        return Promise.resolve(original.apply(this,args)).then(runId=>{entry.runId=runId;return runId},error=>{entry.error=String(error);throw error});
      };
-     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan','agent:verification_recovery','agent:fact_dependencies','agent:document_artifact','agent:supervisor','agent:stage','agent:orchestration'])
+     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan','agent:verification_recovery','agent:fact_dependencies','agent:document_artifact','agent:supervisor','agent:stage','agent:orchestration','agent:model_performance'])
        await window.__TAURI__.event.listen(kind,event=>
          window.__orchestratorProbe.events.push({kind,payload:event.payload}));
      const config=await window.__TAURI__.core.invoke('get_router_config');
@@ -119,6 +119,14 @@ async function main(){
    const stalledObservations=evs.filter(e=>e.kind==='agent:orchestration'&&e.payload?.stalled===true).length;
    const specialistStages=evs.filter(e=>e.kind==='agent:stage').map(e=>({name:e.payload?.specialist,status:e.payload?.status}));
    const failedActions=evs.filter(e=>e.kind==='agent:trace'&&e.payload?.outcome==='failed').length;
+   // Numeric-only action timing from the real Rust runtime. Ollama's complete
+   // response counters are logged by its native adapter; timeouts have no
+   // response body and are reported by the caller's deadline event.
+   const modelPerformance=evs.filter(e=>e.kind==='agent:model_performance')
+     .map(e=>e.payload).slice(-12).map(p=>({
+       wall_ms:Number(p.wall_ms)||0,budget_ms:Number(p.budget_ms)||0,
+       prompt_chars:Number(p.prompt_chars)||0,timed_out:p.timed_out===true
+     }));
    const recoveryEvents=evs.filter(e=>e.kind==='agent:verification_recovery');
    const recoveryStages=recoveryEvents.map(e=>e.payload.status);
    const progress=evs.filter(e=>e.kind==='agent:goal_progress').map(e=>e.payload.progress).at(-1);
@@ -195,7 +203,7 @@ async function main(){
      &&findings.length>0&&findings.every(f=>f.url&&f.quote&&f.claim)
      &&genuineModelUsed
      &&(problemIndex<0||recoveryVerified)&&(!requireRecovery||recoveryVerified);
-   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,supervisorReviews,stalledObservations,specialistStages,failedActions,recoveryStages,requireRecovery,recoveryVerified,genuineModelUsed,genuineModelActions:genuineModelActions.length,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,expectedSource,sourcePathVerified,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,requiresReport,artifactReadbackVerified,summary:report?.summary?.slice(0,500)}));
+   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,supervisorReviews,stalledObservations,specialistStages,failedActions,modelPerformance,recoveryStages,requireRecovery,recoveryVerified,genuineModelUsed,genuineModelActions:genuineModelActions.length,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,expectedSource,sourcePathVerified,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,requiresReport,artifactReadbackVerified,summary:report?.summary?.slice(0,500)}));
    if(!passed)throw Error('Native task failed one or more end-to-end criteria');
  }finally{
    try{await evaluate("window.__TAURI__.core.invoke('cancel_agent_run')")}catch{}
