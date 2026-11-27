@@ -38,6 +38,8 @@ def _field(row: dict, key: str, limit: int) -> str:
 
 
 def _loads(raw: str, expected: type):
+    if len(raw) > 2_000_000:
+        raise ValueError("Hyperresearch MCP payload exceeds safety limit")
     obj = json.loads(raw)
     if not isinstance(obj, expected):
         raise ValueError("Unexpected Hyperresearch MCP payload")
@@ -64,6 +66,8 @@ def search_results(raw: str) -> str:
 
 def note_result(raw: str) -> str:
     row = _loads(raw, dict)
+    if row.get("error") or not row.get("id"):
+        raise ValueError("Hyperresearch note lookup failed")
     body = _field(row, "body", 6000)
     whole = row.get("body", "")
     return json.dumps({
