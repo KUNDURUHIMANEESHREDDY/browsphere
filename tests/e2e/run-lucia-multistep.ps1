@@ -209,35 +209,44 @@ try {
         }
     }
 
-    # Stagehand v4's localBrowser.connect() also starts the upstream
-    # extension-worker handshake, which timed out on installed WebView2 in
-    # TWO independently observed Windows acceptance runs. It is not yet a
-    # supported native browser backend. A separate opt-in compatibility probe
-    # must fail on timeout, but cannot block acceptance of our independent,
-    # already proven read-only Stagehand MCP execution on isolated Chromium.
-    if ($StagehandWebView2Experimental) {
-        if (-not $UpstreamMcpInterop -or $env:GITHUB_ACTIONS -ne 'true') {
-            throw 'Experimental native Stagehand attachment requires isolated CI with approved Stagehand MCP'
-        }
-        $env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI='1'
-        try {
-            Write-Host 'STAGEHAND_WEBVIEW2_EXPERIMENTAL_START: upstream localBrowser.connect and full extension handshake'
-            & node (Join-Path $root 'integrations\stagehand-mcp\webview2-attach.ci.mjs')
-            if ($LASTEXITCODE -ne 0) {
-                throw 'Upstream Stagehand WebView2 extension attachment is unverified; no native Stagehand backend was enabled'
-            }
-            Write-Host 'STAGEHAND_WEBVIEW2_EXPERIMENTAL_PASS'
-        } finally { Remove-Item Env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI -ErrorAction SilentlyContinue }
-    }
     if ($UpstreamMcpInterop) {
-        # Real installed Lucia native chatbox -> Rust MCP host -> upstream
-        # read-only Stagehand server -> isolated Chromium -> readback.
-        # Never claim that this proves Stagehand attached to WebView2 itself.
-        Write-Host 'STAGEHAND_WEBVIEW2_FULL_INIT_UNVERIFIED: using independently proven upstream MCP sidecar'
+        if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Upstream native interop is restricted to disposable CI profiles' }
+        # Stagehand's full initialization against installed WebView2 times
+        # out after 60s (reproduced in two Windows runs). Do not invent a
+        # custom CDP actuator, silently skip the test, or falsely mark
+        # Stagehand native compatibility as proven. Its isolated Chromium
+        # research/act engine is verified in the separate upstream SDK job.
+        Write-Host 'STAGEHAND_NATIVE_WEBVIEW2_UNSUPPORTED: official Playwright owns native WebView2 actions'
         Write-Host 'Checking official Stagehand MCP tools through actual installed Lucia chatbox'
         & node (Join-Path $root 'tests\interop\upstream-stagehand-native.cjs')
         if ($LASTEXITCODE -ne 0) {
+            # Never treat an MCP transport failure as success. Report only
+            # private-data-free process/liveness classifications from this
+            # disposable runner to distinguish node crash from a slow request.
+            if ($stagehandProcess) {
+                $stagehandProcess.Refresh()
+                Write-Host ("STAGEHAND_SIDECAR_LIVENESS exited={0} code={1}" -f
+                    $stagehandProcess.HasExited,
+                    $(if($stagehandProcess.HasExited){$stagehandProcess.ExitCode}else{'running'}))
+            }
+            $stagehandErr=Join-Path $profile 'stagehand.err'
+            if (Test-Path -LiteralPath $stagehandErr) {
+                $diagnostic=@(Get-Content -LiteralPath $stagehandErr -Tail 40 | ForEach-Object {
+                    if($_ -match 'EADDRINUSE'){'port_in_use'}
+                    elseif($_ -match 'ECONNRESET|ECONNREFUSED'){'connection_error'}
+                    elseif($_ -match 'EPIPE'){'broken_pipe'}
+                    elseif($_ -match 'ERR_UNHANDLED_REJECTION|UnhandledPromiseRejection'){'unhandled_rejection'}
+                    elseif($_ -match 'timed out|TimeoutError'){'timeout'}
+                    elseif($_ -match 'Stagehand upstream MCP ready'){'ready_log_observed'}
+                } | Where-Object {$null -ne $_} | Select-Object -Unique)
+                Write-Host ("STAGEHAND_SIDECAR_ERRORS classes={0}" -f ($diagnostic -join ','))
+            }
             throw 'Native Lucia-to-upstream-Stagehand MCP end-to-end acceptance failed'
+        }
+        Write-Host 'Checking actual Microsoft Playwright actions with native Browsphere state readback'
+        & node (Join-Path $root 'tests\interop\playwright-native-actions.cjs')
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Official Playwright actions did not pass independent native-WebView2 readback'
         }
     }
 

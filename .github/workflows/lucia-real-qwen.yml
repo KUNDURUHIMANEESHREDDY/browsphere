@@ -10,10 +10,14 @@ on:
       - feature/browsphere-runtime-security-model-gates-20261127
       - feature/lucia-upstream-action-observability-20261127
       - feature/browsphere-upstream-full-integration-20261127
+      - fix/lucia-qwen-upstream-ollama-action-budget-20261127
     paths:
       - '.github/workflows/lucia-real-qwen.yml'
       - 'src-tauri/src/router/model_router.rs'
       - 'src-tauri/src/agent/loop_runner.rs'
+      - 'src-tauri/src/agent/deliberation.rs'
+      - 'src-tauri/src/agent/semantic_core.rs'
+      - 'src-tauri/src/agent/requirements.rs'
       - 'tests/e2e/run-lucia-real-qwen.ps1'
       - 'tests/e2e/run-lucia-unfamiliar-hosted.ps1'
       - 'tests/e2e/lucia-unfamiliar-source-acceptance.cjs'
@@ -79,12 +83,14 @@ jobs:
         shell: pwsh
         timeout-minutes: 30
         run: |
-          # Temporary branch pushes gather a focused real-model diagnostic
-          # first; manual unfamiliar_sites=true still requires all six trials.
-          if ('${{ github.event_name }}' -eq 'push') {
-            ./tests/e2e/run-lucia-real-qwen.ps1 -UnfamiliarSites -Scenario webdev -Repetitions 1 -AttemptBudgetSeconds 175
-          } elseif ('${{ inputs.unfamiliar_sites }}' -eq 'true') {
-            ./tests/e2e/run-lucia-real-qwen.ps1 -UnfamiliarSites -Scenario all -Repetitions 3 -AttemptBudgetSeconds 175
+          if ($env:GITHUB_REF -eq 'refs/heads/fix/lucia-qwen-upstream-ollama-action-budget-20261127' -and
+              '${{ github.event_name }}' -eq 'push') {
+            # Per-change evidence: ONE trial on each unfamiliar site. Even if
+            # both pass, this is not the six-run release acceptance gate.
+            ./tests/e2e/run-lucia-real-qwen.ps1 -UnfamiliarSites -Scenario all -Repetitions 1
+          } elseif ('${{ github.event_name }}' -eq 'push' -or '${{ inputs.unfamiliar_sites }}' -eq 'true') {
+            # Full release acceptance retains three independent attempts/site.
+            ./tests/e2e/run-lucia-real-qwen.ps1 -UnfamiliarSites -Scenario all -Repetitions 3
           } else {
             ./tests/e2e/run-lucia-real-qwen.ps1
           }
