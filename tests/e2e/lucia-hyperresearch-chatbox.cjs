@@ -60,7 +60,9 @@ async function main(){
     let events=[];
     for(let t=0;t<70;t++){
       await sleep(350);
-      events=await evalJs("window.__hprAcceptance.filter(e=>e.payload?.run_id==="+JSON.stringify(id)+").slice(-100)")||[];
+      // agent:run_completed carries a summary string rather than run_id.
+      // Include it explicitly so a false completion cannot escape detection.
+      events=await evalJs("window.__hprAcceptance.filter(e=>e.name==='agent:run_completed'||e.payload?.run_id==="+JSON.stringify(id)+").slice(-100)")||[];
       if(events.some(e=>e.name==='agent:run_status'))break;
     }
     const status=events.find(e=>e.name==='agent:run_status')?.payload?.status;
