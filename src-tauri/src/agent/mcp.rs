@@ -100,6 +100,19 @@ struct Session {
     version: String,
     id: u64,
 }
+// Stagehand's isolated Chromium cold start can legitimately exceed the
+// generic 12-second MCP request timeout. Apply a bounded timeout ONLY to
+// explicitly named Stagehand READ-ONLY tools on the known CI/opt-in local
+// sidecar, not to arbitrary MCP providers, methods or write-capable calls.
+// The caller's 45-second independent cancellation limit remains unchanged.
+fn stagehand_read_timeout(url:&Url,method:&str,params:&Value)->Option<Duration>{
+    let tool=params.get("name").and_then(Value::as_str)?;
+    if method=="tools/call"
+        && url.scheme()=="http" && url.host_str()==Some("127.0.0.1")
+        && url.port()==Some(18888) && url.path()=="/mcp"
+        && matches!(tool,"stagehand_inspect"|"stagehand_observe"|"stagehand_extract")
+    { Some(Duration::from_secs(30)) } else { None }
+}
 impl Session {
     async fn post(&mut self, method: &str, params: Value, notification: bool) -> Result<Value> {
         self.id += 1;
@@ -107,6 +120,9 @@ impl Session {
         if !notification { body["id"] = json!(self.id); }
         let mut req = self.client.post(self.url.clone())
             .header("Accept", "application/json, text/event-stream").json(&body);
+        if let Some(budget)=stagehand_read_timeout(&self.url,method,&params){
+            req=req.timeout(budget);
+        }
         if method != "initialize" {
             req = req.header("MCP-Protocol-Version", &self.version);
         }
@@ -445,6 +461,23 @@ mod tests {
         assert!(parse("mcp call local/search []").is_err());
         assert!(parse("mcp call ../search {}").is_ok()); // names are dictionary keys, not paths
         assert!(parse("mcp call local/search {} {}").is_err());
+    }
+    #[test] fn slow_upstream_stagehand_inspection_is_bounded_without_expanding_other_mcp_timeouts(){
+        let stagehand=Url::parse("http://127.0.0.1:18888/mcp").unwrap();
+        for name in ["stagehand_inspect","stagehand_observe","stagehand_extract"] {
+            assert_eq!(stagehand_read_timeout(&stagehand,"tools/call",&json!({"name":name})),
+                Some(Duration::from_secs(30)));
+        }
+        for name in ["browser_click","stagehand_act","delete_file","arbitrary_tool"] {
+            assert!(stagehand_read_timeout(&stagehand,"tools/call",&json!({"name":name})).is_none());
+        }
+        assert!(stagehand_read_timeout(&stagehand,"tools/list",&json!({"name":"stagehand_inspect"})).is_none());
+        assert!(stagehand_read_timeout(
+            &Url::parse("http://127.0.0.1:18889/mcp").unwrap(),"tools/call",
+            &json!({"name":"stagehand_inspect"})).is_none());
+        assert!(stagehand_read_timeout(
+            &Url::parse("https://trusted.example.com/mcp").unwrap(),"tools/call",
+            &json!({"name":"stagehand_inspect"})).is_none());
     }
     #[test] fn endpoint_policy() {
         assert!(endpoint("http://127.0.0.1:9999/mcp").is_ok());
