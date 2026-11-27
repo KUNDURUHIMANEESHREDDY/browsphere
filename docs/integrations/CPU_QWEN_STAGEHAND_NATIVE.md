@@ -41,6 +41,13 @@ request has been cancelled. The caller separately emits numeric
 `prompt_chars`, and `timed_out`. The unfamiliar-site JSON report records the
 last twelve events per attempt.
 
+Detailed Ollama counters are persisted by the app's existing privacy-guarded
+`model.jsonl` logger **only in CI**, when `GITHUB_ACTIONS=true` and
+`LUCIA_E2E_REAL_MODEL` exactly matches the selected local model. The
+test harness collects permitted numeric fields before deleting each disposable
+profile. Ordinary/private browsing never enables this diagnostic mode; raw
+prompts and model responses are neither recorded nor exported.
+
 ## Safety
 
 Stagehand CDP attachment is opt-in **only** when `GITHUB_ACTIONS=true` and
