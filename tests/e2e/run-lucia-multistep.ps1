@@ -116,16 +116,6 @@ try {
         $startupWatch.Stop()
         $startupMilliseconds=[math]::Round($startupWatch.Elapsed.TotalMilliseconds,1)
         Write-Host ("BROWSER_STARTUP_CDP_MS={0}" -f $startupMilliseconds)
-        if ($PlaywrightInterop) {
-            if ($env:GITHUB_ACTIONS -ne 'true') {
-                throw 'Upstream CDP interop is CI-only, not enabled for end users.'
-            }
-            Write-Host 'Checking installed WebView2 with upstream Microsoft Playwright'
-            & node (Join-Path $root 'tests\interop\playwright-webview2-smoke.cjs')
-            if ($LASTEXITCODE -ne 0) {
-                throw 'Playwright WebView2 CDP interoperability failed.'
-            }
-        }
     } catch {
         $appProcess.Refresh()
         Write-Host "Native app exited: $($appProcess.HasExited)"
@@ -134,6 +124,17 @@ try {
         Write-Host "WebView2 processes observed: $($webviews.Count)"
         Write-Host 'Windows CI browser debugging port was not opened; this is a startup/CDP failure, not a passed agent test'
         throw
+    }
+
+    if ($PlaywrightInterop) {
+        if ($env:GITHUB_ACTIONS -ne 'true') {
+            throw 'Upstream CDP interop is CI-only, not enabled for end users.'
+        }
+        Write-Host 'Checking installed WebView2 with upstream Microsoft Playwright'
+        & node (Join-Path $root 'tests\interop\playwright-webview2-smoke.cjs')
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Playwright WebView2 CDP interoperability failed after successful CDP startup.'
+        }
     }
 
     # Optional public-site diagnostic. Do not bypass Google challenges or
