@@ -1,0 +1,57 @@
+name: Lucia real-model unfamiliar-source acceptance
+
+# Manual, explicitly resource-bounded experiment. Do not burden ordinary PR
+# builds with a multi-GB model pull or treat mocked fixtures as real inference.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qwen-unfamiliar-public:
+    runs-on: windows-latest
+    timeout-minutes: 85
+    steps:
+      - name: Checkout exactly selected branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust compilation
+        uses: Swatinem/rust-cache@v2
+      - name: Compile UI assets
+        shell: pwsh
+        working-directory: ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build:css
+      - name: Validate JS and PowerShell harness
+        shell: pwsh
+        run: |
+          node --check tests/e2e/lucia-unfamiliar-source-acceptance.cjs
+          $token=$null
+          $errs=$null
+          [void][System.Management.Automation.Language.Parser]::ParseFile('tests/e2e/run-lucia-unfamiliar-hosted.ps1',[ref]$token,[ref]$errs)
+          if($errs.Count){throw "Unfamiliar-site PowerShell harness has syntax errors"}
+      - name: Build native Windows browser
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --locked
+      - name: Run genuine Qwen 3B with six isolated public-site tasks
+        shell: pwsh
+        timeout-minutes: 55
+        run: ./tests/e2e/run-lucia-real-qwen.ps1 -UnfamiliarSites
+      - name: Retain privacy-safe summary; failure remains failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lucia-Real-Model-Unfamiliar-Acceptance
+          path: ${{ runner.temp }}/lucia-unfamiliar-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
