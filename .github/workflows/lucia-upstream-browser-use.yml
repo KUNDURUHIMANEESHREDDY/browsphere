@@ -1,5 +1,11 @@
 name: Lucia upstream Browser Use — genuine Qwen research
 on:
+  push:
+    branches:
+      - verify/lucia-browser-use-qwen-20261127
+    paths:
+      - integrations/browser-use-qwen/**
+      - .github/workflows/lucia-upstream-browser-use.yml
   workflow_dispatch:
 
 permissions:
