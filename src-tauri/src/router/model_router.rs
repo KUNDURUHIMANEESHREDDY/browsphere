@@ -1682,6 +1682,21 @@ User text: <text>{}</text>"#,
                     || self.config.ollama_model == "lfm3" || self.config.ollama_model.starts_with("lfm3:") {
                     body["think"] = json!(false);
                 }
+                // Capture the ACTUAL compressed prompt/schema sizes before
+                // a slow CPU inference is cancelled by the outer task deadline.
+                // Never persist prompts, control labels, source URLs or tokens.
+                if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+                    && std::env::var("LUCIA_E2E_REAL_MODEL").ok().as_deref()
+                        == Some(self.config.ollama_model.as_str()) {
+                    crate::diagnostics::record("model", "ollama_action_request", json!({
+                        "prompt_bytes": prompt.len(),
+                        "system_bytes": system_prompt.len(),
+                        "schema_bytes": body["format"].to_string().len(),
+                        "bounded_controls": tiny.as_ref().map(|(_,_,aliases)|aliases.len()).unwrap_or(0),
+                        "num_ctx": body["options"]["num_ctx"].as_u64(),
+                        "num_predict": body["options"]["num_predict"].as_u64()
+                    }));
+                }
                 let inference_started = Instant::now();
                 let resp = self.client.post(&url).json(&body).send().await
                     .map_err(|e| anyhow::anyhow!("Local Ollama is unavailable; start the server and check Settings > AI & ML: {e}"))?
@@ -2672,6 +2687,31 @@ Interactive nodes JSON: {}"#,
         assert!(schema["properties"]["action"]["anyOf"].as_array().is_some());
         assert_eq!(aliases.get("c1").map(String::as_str), Some("native-control-0"));
         assert!(!aliases.values().any(|id| id=="invented-control"));
+    }
+
+    #[test]
+    fn qwen_cpu_reuses_native_action_schema_under_a_strict_perception_budget() {
+        let nodes: Vec<_> = (0..40).map(|i| json!({
+            "node_id": format!("control-{i}"), "tag": "a",
+            "role": "link", "label": format!("Accessibility source section number {i}"),
+            "is_sensitive": false, "href": format!("https://web.dev/learn/accessibility/section-{i}")
+        })).collect();
+        let raw = format!(
+            "Original user goal: Read accessibility recommendations and cite source.\\nAssigned stage objective: Inspect the official document.\\nNative completion gate: blocked - no exact citation yet\\nOrigin: https://web.dev/learn/accessibility\\nInteractive nodes JSON: {}",
+            json!(nodes)
+        );
+        let (regular, _, old_aliases) = ModelRouter::tiny_action_context(&raw);
+        let (short, schema, aliases) = ModelRouter::tiny_action_context_limited(&raw, 12, true);
+        assert_eq!(old_aliases.len(), 24);
+        assert!(aliases.len() <= 12);
+        assert!(short.len() < regular.len());
+        assert!(short.contains("Original user goal:"));
+        assert!(short.contains("Native completion gate: blocked"));
+        assert!(schema["properties"]["action"]["anyOf"].as_array().is_some());
+        assert!(!ModelRouter::tiny_choice_allowed(
+            &BrowserAction::Complete {summary: "Not verified".into()}, &schema
+        ));
+        assert!(!aliases.values().any(|value| value == "control-25"));
     }
 
     #[test]
