@@ -116,6 +116,8 @@ foreach($case in $cases){
       seconds=[math]::Round(((Get-Date)-$started).TotalSeconds,1)
       final_status=if($result){$result.status}else{'no verified result'}
       actions=if($result){$result.actions}else{0}
+      # Only quantitative model diagnostics, never the user goal or raw DOM.
+      model_performance=if($result){@($result.modelPerformance)}else{@()}
       errors=if($result){@($result.errors)}else{@('No machine-readable verified completion')}
       log=$logFile
     }
