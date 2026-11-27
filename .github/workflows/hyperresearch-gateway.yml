@@ -7,14 +7,14 @@ on:
       - 'tests/test_hyperresearch_*.py'
       - 'tests/run_hyperresearch_rust_ci.py'
       - 'src-tauri/src/agent/mcp.rs'
-      - 'tests/run_hyperresearch_rust_ci.py'
-      - 'src-tauri/src/agent/mcp.rs'
       - '.github/workflows/hyperresearch-gateway.yml'
   push:
     branches: [main]
     paths:
       - 'tools/hyperresearch_*.py'
       - 'tests/test_hyperresearch_*.py'
+      - 'tests/run_hyperresearch_rust_ci.py'
+      - 'src-tauri/src/agent/mcp.rs'
 
 permissions:
   contents: read
