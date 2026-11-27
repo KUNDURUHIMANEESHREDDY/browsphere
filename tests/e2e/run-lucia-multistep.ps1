@@ -25,6 +25,16 @@ if (-not $ExecutablePath) {
 if (-not $ExecutablePath -or -not (Test-Path $ExecutablePath)) {
     throw 'Browsphere native executable not found. Build the app first.'
 }
+$ExecutablePath = (Resolve-Path -LiteralPath $ExecutablePath).Path
+$executableWorkingDirectory = (Split-Path -Parent $ExecutablePath)
+# Restoration matters if an engineer invokes this script from their own
+# PowerShell session. The local test environment must never leak into it.
+$profileEnv = @{}
+foreach ($key in @('APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER',
+    'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT',
+    'LUCIA_MODEL_PORT','LUCIA_FIXTURE_PORT')) {
+    $profileEnv[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
+}
 
 $profile = Join-Path ([IO.Path]::GetTempPath()) ('lucia-native-e2e-' + [Guid]::NewGuid().ToString('N'))
 $env:APPDATA = Join-Path $profile 'Roaming'
@@ -79,7 +89,9 @@ try {
 
     Write-Host 'Starting isolated Browsphere native WebView2 fixture tests'
     $startupWatch=[Diagnostics.Stopwatch]::StartNew()
-    $appProcess = Start-Process -FilePath $ExecutablePath -WorkingDirectory $root -PassThru
+    # The app must start from its installation directory, not the source tree.
+    # Otherwise an unpackaged file could accidentally mask a broken bundle.
+    $appProcess = Start-Process -FilePath $ExecutablePath -WorkingDirectory $executableWorkingDirectory -PassThru
     try {
         Wait-ForLoopback "http://127.0.0.1:$CdpPort/json" 55
         $startupWatch.Stop()
@@ -177,5 +189,10 @@ try {
         Remove-ItemProperty -Path $cdpPolicyPath -Name $cdpPolicyName -ErrorAction SilentlyContinue
         Write-Host "Removed temporary CI-only WebView2 policy for $cdpPolicyName"
     }
-    Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
+    foreach ($key in $profileEnv.Keys) {
+        [Environment]::SetEnvironmentVariable($key, $profileEnv[$key], 'Process')
+    }
+    # Test profiles are disposable. An active WebView2 child may still hold a
+    # file briefly after the host exits; never force-stop unrelated processes.
+    Remove-Item -LiteralPath $profile -Recurse -Force -ErrorAction SilentlyContinue
 }
