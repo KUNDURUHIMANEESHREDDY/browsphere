@@ -5,7 +5,8 @@ param(
     [switch]$CloudCompat,
     [int]$CdpPort = 9272,
     [int]$ModelPort = 18766,
-    [int]$FixturePort = 18764
+    [int]$FixturePort = 18764,
+    [string]$PerfReportPath = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +38,8 @@ New-Item -ItemType Directory -Force $env:APPDATA, $env:LOCALAPPDATA, $env:WEBVIE
 
 $modelProcess = $null
 $appProcess = $null
+$startupMilliseconds = $null
+$startupWatch = $null
 # WebView2 150+ ignores CDP environment flags in elevated host processes.
 # GitHub Windows runners are elevated, so set a temporary machine-level
 # policy for this one executable in the ephemeral CI worker only.
@@ -75,9 +78,13 @@ try {
     Wait-ForLoopback "http://127.0.0.1:$FixturePort/health"
 
     Write-Host 'Starting isolated Browsphere native WebView2 fixture tests'
+    $startupWatch=[Diagnostics.Stopwatch]::StartNew()
     $appProcess = Start-Process -FilePath $ExecutablePath -WorkingDirectory $root -PassThru
     try {
         Wait-ForLoopback "http://127.0.0.1:$CdpPort/json" 55
+        $startupWatch.Stop()
+        $startupMilliseconds=[math]::Round($startupWatch.Elapsed.TotalMilliseconds,1)
+        Write-Host ("BROWSER_STARTUP_CDP_MS={0}" -f $startupMilliseconds)
     } catch {
         $appProcess.Refresh()
         Write-Host "Native app exited: $($appProcess.HasExited)"
@@ -135,6 +142,29 @@ try {
     }
     Write-Host 'PASS: multi-step native browsing, recovery, tab closure, and evidence checks'
 } finally {
+    if (-not [string]::IsNullOrWhiteSpace($PerfReportPath)) {
+        # Performance is a measured CI baseline, NOT an arbitrary marketing
+        # latency claim or aggregate of unrelated system WebView processes.
+        try {
+            $hostProcess=if ($appProcess) { Get-Process -Id $appProcess.Id -ErrorAction SilentlyContinue } else { $null }
+            $mb=1MB
+            $data=[ordered]@{
+                cdp_ready_ms=$startupMilliseconds
+                native_host_working_set_mb=if($hostProcess){[math]::Round($hostProcess.WorkingSet64/$mb,1)}else{$null}
+                native_host_peak_working_set_mb=if($hostProcess){[math]::Round($hostProcess.PeakWorkingSet64/$mb,1)}else{$null}
+                native_host_private_bytes_mb=if($hostProcess){[math]::Round($hostProcess.PrivateMemorySize64/$mb,1)}else{$null}
+                sample="single host-process sample after scenario; WebView2 child memory excluded"
+                ci_run=$env:GITHUB_RUN_ID
+                commit=$env:GITHUB_SHA
+                model_mode=if($CloudCompat){"mock-cloud"}else{"mock-local"}
+            }
+            New-Item -ItemType Directory -Force (Split-Path -Parent $PerfReportPath) | Out-Null
+            $data | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $PerfReportPath -Encoding UTF8
+            Write-Host ("BROWSER_HOST_PERF_REPORT_SAVED mode={0}" -f $data.model_mode)
+        } catch {
+            Write-Warning ("Could not record optional host performance baseline: " + $_.Exception.GetType().Name)
+        }
+    }
     if ($appProcess) { Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue }
     if ($modelProcess) { Stop-Process -Id $modelProcess.Id -Force -ErrorAction SilentlyContinue }
     $env:LUCIA_E2E_CLOUD_COMPAT = $previousCloudMode
