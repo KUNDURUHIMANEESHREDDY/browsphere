@@ -1769,18 +1769,26 @@ async fn run_live_visual_smoke(
         current.port()!=Some(18764)||current.path()!="/" {
         return Err("Refusing visual capture outside isolated localhost fixture".into());
     }
-    let before_signals=state.perception.status(&label).signal_count;
     let start=std::time::Instant::now();
     let first=agent::live_visual::sample(&app,&label).await?;
     let first_frame_ms=start.elapsed().as_millis() as u64;
     let first_frame_chars=first.len();
+    // Snapshot the counter immediately before mutation, not before a potentially
+    // slow first frame. Initial page-load signals must not count as evidence.
+    let before_signals=state.perception.status(&label).signal_count;
     // Mutate ONLY our throwaway local fixture, and verify a new native
     // BRPR signal as well as a distinct subsequent streamed image frame.
     agent::native_eval::eval_json(&app,&label,
         "(()=>{document.body.style.backgroundColor='rgb(24, 90, 175)'; \
             document.documentElement.style.backgroundColor='rgb(24, 90, 175)'; \
             return true;})()".into(),2000).await?;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let signaled=tokio::time::timeout(std::time::Duration::from_secs(2),async {
+        loop {
+            if state.perception.status(&label).signal_count>before_signals {break true;}
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.unwrap_or(false);
+    if !signaled{return Err("BRPR did not signal the isolated visual change".into());}
     let start=std::time::Instant::now();
     let second=agent::live_visual::sample(&app,&label).await?;
     let second_frame_ms=start.elapsed().as_millis() as u64;
