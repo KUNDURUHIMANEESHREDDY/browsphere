@@ -119,6 +119,13 @@ jobs:
           npm ci --prefix tests/interop --ignore-scripts --no-audit --no-fund
           npm test --prefix tests/interop
 
+      - name: Install official Stagehand and MCP SDKs for isolated integration only
+        shell: pwsh
+        working-directory: integrations/stagehand-mcp
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Upstream Stagehand/MCP dependency install failed' }
+
       - name: Download built NSIS installer
         uses: actions/download-artifact@v4
         with:
