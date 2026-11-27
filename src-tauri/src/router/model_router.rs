@@ -2670,13 +2670,11 @@ Interactive nodes JSON: {}"#,
             "is_sensitive":false,"is_submit":false
         })).collect();
         let raw=format!(
-            "Original user goal: Locate the official documentation.\\n\
-             Assigned stage objective: Open the relevant source.\\n\
-             Origin: https://www.w3.org/WAI/tutorials/images/\\n\
-             Interactive nodes JSON: {}",json!(nodes)
+            "Original user goal: Locate the official documentation.\nAssigned stage objective: Open the relevant source.\nOrigin: https://www.w3.org/WAI/tutorials/images/\nInteractive nodes JSON: {}",
+            json!(nodes)
         );
-        let (default_prompt, default_schema, default_aliases)=Self::tiny_action_context(&raw);
-        let (fast_prompt, fast_schema, fast_aliases)=Self::tiny_action_context_with_limit(&raw,12);
+        let (default_prompt, default_schema, default_aliases)=ModelRouter::tiny_action_context(&raw);
+        let (fast_prompt, fast_schema, fast_aliases)=ModelRouter::tiny_action_context_with_limit(&raw,12);
         assert_eq!(default_aliases.len(),24);
         assert_eq!(fast_aliases.len(),12);
         assert!(fast_prompt.len()<default_prompt.len());
@@ -2685,17 +2683,17 @@ Interactive nodes JSON: {}"#,
         assert!(fast_aliases.get("c13").is_none());
         let safe=BrowserAction::Click{node_id:"c1".into(),
             element_label:"Official documentation section 0".into(),is_submit:false};
-        assert!(Self::tiny_choice_allowed(&safe,&fast_schema));
+        assert!(ModelRouter::tiny_choice_allowed(&safe,&fast_schema));
         let mut safe=safe;
-        assert!(Self::resolve_tiny_action(&mut safe,&fast_aliases));
+        assert!(ModelRouter::resolve_tiny_action(&mut safe,&fast_aliases));
         assert!(matches!(safe,BrowserAction::Click{node_id,..} if node_id=="native-node-0"));
         let forged=BrowserAction::Click{node_id:"c17".into(),
             element_label:"Not observed".into(),is_submit:false};
-        assert!(!Self::tiny_choice_allowed(&forged,&fast_schema));
-        assert!(!Self::tiny_choice_allowed(
+        assert!(!ModelRouter::tiny_choice_allowed(&forged,&fast_schema));
+        assert!(!ModelRouter::tiny_choice_allowed(
             &BrowserAction::Complete{summary:"Done".into()},
-            &Self::tiny_action_context_with_limit(
-                &format!("Native completion gate: blocked - no source evidence\\n{raw}"),12
+            &ModelRouter::tiny_action_context_with_limit(
+                &format!("Native completion gate: blocked - no source evidence\n{raw}"),12
             ).1
         ));
     }
