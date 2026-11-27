@@ -1,0 +1,84 @@
+name: Lucia experimental upstream Stagehand and rmcp interoperability
+
+on:
+  push:
+    branches: [feature/browsphere-stagehand-mcp-upstream-20261127]
+  pull_request:
+    paths:
+      - 'integrations/stagehand-mcp/**'
+      - 'integrations/rmcp-probe/**'
+      - '.github/workflows/lucia-upstream-stagehand-rmcp.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stagehand-rmcp-interop:
+    name: Real Stagehand + official Rust MCP SDK (isolated Windows runner)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install upstream Stagehand and official TypeScript MCP SDK
+        shell: pwsh
+        run: |
+          npm install --prefix integrations/stagehand-mcp --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Upstream npm install failed' }
+      - name: Run source and policy checks
+        shell: pwsh
+        run: |
+          npm run check --prefix integrations/stagehand-mcp
+          if ($LASTEXITCODE -ne 0) { throw 'Static upstream integration checks failed' }
+          npm run test --prefix integrations/stagehand-mcp
+          if ($LASTEXITCODE -ne 0) { throw 'Upstream integration policy tests failed' }
+      - name: Exercise actual Stagehand browser on an isolated local fixture
+        shell: pwsh
+        timeout-minutes: 8
+        run: |
+          npm run smoke --prefix integrations/stagehand-mcp
+          if ($LASTEXITCODE -ne 0) { throw 'Actual upstream Stagehand browser inspection failed' }
+      - name: Compile and test official Rust MCP SDK acceptance client
+        shell: pwsh
+        timeout-minutes: 18
+        run: |
+          cargo test --manifest-path integrations/rmcp-probe/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Official rmcp SDK compilation or policy test failed' }
+      - name: Connect official Rust MCP SDK to upstream Stagehand MCP server
+        shell: pwsh
+        timeout-minutes: 6
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:BROWSPHERE_STAGEHAND_ENABLE = '1'
+          $env:BROWSPHERE_STAGEHAND_MCP_PORT = '18888'
+          $server = Start-Process -FilePath 'node' -ArgumentList 'integrations/stagehand-mcp/server.mjs' -PassThru -WindowStyle Hidden
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 30; $i++) {
+              try {
+                $client = [System.Net.Sockets.TcpClient]::new('127.0.0.1',18888)
+                $client.Dispose()
+                $ready = $true
+                break
+              } catch { Start-Sleep -Milliseconds 500 }
+            }
+            if (-not $ready) { throw 'Stagehand MCP sidecar did not start on loopback' }
+            cargo run --quiet --manifest-path integrations/rmcp-probe/Cargo.toml -- http://127.0.0.1:18888/mcp
+            if ($LASTEXITCODE -ne 0) { throw 'Official rmcp SDK could not discover Stagehand tools' }
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
+      - name: Retain resolved dependency lock for reproducibility review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stagehand-experimental-resolved-npm-lock
+          path: integrations/stagehand-mcp/package-lock.json
+          if-no-files-found: warn
+          retention-days: 14
