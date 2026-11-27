@@ -8,6 +8,7 @@ pub mod evidence_verifier;
 pub mod intent_router;
 pub mod native_eval;
 pub mod vision;
+pub mod live_visual;
 pub mod writer;
 pub mod semantic_core;
 pub mod action_intelligence;
