@@ -21,7 +21,8 @@ function cloudPhase(messages) {
   if (system.includes('autonomous browser task planner')) return 'planner';
   if (system.includes('independent, read-only evidence-review specialist') ||
       system.includes('check whether these source-backed findings answer the user')) return 'verifier';
-  if (system.includes('browser agent working under lucia')) return 'actions';
+  if (system.includes('browser agent working under lucia') ||
+      system.includes('you propose exactly one browser action for lucia')) return 'actions';
   return 'other';
 }
 
