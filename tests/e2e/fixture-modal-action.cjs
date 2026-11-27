@@ -4,8 +4,9 @@
 // that the requested details dialog really is open.
 function closeObservedDetailsDialog(page, nodes) {
   if (typeof page!=='string' || !Array.isArray(nodes)) return null;
-  const open=/(?:active dialog:|details dialog is open|dialog is open)/i.test(page) &&
-    !/(?:dialog not opened|dialog closed successfully)/i.test(page);
+  // Other background controls (e.g. "Keyboard dialog not opened") are
+  // irrelevant; the active native modal and its live close button decide.
+  const open=/(?:active dialog:|details dialog is open|dialog is open)/i.test(page);
   if (!open) return null;
   const close=nodes.find(node=>node && node.label==='Close details' &&
     node.tag==='button' && typeof node.node_id==='string' && !node.is_sensitive);
