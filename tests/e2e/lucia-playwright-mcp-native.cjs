@@ -3,6 +3,7 @@
 // throwaway WebView2 profile, mock model, isolated ports, and all subprocesses.
 const assert = require('node:assert/strict');
 const net = require('node:net');
+const fs = require('node:fs');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const cdpPort = Number(process.env.LUCIA_CDP_PORT || 9277);
 const mcpPort = Number(process.env.LUCIA_MCP_PORT || 18931);
@@ -120,6 +121,12 @@ async function main(){
       .filter(line=>line.trimStart().startsWith('- '+role+' ')).length]));
   assert.ok(Object.values(counts).some(count=>count>0),
     'No accessibility roles in the real native shell');
+  // Transfer only the exact disposable page URL to the ignored Rust live test.
+  // The URL is never emitted as a model observation or logged by this check.
+  if (process.env.LUCIA_PLAYWRIGHT_NATIVE_PAGE_FILE) {
+    fs.writeFileSync(process.env.LUCIA_PLAYWRIGHT_NATIVE_PAGE_FILE,url,
+      {encoding:'utf8',flag:'wx'});
+  }
   // Only safe metrics go into the CI log, never a snapshot or page contents.
   console.log('LUCIA_UPSTREAM_PLAYWRIGHT_WEBVIEW2_PASS',JSON.stringify({
     provider:'microsoft/playwright-mcp',transport:'streamable_http',
