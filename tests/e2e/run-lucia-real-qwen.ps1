@@ -22,10 +22,16 @@ New-Item -Force -ItemType Directory $profile,$binaryDir,$env:OLLAMA_MODELS | Out
 $server = $null
 try {
     # Pin to a published official release. Do not pipe remote scripts to PowerShell.
-    $source = 'https://github.com/ollama/ollama/releases/download/v0.20.2/ollama-windows-amd64.zip'
+    $source = 'https://github.com/ollama/ollama/releases/download/v0.40.18/ollama-windows-amd64.zip'
     Write-Host 'Fetching pinned official Ollama Windows portable CLI.'
     Invoke-WebRequest -Uri $source -OutFile $zip -MaximumRetryCount 2 -RetryIntervalSec 3
-    if ((Get-Item $zip).Length -lt 1000000) { throw 'Ollama portable archive appears truncated' }
+    # Pin both the official release URL and GitHub's published asset checksum.
+    # The full CPU-capable Windows archive is ~1.7 GB; no arbitrary URL fallback.
+    if ((Get-Item $zip).Length -ne 1717307988) { throw 'Official Ollama archive length mismatch' }
+    $expectedSha256 = 'ca97292ac1e9acc77fcf473bb2741fa6acd12e3798f261b419680068b7cc4c16'
+    if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSha256) {
+        throw 'Official Ollama archive checksum mismatch'
+    }
     Expand-Archive -Path $zip -DestinationPath $binaryDir -Force
     $ollamaExe = Get-ChildItem -Path $binaryDir -Filter ollama.exe -File -Recurse | Select-Object -First 1 -ExpandProperty FullName
     if (-not $ollamaExe) { throw 'Portable package did not contain ollama.exe' }
