@@ -31,6 +31,17 @@ $failures=[System.Collections.Generic.List[string]]::new()
 $nativePassed=$false
 $cloudPassed=$false
 $uninstallPassed=$false
+function Assert-ProcessTreeMeasurements([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { throw "Process tree performance evidence missing." }
+    $metrics = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    if ($metrics.process_tree_sample_count -lt 2 -or $metrics.webview2_child_count_peak -lt 1 -or
+        $metrics.process_tree_working_set_mb_p95 -le 0 -or
+        $metrics.process_tree_working_set_mb_peak -lt $metrics.webview2_working_set_mb_peak) {
+        throw "The installed browser did not yield credible owned-WebView2 process tree samples."
+    }
+    Write-Host ("OWNED_WEBVIEW2_PROCESS_TREE_OK: observations={0} children_peak={1} total_p95_mb={2}" -f
+        $metrics.process_tree_sample_count,$metrics.webview2_child_count_peak,$metrics.process_tree_working_set_mb_p95)
+}
 try {
     # Both /S and /D are NSIS documented options; /D=<path> must be last.
     $installation=Start-Process -FilePath $source -ArgumentList @('/S',"/D=$destination") -Wait -PassThru
@@ -51,11 +62,13 @@ try {
     # and loopback model, never system accounts or external write privileges.
     & (Join-Path $root 'tests\e2e\run-lucia-multistep.ps1') -ExecutablePath $executable -CdpPort 9317 -ModelPort 18817 -FixturePort 18818 -PerfReportPath (Join-Path $EvidenceDirectory 'native-process-metrics.json')
     if ($LASTEXITCODE -ne 0) { throw 'Installed native Windows task E2E failed.' }
+    Assert-ProcessTreeMeasurements (Join-Path $EvidenceDirectory 'native-process-metrics.json')
     $nativePassed=$true
     Write-Host 'CLEAN_INSTALLED_NATIVE_E2E_PASS'
 
     & (Join-Path $root 'tests\e2e\run-lucia-multistep.ps1') -ExecutablePath $executable -CloudCompat -CdpPort 9318 -ModelPort 18819 -FixturePort 18820 -PerfReportPath (Join-Path $EvidenceDirectory 'cloud-process-metrics.json')
     if ($LASTEXITCODE -ne 0) { throw 'Installed cloud-compatible Windows task E2E failed.' }
+    Assert-ProcessTreeMeasurements (Join-Path $EvidenceDirectory 'cloud-process-metrics.json')
     $cloudPassed=$true
     Write-Host 'CLEAN_INSTALLED_CLOUD_E2E_PASS'
 
