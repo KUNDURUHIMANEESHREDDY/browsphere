@@ -1,0 +1,54 @@
+name: Lucia upstream BrowserGym and Browser Use capability tests
+
+# Upstream frameworks stay separate from consumer Browsphere. Both test jobs
+# use disposable Linux runners and must not inherit credentials or user profiles.
+on:
+  push:
+    branches: [feature/lucia-stagehand-upstream-action-readback-20261127]
+    paths:
+      - '.github/workflows/lucia-upstream-benchmarks.yml'
+      - 'tests/upstream/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browsergym-upstream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned official BrowserGym research environment
+        run: |
+          python -m pip install --disable-pip-version-check 'browsergym-core==0.14.3'
+          python -m playwright install --with-deps chromium
+      - name: Run BrowserGym's own real browser and action environment
+        run: python tests/upstream/browsergym_smoke.py
+
+  browser-use-upstream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      BROWSER_USE_AUTO_LOGIN: 'false'
+      ANONYMIZED_TELEMETRY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install official Browser Use engine at its exact upstream release
+        run: python -m pip install --disable-pip-version-check 'browser-use==1.0.9'
+      - name: Verify local Chromium binary (never a user profile)
+        shell: bash
+        run: |
+          command -v google-chrome || command -v chromium || command -v chromium-browser || exit 1
+      - name: Run Browser Use's upstream local browser engine
+        run: python tests/upstream/browser_use_smoke.py
