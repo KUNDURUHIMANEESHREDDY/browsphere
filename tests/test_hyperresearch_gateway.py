@@ -47,7 +47,7 @@ class HyperresearchGatewayTests(unittest.TestCase):
         for internal in ("http://127.0.0.1/secret", "http://[::1]/config",
                          "http://192.168.1.1/", "https://localhost/",
                          "https://service.internal/", "http://10.0.0.2/",
-                         "https://example.org/evil\\rInjected"):
+                         "https://example.org/evil" + chr(13) + "Injected"):
             with self.subTest(internal=internal):
                 self.assertIsNone(core.public_source(internal))
 
