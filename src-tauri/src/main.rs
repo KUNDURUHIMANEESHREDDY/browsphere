@@ -1762,13 +1762,27 @@ async fn run_live_visual_smoke(
     if webview.label()!="main"||std::env::var("GITHUB_ACTIONS").ok().as_deref()!=Some("true"){
         return Err("Live frame acceptance test requires trusted isolated CI".into());
     }
-    let label=state.tabs.active_webview_label().await;
+    // Bind this CI-only test to the fixture by exact native tab identity.
+    // The browser chrome may switch its active tab asynchronously, so using
+    // active_webview_label would sample the wrong tab or an empty BRPR cache.
+    let label=TabManagerState::sanitize_label("live-visual-fixture");
     let child=app.get_webview(&label).ok_or("No isolated WebView2 fixture")?;
     let current=child.url().map_err(|_|"Fixture URL unavailable")?;
     if current.scheme()!="http"||current.host_str()!=Some("127.0.0.1")||
         current.port()!=Some(18764)||current.path()!="/" {
         return Err("Refusing visual capture outside isolated localhost fixture".into());
     }
+    // The test fixture must have completed loading and be visible before CDP
+    // can reasonably deliver screencast frame events on a Windows CI worker.
+    let mut ready=false;
+    for _ in 0..30 {
+        if agent::native_eval::eval_json(&app,&label,
+            "document.readyState === 'complete'".into(),1000).await.ok()
+            .and_then(|v|v.as_bool())==Some(true){ready=true;break;}
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if !ready{return Err("Isolated visual fixture never finished loading".into());}
+    child.show().map_err(|_|"Could not display isolated visual fixture")?;
     let start=std::time::Instant::now();
     let first=agent::live_visual::sample(&app,&label).await?;
     let first_frame_ms=start.elapsed().as_millis() as u64;
