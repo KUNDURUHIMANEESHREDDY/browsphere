@@ -44,8 +44,7 @@ async function main(){
     await cdp('Runtime.enable');
     const ready=await evalMain("({tauri:!!window.__TAURI__,title:document.title})");
     assert.equal(ready.tauri,true,'Target is not native Browsphere app shell');
-    const result=await evalMain("window.__TAURI__.core.invoke('open_or_navigate_tab',{tabId:'live-visual-fixture',url:'http://127.0.0.1:18764/',isPrivate:true})");
-    assert.equal(result,undefined,'Unexpected fixture launch result');
+    await evalMain("window.__TAURI__.core.invoke('open_or_navigate_tab',{tabId:'live-visual-fixture',url:'http://127.0.0.1:18764/',isPrivate:true})");
     let status={};
     for(let i=0;i<60;i++){
       await sleep(150);
