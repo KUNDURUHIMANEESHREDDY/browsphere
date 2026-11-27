@@ -214,10 +214,10 @@ try {
         # implementation. Observe shell metadata only; never act on the UI.
         $env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI='1'
         try {
-            Write-Host 'Checking official Stagehand CDP attachment to installed WebView2'
+            Write-Host 'Checking official Stagehand localBrowser.connect read-only attachment (full extension init is a separate experimental probe)'
             & node (Join-Path $root 'integrations\stagehand-mcp\webview2-attach.ci.mjs')
             if ($LASTEXITCODE -ne 0) {
-                throw 'Upstream Stagehand cannot attach to the installed WebView2 CI profile; no native Stagehand backend was enabled'
+                throw 'Official Stagehand localBrowser.connect failed against installed WebView2; full Stagehand extension initialization remains unverified'
             }
         } finally { Remove-Item Env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI -ErrorAction SilentlyContinue }
         Write-Host 'Checking official Stagehand MCP tools through actual installed Lucia chatbox'
