@@ -2740,7 +2740,7 @@ Interactive nodes JSON: {}"#,
         assert!(fast_schema.to_string().len()<default_schema.to_string().len());
         assert!(fast_prompt.len() < 1450, "CPU Qwen must not resend verbose control JSON");
         assert!(fast_prompt.contains("c1/"));
-        assert!(!fast_prompt.contains("\\"node_id\\""), "Do not serialize redundant full control objects to CPU Qwen");
+        assert!(!fast_prompt.contains(r#""node_id""#), "Do not serialize redundant full control objects to CPU Qwen");
 
         // Qwen now sends Ollama `format:"json"`, not this schema grammar.
         // Preserve its complete native verifier instead of artificially
