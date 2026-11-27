@@ -1,0 +1,59 @@
+name: Lucia upstream Browser Use — genuine Qwen research
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lucia-browser-use-qwen-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  official-browser-use:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: integrations/browser-use-qwen/requirements.txt
+
+      - name: Independently test source-evidence and CI-only policies
+        shell: pwsh
+        run: |
+          python -m unittest discover -s integrations/browser-use-qwen -p test_trial.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Untrusted-source or CI-only policy regression' }
+
+      - name: Install real upstream Browser Use agent
+        shell: pwsh
+        run: |
+          python -m pip install -r integrations/browser-use-qwen/requirements.txt --disable-pip-version-check --no-input
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned upstream Browser Use could not be installed' }
+          python -c "from browser_use import Agent, Browser, ChatOpenAI; print('OFFICIAL_BROWSER_USE_1X_IMPORTED')"
+          if ($LASTEXITCODE -ne 0) { throw 'Upstream Browser Use public API mismatch' }
+
+      - name: Run actual Qwen browser research on unfamiliar official websites
+        shell: pwsh
+        timeout-minutes: 27
+        env:
+          LUCIA_UPSTREAM_AUTONOMY_TEST: '1'
+          LUCIA_OLLAMA_MODEL: qwen2.5:3b-instruct
+          BROWSER_USE_AUTO_LOGIN: 'false'
+        run: |
+          ./integrations/browser-use-qwen/run_ci.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Real-model source-verified research failed' }
+
+      - name: Retain non-sensitive results, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lucia-Upstream-Browser-Use-Qwen
+          path: ${{ runner.temp }}/lucia-browser-use-*.json
+          if-no-files-found: warn
+          retention-days: 14
