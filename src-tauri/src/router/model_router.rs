@@ -2546,12 +2546,14 @@ mod tests {
         })).collect();
         let source = "Untrusted visible accessibility source text. ".repeat(120);
         let raw = format!(
-            "Original user goal: Read a specific official source and cite evidence.\\n\
-             Assigned stage objective: Navigate to observed source section.\\n\
-             Origin: https://www.w3.org/WAI/tutorials/images/\\n\
-             Title: W3C accessibility guide\\n\
-             <untrusted_page_data origin=\\\"https://www.w3.org/WAI/tutorials/images/\\\">\n{source}\n</untrusted_page_data>\\n\
-             Interactive nodes JSON: {}",
+            r#"Original user goal: Read a specific official source and cite evidence.
+Assigned stage objective: Navigate to observed source section.
+Origin: https://www.w3.org/WAI/tutorials/images/
+Title: W3C accessibility guide
+<untrusted_page_data origin="https://www.w3.org/WAI/tutorials/images/">
+{source}
+</untrusted_page_data>
+Interactive nodes JSON: {}"#,
             json!(controls)
         );
         let (prompt, schema, aliases) = ModelRouter::tiny_action_context(&raw);
