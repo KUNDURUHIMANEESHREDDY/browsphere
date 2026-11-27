@@ -278,8 +278,8 @@ fn parse_playwright_snapshot(text:&str,expected_url:&str)->Option<PlaywrightPage
         // "Open tabs" header before the current Page section.
         .or_else(||{
             let tabs=text.strip_prefix("### Open tabs\n")?;
-            if tabs.len()>16384 {return None}
-            tabs.split_once("\n### Page\n").map(|(_,page)|page)
+            let (index,page)=tabs.split_once("\n### Page\n")?;
+            (index.len()<=4096).then_some(page)
         })?;
     let (header,tree)=page.split_once("\n### Snapshot\n")?;
     let page_url=header.lines().find_map(|line|line.strip_prefix("- Page URL: "))?;
