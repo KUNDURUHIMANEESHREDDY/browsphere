@@ -3842,6 +3842,10 @@ async fn run_browser_loop(
         // assertions. A second LLM pass must return exact source quotes that
         // the Rust verifier can match to real captured WebView pages.
         let mut verification_failure_reason:Option<String>=None;
+        // Capture the actual selected verifier route before the local model
+        // router leaves scope. The outer 'router' is an Arc<Mutex<...>> and
+        // cannot itself establish which model performed passage selection.
+        let mut verifier_route:Option<(String,bool)>=None;
         if orchestrator.specialist() == Specialist::Verification
             && matches!(decision, PolicyDecision::Allow)
         {
@@ -3953,7 +3957,9 @@ async fn run_browser_loop(
                         let router=if !selected.get_config().planner_model.trim().is_empty()||research_lookup {
                             selected.local_reasoner(&snapshot.origin).or_else(||selected.local_supervisor(&snapshot.origin)).unwrap_or(selected)
                         } else if used_reviewer {selected.local_supervisor(&snapshot.origin).unwrap_or(selected)} else {selected};
-                        let _=app.emit("agent:model_role",serde_json::json!({"run_id":run_id,"role":"verifier","model":router.role_model("action",&snapshot.origin),"status":"selected"}));
+                        let selected_model=router.role_model("action",&snapshot.origin);
+                        verifier_route=Some((selected_model.clone(),router.select_backend(&snapshot.origin)=="ollama"));
+                        let _=app.emit("agent:model_role",serde_json::json!({"run_id":run_id,"role":"verifier","model":selected_model,"status":"selected"}));
                         let named=crate::agent::deliberation::named_research_entities(&goal);
                         let evidence:Vec<_>=if research_lookup||current_reference {
                             orchestrator.evidence.iter().filter(|e|e.url==snapshot.origin).cloned().collect()
@@ -4006,10 +4012,10 @@ async fn run_browser_loop(
                             // binding, objective coverage, and independent
                             // evidence review all passed. A model route or
                             // valid JSON response alone cannot emit this proof.
-                            let model=router.role_model("action",&snapshot.origin);
+                            let model=verifier_route.as_ref().map(|(name,_)|name.as_str()).unwrap_or("");
                             if crate::agent::policy::requested_compound_page_entry_url(&goal).is_some()
                                 &&goal.to_ascii_lowercase().contains("report one ")
-                                &&router.select_backend(&snapshot.origin)=="ollama"
+                                &&verifier_route.as_ref().is_some_and(|(_,ollama)|*ollama)
                                 &&model.to_ascii_lowercase().starts_with("qwen")
                                 &&report.status=="evidence_checked"
                                 &&!report.findings.is_empty()
