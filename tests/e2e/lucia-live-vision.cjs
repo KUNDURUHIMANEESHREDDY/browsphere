@@ -58,13 +58,17 @@ async function main(){
     }
     assert.equal(ready?.tauri,true,'The isolated target never exposed the trusted Tauri API');
     await evalMain("window.__TAURI__.core.invoke('open_or_navigate_tab',{tabId:'live-visual-fixture',url:'http://127.0.0.1:18764/',isPrivate:true})");
+    // A newly created tab may not yet have a populated BRPR DOM cache.
+    // Require the native tab's initial invalidation; the smoke itself later
+    // requires a *new* BRPR signal after the visible page mutation.
     let status={};
     for(let i=0;i<60;i++){
       await sleep(150);
       status=await evalMain("window.__TAURI__.core.invoke('get_brpr_status')");
-      if(status?.cached&&!status?.dirty)break;
+      if(status?.signal_count>0)break;
     }
-    assert.ok(status?.cached,'BRPR never observed isolated visual fixture');
+    assert.ok(status?.signal_count>0,
+      'The isolated tab never registered with native BRPR');
     const resultData=await evalMain("window.__TAURI__.core.invoke('run_live_visual_smoke')");
     assert.equal(resultData.changed,true,'Live CDP frames did not reflect a DOM visual change');
     assert.equal(resultData.brpr_signaled,true,'BRPR did not signal that visual change');
