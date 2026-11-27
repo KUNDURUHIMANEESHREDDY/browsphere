@@ -1603,10 +1603,23 @@ async fn run_browser_loop(
         let selected_model = {router.lock().await.clone()};
         let selected_model = selected_model.adaptive_reasoning_profile(&goal,&snapshot.origin,false).await;
         let _=app.emit("agent:model_role",serde_json::json!({"run_id":run_id,"role":"planner","model":selected_model.role_model("planner",&snapshot.origin),"status":"selected"}));
+        // Reuse Microsoft's Playwright MCP accessibility snapshot only when
+        // the user has configured the trusted loopback, read-only tool. It is
+        // queried once on difficult initial pages and cannot dispatch actions,
+        // create evidence, or override our native WebView2 DOM observation.
+        let page_kind=crate::agent::page_understanding::classify(&snapshot).kind;
+        let upstream=if !private_mode && matches!(page_kind,
+            crate::agent::page_understanding::PageKind::Unknown |
+            crate::agent::page_understanding::PageKind::Dialog |
+            crate::agent::page_understanding::PageKind::Autocomplete) {
+            crate::agent::mcp::playwright_page_hints(
+                &crate::resolve_data_dir().join("mcp-servers.json"),
+                &snapshot.origin,cancel.clone()).await
+        } else {None};
         let result=tokio::select!{
             _=cancel.cancelled()=>return Ok("cancelled".into()),
             result=tokio::time::timeout(std::time::Duration::from_secs(120),
-                selected_model.plan_for_origin_with_page(&goal,&snapshot.origin,&creds,&snapshot))=>result
+                selected_model.plan_for_origin_with_page_and_upstream(&goal,&snapshot.origin,&creds,&snapshot,upstream.as_ref()))=>result
         };
         match result{
             Ok(Ok(plan))=>plan,
