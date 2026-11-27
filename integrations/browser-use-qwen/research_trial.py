@@ -62,6 +62,21 @@ def independently_fetch(url):
             raise ValueError("Source HTML exceeds independent evidence limit")
         return data.decode("utf-8", errors="replace")
 
+def ollama_preflight():
+    # Keep this diagnostic separate from the much larger Browser Use prompt.
+    # A tiny response failing proves the model endpoint, not the browser, is blocked.
+    payload = json.dumps({"model": MODEL, "messages": [
+        {"role": "user", "content": "Reply exactly READY."}
+    ], "max_tokens": 16, "stream": False}).encode("utf-8")
+    request = Request("http://127.0.0.1:11434/v1/chat/completions",
+        data=payload, headers={"Content-Type": "application/json",
+                               "Authorization": "Bearer ollama"})
+    with urlopen(request, timeout=65) as response:
+        result = json.load(response)
+    if not result.get("choices"):
+        raise ValueError("Ollama returned no model completion")
+
+
 async def trial(name):
     if os.getenv("GITHUB_ACTIONS") != "true" or os.getenv("LUCIA_UPSTREAM_AUTONOMY_TEST") != "1":
         raise RuntimeError("Model-written Python requires explicit ephemeral CI authorization")
@@ -77,27 +92,51 @@ async def trial(name):
     result = {"case": name, "model": MODEL, "source": url, "passed": False,
               "agent_done": False, "quote_verified": False}
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="browsphere-upstream-qwen-") as workspace:
-        agent = Agent(
-            f"Open ONLY {url}. {objective} No logins, form submissions, downloads, file operations, "
-            "OS commands or other sites. Return source_url as the exact requested page, "
-            "quote as a contiguous verbatim recommendation from the visible document, "
-            "and claim as the IDENTICAL quote. If unable, do not invent passages.",
-            llm=ChatOpenAI(model=MODEL, base_url="http://127.0.0.1:11434/v1", api_key="ollama"),
-            browser=Browser("chromium", allowed_domains=[urlsplit(url).hostname], block_ip_addresses=True),
-            output_model_schema=Finding, web_search=False, workspace=workspace,
-        )
-        history = await asyncio.wait_for(agent.run(max_steps=9), timeout=270)
-        result["agent_done"] = bool(history.is_done())
-        result["steps"] = history.number_of_steps()
-        finding = getattr(history, "structured_output", None)
-        if isinstance(finding, dict):
-            finding = Finding.model_validate(finding)
-        if result["agent_done"] and isinstance(finding, Finding):
-            original = await asyncio.to_thread(independently_fetch, url)
-            result["quote_verified"] = quote_verified(url, finding.source_url,
-                finding.quote, finding.claim, original)
-            result["passed"] = result["quote_verified"]
+    phase = "ollama_preflight"
+    try:
+        phase_started = time.monotonic()
+        await asyncio.to_thread(ollama_preflight)
+        result["ollama_preflight_s"] = round(time.monotonic() - phase_started, 1)
+        with tempfile.TemporaryDirectory(prefix="browsphere-upstream-qwen-") as workspace:
+            browser = Browser("chromium", allowed_domains=[urlsplit(url).hostname],
+                              block_ip_addresses=True)
+            try:
+                phase = "browser_start"
+                phase_started = time.monotonic()
+                await asyncio.wait_for(browser.start(), timeout=60)
+                result["browser_start_s"] = round(time.monotonic() - phase_started, 1)
+                phase = "agent_run"
+                agent = Agent(
+                    f"Open ONLY {url}. {objective} No logins, form submissions, downloads, file operations, "
+                    "OS commands or other sites. Return source_url as the exact requested page, "
+                    "quote as a contiguous verbatim recommendation from the visible document, "
+                    "and claim as the IDENTICAL quote. If unable, do not invent passages.",
+                    llm=ChatOpenAI(model=MODEL, base_url="http://127.0.0.1:11434/v1",
+                                   api_key="ollama"),
+                    browser=browser, output_model_schema=Finding,
+                    mode="ultrafast", max_context_chars=5000,
+                    web_search=False, workspace=workspace,
+                )
+                history = await asyncio.wait_for(agent.run(max_steps=9), timeout=210)
+                result["agent_done"] = bool(history.is_done())
+                result["steps"] = history.number_of_steps()
+                finding = getattr(history, "structured_output", None)
+                if isinstance(finding, dict):
+                    finding = Finding.model_validate(finding)
+                if result["agent_done"] and isinstance(finding, Finding):
+                    phase = "independent_quote"
+                    original = await asyncio.to_thread(independently_fetch, url)
+                    result["quote_verified"] = quote_verified(url, finding.source_url,
+                        finding.quote, finding.claim, original)
+                    result["passed"] = result["quote_verified"]
+            finally:
+                try:
+                    await asyncio.wait_for(browser.stop(), timeout=20)
+                except Exception as cleanup_error:
+                    result["cleanup_error_type"] = type(cleanup_error).__name__
+    except Exception as exc:
+        result["error_type"] = type(exc).__name__
+    result["phase"] = "completed" if result["passed"] else phase
     result["seconds"] = round(time.monotonic() - started, 1)
     return result
 

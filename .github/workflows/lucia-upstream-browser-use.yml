@@ -51,6 +51,7 @@ jobs:
           LUCIA_UPSTREAM_AUTONOMY_TEST: '1'
           LUCIA_OLLAMA_MODEL: qwen2.5:3b-instruct
           BROWSER_USE_AUTO_LOGIN: 'false'
+          ANONYMIZED_TELEMETRY: 'false'
         run: |
           ./integrations/browser-use-qwen/run_ci.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Real-model source-verified research failed' }

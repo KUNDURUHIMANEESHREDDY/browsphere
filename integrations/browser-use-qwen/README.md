@@ -20,7 +20,13 @@ independent public-source match; **not** installed Lucia task completion,
 security isolation, or release readiness.
 
 Run `python -m unittest discover -s integrations/browser-use-qwen -p test_trial.py`
-for the no-dependency unit tests. The GitHub Actions workflow
+for the no-dependency unit tests. The first official upstream Qwen run (2026-11-27, Windows Actions) failed
+both cases with agent timeouts before any completed steps (0/2); it did
+**not** prove Browser Use could finish these tasks. The next experiment
+separately measures Ollama readiness, isolated browser startup and agent
+execution, and uses upstream Browser Use's bounded ultrafast observation mode.
+
+The GitHub Actions workflow
 `lucia-upstream-browser-use.yml` runs the genuine Qwen comparison by
 explicit manual dispatch, writes a result JSON for each site even on
 failure, and uploads the evidence. An independent run must pass at least
