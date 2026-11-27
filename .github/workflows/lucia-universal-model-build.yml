@@ -39,6 +39,8 @@ jobs:
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml --locked --jobs 2 adaptive_reasoning_is_capability_gated_and_honors_custom_roles
           if ($LASTEXITCODE -ne 0) { throw 'Generic role routing regression failed' }
+          cargo test --manifest-path src-tauri/Cargo.toml --locked --jobs 2 failed_reference_recovery_cannot_repeat_unauthorized_navigation
+          if ($LASTEXITCODE -ne 0) { throw 'Read-only reference recovery source-scope regression failed' }
           cargo test --manifest-path src-tauri/Cargo.toml --locked --jobs 2 explicit_source_catalog_excludes_context_only_unrelated_passages
           if ($LASTEXITCODE -ne 0) { throw 'Evidence verifier regression failed' }
           cargo test --manifest-path src-tauri/Cargo.toml --locked --jobs 2 capability_registry::tests
