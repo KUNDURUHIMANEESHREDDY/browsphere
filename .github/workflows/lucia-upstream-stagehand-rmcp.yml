@@ -29,21 +29,30 @@ jobs:
       - name: Install upstream Stagehand and official TypeScript MCP SDK
         shell: pwsh
         run: |
-          npm install --prefix integrations/stagehand-mcp --no-audit --no-fund
-          if ($LASTEXITCODE -ne 0) { throw 'Upstream npm install failed' }
+          Push-Location integrations/stagehand-mcp
+          try {
+            npm install --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { throw 'Upstream npm install failed' }
+          } finally { Pop-Location }
       - name: Run source and policy checks
         shell: pwsh
         run: |
-          npm run check --prefix integrations/stagehand-mcp
-          if ($LASTEXITCODE -ne 0) { throw 'Static upstream integration checks failed' }
-          npm run test --prefix integrations/stagehand-mcp
-          if ($LASTEXITCODE -ne 0) { throw 'Upstream integration policy tests failed' }
+          Push-Location integrations/stagehand-mcp
+          try {
+            npm run check
+            if ($LASTEXITCODE -ne 0) { throw 'Static upstream integration checks failed' }
+            npm run test
+            if ($LASTEXITCODE -ne 0) { throw 'Upstream integration policy tests failed' }
+          } finally { Pop-Location }
       - name: Exercise actual Stagehand browser on an isolated local fixture
         shell: pwsh
         timeout-minutes: 8
         run: |
-          npm run smoke --prefix integrations/stagehand-mcp
-          if ($LASTEXITCODE -ne 0) { throw 'Actual upstream Stagehand browser inspection failed' }
+          Push-Location integrations/stagehand-mcp
+          try {
+            npm run smoke
+            if ($LASTEXITCODE -ne 0) { throw 'Actual upstream Stagehand browser inspection failed' }
+          } finally { Pop-Location }
       - name: Compile and test official Rust MCP SDK acceptance client
         shell: pwsh
         timeout-minutes: 18
