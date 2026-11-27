@@ -48,6 +48,7 @@ jobs:
           node --check tests/e2e/lucia-start-page-navigation.cjs
           node --check tests/e2e/lucia-local-model-server.cjs
           node --check tests/e2e/lucia-multistep-mock.cjs
+          node --check tests/e2e/lucia-live-vision.cjs
           node --check tests/e2e/lucia-wikipedia-article.cjs
           node --check tests/e2e/lucia-play-any-song-entry.cjs
           Get-ChildItem tests -Filter *.test.cjs | ForEach-Object { node --test $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
@@ -61,6 +62,11 @@ jobs:
         with:
           projectPath: src-tauri
           args: --bundles nsis
+
+      - name: Verify real-time WebView2 vision stream and BRPR frame change
+        shell: pwsh
+        timeout-minutes: 8
+        run: ./tests/e2e/run-lucia-multistep.ps1 -LiveVisionSmoke -CdpPort 9290 -ModelPort 18801 -FixturePort 18764
 
       - name: Run isolated native Lucia multi-step and recovery E2E
         shell: pwsh
