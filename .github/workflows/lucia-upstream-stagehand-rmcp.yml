@@ -58,12 +58,14 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Actual upstream Stagehand browser inspection failed' }
           } finally { Pop-Location }
       - name: Compile and test official Rust MCP SDK acceptance client
+        if: success() || failure()
         shell: pwsh
         timeout-minutes: 18
         run: |
           cargo test --manifest-path integrations/rmcp-probe/Cargo.toml
           if ($LASTEXITCODE -ne 0) { throw 'Official rmcp SDK compilation or policy test failed' }
       - name: Connect official Rust MCP SDK to upstream Stagehand MCP server
+        if: success() || failure()
         shell: pwsh
         timeout-minutes: 6
         run: |
