@@ -25,10 +25,10 @@ if errorlevel 1 (
 if exist "%ROOT_DIR%ui\package.json" (
     echo [1/4] Installing UI dependencies and compiling Tailwind CSS...
     pushd "%ROOT_DIR%ui"
-    call npm install --no-audit --no-fund
+    call npm ci --no-audit --no-fund
     if errorlevel 1 (
         popd
-        echo [ERROR] npm install failed.
+        echo [ERROR] npm ci failed.
         pause
         exit /b 1
     )
@@ -71,13 +71,19 @@ set "FOUND_SETUP=0"
 for %%D in ("%ROOT_DIR%target\release\bundle" "%ROOT_DIR%src-tauri\target\release\bundle") do (
     if exist "%%~D\nsis" (
         for %%F in ("%%~D\nsis\*-setup.exe") do (
-            copy /Y "%%~F" "%ROOT_DIR%dist\Browsphere-setup.exe" >nul
-            set "FOUND_SETUP=1"
+            if exist "%%~fF" (
+                copy /Y "%%~fF" "%ROOT_DIR%dist\Browsphere-setup.exe" >nul
+                if errorlevel 1 (
+                    echo [ERROR] Failed to copy installer to dist.
+                    exit /b 1
+                )
+                set "FOUND_SETUP=1"
+            )
         )
     )
     if exist "%%~D\msi" (
         for %%F in ("%%~D\msi\*.msi") do (
-            copy /Y "%%~F" "%ROOT_DIR%dist\" >nul
+            if exist "%%~fF" copy /Y "%%~fF" "%ROOT_DIR%dist\" >nul
         )
     )
 )
@@ -93,6 +99,10 @@ if "!FOUND_SETUP!"=="1" (
                 ) else (
                     signtool sign /f "!PFX_PATH!" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "%ROOT_DIR%dist\Browsphere-setup.exe"
                 )
+                if errorlevel 1 (
+                    echo [ERROR] Installer signing failed.
+                    exit /b 1
+                )
             )
         )
     )
@@ -105,8 +115,9 @@ if "!FOUND_SETUP!"=="1" (
     echo   %ROOT_DIR%dist\Browsphere-setup.exe
     echo ========================================================
 ) else (
-    echo [WARN] Build finished, but setup.exe was not found in expected bundle path.
+    echo [ERROR] Build finished, but setup.exe was not found in expected bundle path.
     echo Check target\release\bundle\ or src-tauri\target\release\bundle\
+    exit /b 1
 )
 pause
 endlocal

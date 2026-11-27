@@ -7,7 +7,17 @@ const fs=require('node:fs'),crypto=require('node:crypto');
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const goal=process.env.LUCIA_TEST_GOAL;
 if(!goal || goal.length>1300)throw Error('Supply a bounded LUCIA_TEST_GOAL');
+function selectedModel(key,fallback){
+  const value=process.env[key]||fallback;
+  if(!/^[a-z0-9][a-z0-9._:/-]{0,119}$/i.test(value))throw Error('Invalid '+key);
+  return value;
+}
+const actionModel=selectedModel('LUCIA_TEST_ACTION_MODEL','qwen3.5:0.8b');
+if(!/^qwen(?:[0-9]|[.:-])/i.test(actionModel))throw Error('Genuine-Qwen acceptance requires a Qwen action model');
+const supervisorModel=selectedModel('LUCIA_TEST_SUPERVISOR_MODEL','lfm3:1.7b');
 const expected=(process.env.LUCIA_EXPECTED_HOSTS||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
+const expectedSource=process.env.LUCIA_EXPECTED_SOURCE_URL||'';
+const requireRecovery=process.env.LUCIA_REQUIRE_RECOVERY==='1';
 const port=Number(process.env.LUCIA_CDP_PORT||9696);
 const now=()=>new Date().toISOString();
 async function main(){
@@ -54,15 +64,15 @@ async function main(){
        const entry={goal:args[0],tab:args[3],runId:null};window.__orchestratorProbe.launches.push(entry);
        return Promise.resolve(original.apply(this,args)).then(runId=>{entry.runId=runId;return runId},error=>{entry.error=String(error);throw error});
      };
-     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan','agent:verification_recovery','agent:fact_dependencies','agent:document_artifact'])
+     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan','agent:verification_recovery','agent:fact_dependencies','agent:document_artifact','agent:supervisor','agent:stage','agent:orchestration'])
        await window.__TAURI__.event.listen(kind,event=>
          window.__orchestratorProbe.events.push({kind,payload:event.payload}));
      const config=await window.__TAURI__.core.invoke('get_router_config');
      config.prefer_local_for_simple=true;config.lucia_cloud_only=false;
      config.ollama_url='http://127.0.0.1:11434';
-     config.ollama_model='qwen2.5:3b-instruct';
-     config.planner_model='qwen2.5:3b-instruct';
-     config.supervisor_model='lfm3:1.7b';
+     config.ollama_model=${JSON.stringify(actionModel)};
+     config.planner_model=${JSON.stringify(actionModel)};
+     config.supervisor_model=${JSON.stringify(supervisorModel)};
      await window.__TAURI__.core.invoke('update_router_config',{config});
      return true;
    })()`);
@@ -86,11 +96,16 @@ async function main(){
        lastCount=traces.length;const e=traces.at(-1).payload;
        console.log('LIVE_ACTION',JSON.stringify({at:now(),action:e.action?.type,outcome:e.outcome,decision:e.decision,route:e.model_route}).slice(0,730));
      }
-     const ended=evs.find(e=>e.kind==='agent:run_status');
+     const ended=evs.find(e=>e.kind==='agent:run_status'&&
+       ['completed','failed','cancelled','stopped','timed_out','unverified','rejected','resource_blocked','halted','max_steps','tab_missing'].includes(e.payload?.status));
      if(ended){finalStatus=ended.payload.status;break;}
+     if(!runId&&d.launches.some(l=>l.error)){
+       const error=String(d.launches.find(l=>l.error).error).slice(0,350);
+       console.log('ADMISSION_DIAGNOSTIC',JSON.stringify({error}));
+       throw Error('Native task admission rejected: '+error);
+     }
      if(!runId&&Date.now()-started>40000){
-       const diagnostic=await evaluate("({launches:window.__orchestratorProbe.launches,visible:document.body.innerText.slice(-1800)})");
-       console.log('ADMISSION_DIAGNOSTIC',JSON.stringify(diagnostic).slice(0,2600));
+       console.log('ADMISSION_DIAGNOSTIC',JSON.stringify({launches:d.launches.length,runId}));
        throw Error('No native task ID after 40 seconds');
      }
    }
@@ -101,6 +116,15 @@ async function main(){
    const report=evs.filter(e=>e.kind==='agent:verification_report'&&e.payload.report?.status==='evidence_checked').at(-1)?.payload?.report;
    const errors=evs.filter(e=>e.kind==='agent:run_error').map(e=>e.payload.message);
    const replanCount=evs.filter(e=>e.kind==='agent:objective_replan').length;
+   const supervisorReviews=evs.filter(e=>e.kind==='agent:supervisor'&&e.payload?.status==='reviewing').length;
+   const stalledObservations=evs.filter(e=>e.kind==='agent:orchestration'&&e.payload?.stalled===true).length;
+   const specialistStages=evs.filter(e=>e.kind==='agent:stage').map(e=>({name:e.payload?.specialist,status:e.payload?.status}));
+   const failedActions=evs.filter(e=>e.kind==='agent:trace'&&e.payload?.outcome==='failed').length;
+   // Configuring Qwen is insufficient. Require a native action trace explicitly
+   // routed to that exact local model; deterministic navigation alone cannot pass.
+   const qwenActions=evs.filter(e=>e.kind==='agent:trace'&&
+     String(e.payload?.model_route||'').toLowerCase().includes('ollama:'+actionModel.toLowerCase())&&
+     ['confirmed','ok','success'].includes(e.payload?.outcome)).length;
    const recoveryEvents=evs.filter(e=>e.kind==='agent:verification_recovery');
    const recoveryStages=recoveryEvents.map(e=>e.payload.status);
    const progress=evs.filter(e=>e.kind==='agent:goal_progress').map(e=>e.payload.progress).at(-1);
@@ -109,6 +133,26 @@ async function main(){
    const hosts=[...new Set((report?.findings||[]).map(f=>{try{return new URL(f.url).hostname.toLowerCase().replace(/^www[.]/,'')}catch{return null}}).filter(Boolean))];
    const missingHosts=expected.filter(h=>!hosts.some(observed=>observed===h||observed.endsWith('.'+h)));
    const findings=report?.findings||[];
+   // A recovery counts only when intervention follows a problem and the
+   // independent evidence report arrives after that intervention.
+   const problemIndex=evs.findIndex(e=>(e.kind==='agent:trace'&&e.payload?.outcome==='failed')||
+     (e.kind==='agent:orchestration'&&e.payload?.stalled===true));
+   const interventionIndex=problemIndex<0?-1:evs.findIndex((e,i)=>i>problemIndex&&
+     (e.kind==='agent:objective_replan'||(e.kind==='agent:supervisor'&&e.payload?.status==='reviewing')));
+   const evidenceIndex=evs.findLastIndex(e=>e.kind==='agent:verification_report'&&
+     e.payload.report?.status==='evidence_checked');
+   const recoveryVerified=problemIndex>=0&&interventionIndex>problemIndex&&
+     evidenceIndex>interventionIndex&&finalStatus==='completed';
+   // A guide's homepage is not proof that the requested deep source was read.
+   // Accept the exact user-supplied path or a descendant page of that guide.
+   const sourcePathVerified=!expectedSource||findings.some(f=>{
+     try{
+       const want=new URL(expectedSource),got=new URL(f.url);
+       const path=pathname=>pathname.split('/').filter(Boolean).join('/');
+       const prefix=path(want.pathname),actual=path(got.pathname);
+       return got.origin===want.origin&&(actual===prefix||actual.startsWith(prefix+'/'));
+     }catch{return false}
+   });
    const requiresFree=goal.split(/[^A-Za-z0-9]+/).some(w=>w.toLowerCase()==='free');
    const paidUpgradeQuote=requiresFree&&findings.some(f=>
      /everything (?:in|from) free(?: forever)?,\s*(?:plus|and)|per user\s*(?:\/|per)\s*month|billed annually|billed yearly/i.test(f.quote||''));
@@ -143,11 +187,12 @@ async function main(){
      }catch{};
    }
    const passed=final.launches.length===1&&final.launches[0].goal===goal&&Boolean(runId)
-     &&finalStatus==='completed'&&Boolean(report)&&!missingHosts.length
+     &&finalStatus==='completed'&&Boolean(report)&&!missingHosts.length&&sourcePathVerified
      &&!paidUpgradeQuote&&!paidSummary&&!missingFreeProof.length&&!missingCapacityProof.length&&!incompleteSummary
      &&(!requiresReport||artifactReadbackVerified)
-     &&findings.every(f=>f.url&&f.quote&&f.claim);
-   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,recoveryStages,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,requiresReport,artifactReadbackVerified,summary:report?.summary?.slice(0,500)}));
+     &&qwenActions>0&&findings.length>0&&findings.every(f=>f.url&&f.quote&&f.claim)
+     &&(problemIndex<0||recoveryVerified)&&(!requireRecovery||recoveryVerified);
+   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actionModel,qwenActions,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,supervisorReviews,stalledObservations,specialistStages,failedActions,recoveryStages,requireRecovery,recoveryVerified,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,expectedSource,sourcePathVerified,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,requiresReport,artifactReadbackVerified,summary:report?.summary?.slice(0,500)}));
    if(!passed)throw Error('Native task failed one or more end-to-end criteria');
  }finally{
    try{await evaluate("window.__TAURI__.core.invoke('cancel_agent_run')")}catch{}

@@ -18,6 +18,7 @@ pub struct OAuthRegistry(Mutex<HashMap<String,Pending>>);
 struct Pending {
     resource:Url, authorization_url:Url, token_endpoint:Url, client_id:String, verifier:String,
     state:String, redirect:Url, issuer:Url, listener:TcpListener, created:Instant,
+    client_secret:Option<String>,
 }
 fn client()->Result<Client>{
     Ok(Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
@@ -29,6 +30,9 @@ fn https(raw:&str)->Result<Url>{
         && u.password().is_none() && u.query().is_none() && u.fragment().is_none(),
         "Use a clean HTTPS URL without user info, query, or fragment");
     Ok(u)
+}
+fn is_google_calendar(resource:&Url)->bool{
+    resource.as_str()=="https://calendarmcp.googleapis.com/mcp/v1self"
 }
 fn well_known(u:&Url,name:&str,with_path:bool)->Url{
     let mut out=u.clone();
@@ -87,7 +91,11 @@ fn endpoints(v:&Value,issuer:&Url)->Result<(Url,Url)>{
     let token=https(v["token_endpoint"].as_str().context("Missing token endpoint")?)?;
     // Conservative native-client subset: refuse cross-origin endpoints rather than
     // trusting metadata to redirect authorization codes to another service.
-    ensure!(authorize.origin()==issuer.origin() && token.origin()==issuer.origin(),"Cross-origin OAuth endpoints not supported");
+    let same_origin=authorize.origin()==issuer.origin() && token.origin()==issuer.origin();
+    let google_pair=issuer.as_str()=="https://accounts.google.com/" &&
+        authorize.as_str()=="https://accounts.google.com/o/oauth2/v2/auth" &&
+        token.as_str()=="https://oauth2.googleapis.com/token";
+    ensure!(same_origin||google_pair,"Cross-origin OAuth endpoints not supported");
     Ok((authorize,token))
 }
 fn callback_result(target:&str,redirect:&Url,state:&str,issuer:&Url)->Result<Option<String>>{
@@ -176,7 +184,7 @@ fn trusted(view:&tauri::Webview)->Result<()>{
 }
 #[tauri::command]
 pub async fn mcp_oauth_begin(view:tauri::Webview,registry:tauri::State<'_,OAuthRegistry>,
-    resource:String,issuer:String,client_id:String,scope:String)->Result<Value,String>{
+    resource:String,issuer:String,client_id:String,scope:String,client_secret:Option<String>)->Result<Value,String>{
     async {
         trusted(&view)?;
         let resource=https(&resource)?;
@@ -186,6 +194,16 @@ pub async fn mcp_oauth_begin(view:tauri::Webview,registry:tauri::State<'_,OAuthR
             ensure!(issuer.trim().is_empty()||https(&issuer)?==https(expected)?,"Preset issuer mismatch");
             (https(expected)?,default_scope.to_owned())
         }else{(https(&issuer)?,scope)};
+        let client_secret=client_secret.filter(|v|!v.is_empty());
+        if is_google_calendar(&resource) {
+            ensure!(!automatic,"Google Calendar requires a registered Desktop app client ID");
+            ensure!(client_secret.as_ref().is_some_and(|s|s.len()<=512 && !s.chars().any(char::is_control)),
+                "Google Calendar requires the Desktop OAuth client secret");
+            ensure!(scope.trim()=="https://www.googleapis.com/auth/calendar.events",
+                "Google Calendar requires the calendar.events scope");
+        } else {
+            ensure!(client_secret.is_none(),"Client secrets are supported only for the exact Google Calendar endpoint");
+        }
         ensure!(client_id.len()<=512 && !client_id.chars().any(char::is_control),"Invalid public client ID");
         ensure!(scope.len()<=512 && !scope.chars().any(char::is_control),"Invalid scope");
         let http=client()?;
@@ -200,14 +218,17 @@ pub async fn mcp_oauth_begin(view:tauri::Webview,registry:tauri::State<'_,OAuthR
         authorize.query_pairs_mut().append_pair("response_type","code")
             .append_pair("client_id",&client_id).append_pair("redirect_uri",redirect.as_str())
             .append_pair("code_challenge",&pkce(&verifier)).append_pair("code_challenge_method","S256")
-            .append_pair("state",&state).append_pair("resource",resource.as_str());
+            .append_pair("state",&state);
+        if !is_google_calendar(&resource) {
+            authorize.query_pairs_mut().append_pair("resource",resource.as_str());
+        }
         if !scope.trim().is_empty(){authorize.query_pairs_mut().append_pair("scope",scope.trim());}
         let id=Uuid::new_v4().to_string();
         let result=json!({"id":id,"authorizationUrl":authorize.as_str(),"redirectUri":redirect.as_str(),"expiresIn":FLOW_TTL.as_secs()});
         let mut entries=registry.0.lock().await;
         entries.retain(|_,p|p.created.elapsed()<FLOW_TTL&&p.resource!=resource);
         ensure!(entries.len()<4,"Too many pending authorizations");
-        entries.insert(id,Pending{resource,authorization_url:authorize,token_endpoint,client_id,verifier,state,redirect,issuer,listener,created:Instant::now()});
+        entries.insert(id,Pending{resource,authorization_url:authorize,token_endpoint,client_id,verifier,state,redirect,issuer,listener,created:Instant::now(),client_secret});
         Ok(result)
     }.await.map_err(|e:anyhow::Error|e.to_string())
 }
@@ -283,11 +304,15 @@ pub async fn mcp_oauth_finish(view:tauri::Webview,registry:tauri::State<'_,OAuth
         trusted(&view)?;
         let p=registry.0.lock().await.remove(&id).context("Authorization expired or already consumed")?;
         let code=callback(&p).await.context("OAuth callback not completed")?;
-        let token=json_response(client()?.post(p.token_endpoint.clone()).form(&[
+        let mut fields=vec![
             ("grant_type","authorization_code"),("client_id",p.client_id.as_str()),
             ("code",code.as_str()),("code_verifier",p.verifier.as_str()),
-            ("redirect_uri",p.redirect.as_str()),("resource",p.resource.as_str())
-        ]).send().await.context("OAuth token request failed")?).await.context("OAuth token exchange failed")?;
+            ("redirect_uri",p.redirect.as_str())
+        ];
+        if let Some(secret)=p.client_secret.as_ref(){fields.push(("client_secret",secret.as_str()));}
+        if !is_google_calendar(&p.resource){fields.push(("resource",p.resource.as_str()));}
+        let token=json_response(client()?.post(p.token_endpoint.clone()).form(&fields)
+            .send().await.context("OAuth token request failed")?).await.context("OAuth token exchange failed")?;
         ensure!(token["token_type"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("bearer")),"Expected a bearer access token");
         let access=token["access_token"].as_str().context("Access token missing")?;
         ensure!(!access.is_empty() && access.len()<=8192 && !access.chars().any(char::is_whitespace),"Invalid access token");
@@ -326,6 +351,23 @@ pub async fn mcp_provider_key(view:tauri::Webview,resource:String,key:String)->R
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn google_oauth_endpoints_are_exactly_allowlisted() {
+        let issuer=https("https://accounts.google.com").unwrap();
+        let metadata=json!({"issuer":"https://accounts.google.com",
+            "code_challenge_methods_supported":["plain","S256"],
+            "authorization_endpoint":"https://accounts.google.com/o/oauth2/v2/auth",
+            "token_endpoint":"https://oauth2.googleapis.com/token"});
+        assert!(endpoints(&metadata,&issuer).is_ok());
+        let mut bad=metadata.clone();
+        bad["token_endpoint"]=json!("https://evil.example/token");
+        assert!(endpoints(&bad,&issuer).is_err());
+        let mut bad=metadata.clone();
+        bad["authorization_endpoint"]=json!("https://accounts.google.com.evil.example/authorize");
+        assert!(endpoints(&bad,&issuer).is_err());
+        assert!(is_google_calendar(&https("https://calendarmcp.googleapis.com/mcp/v1self").unwrap()));
+        assert!(!is_google_calendar(&https("https://calendarmcp.googleapis.com/mcp/v1").unwrap()));
+    }
     #[tokio::test]
     async fn callback_listener_accepts_success_and_reports_denial(){
         for denied in [false,true]{
@@ -333,7 +375,7 @@ mod tests{
             let addr=listener.local_addr().unwrap();
             let redirect=Url::parse(&format!("http://{addr}/oauth/callback")).unwrap();
             let issuer=https("https://auth.exa.ai").unwrap();
-            let p=Pending{resource:https("https://mcp.exa.ai/mcp/oauth").unwrap(),authorization_url:issuer.clone(),token_endpoint:issuer.clone(),client_id:"fixture".into(),verifier:"fixture".into(),state:"fixture-state".into(),redirect,issuer,listener,created:Instant::now()};
+            let p=Pending{resource:https("https://mcp.exa.ai/mcp/oauth").unwrap(),authorization_url:issuer.clone(),token_endpoint:issuer.clone(),client_id:"fixture".into(),verifier:"fixture".into(),state:"fixture-state".into(),redirect,issuer,listener,created:Instant::now(),client_secret:None};
             let send=tokio::spawn(async move{
                 let mut sock=tokio::net::TcpStream::connect(addr).await.unwrap();
                 let query=if denied{"error=access_denied"}else{"code=fixture-code"};

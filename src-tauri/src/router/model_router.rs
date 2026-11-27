@@ -1387,6 +1387,40 @@ User text: <text>{}</text>"#,
             }
             return ev::assemble_extractive_comparison(goal,sources,findings).map_err(anyhow::Error::msg);
         }
+        // A single explicitly requested documentation page can be researched
+        // extractively. The real model selects passage IDs; Rust binds them to
+        // original WebView text and independently validates the final report.
+        // This fixes small-model invented claim/quote pairs without trusting a
+        // page title, auto-completing navigation, or weakening source checks.
+        if !comparison && goal.to_ascii_lowercase().contains("report one ")
+            && crate::agent::policy::requested_compound_page_entry_url(goal).is_some() {
+            let original=ev::compound_research_source(goal,sources)
+                .ok_or_else(||anyhow::anyhow!("Exact requested research page has not been observed"))?;
+            let originals=vec![original];
+            let candidates=ev::bound_passages(goal,&originals);
+            anyhow::ensure!(!candidates.is_empty(),"No relevant observed source passage candidates");
+            let payload=ev::bound_passage_payload(goal,&originals,&candidates).to_string();
+            let reviewer=self.structured_route_for_origin(&originals[0].url);
+            let prompt=crate::lucia_prompts::PASSAGE_SELECTOR_SYSTEM;
+            let first=tokio::time::timeout(Duration::from_secs(55),
+                reviewer.model_structured_response(prompt,&payload,creds)).await;
+            let initial=match first {
+                Ok(Ok(raw))=>ev::bound_selection_report(goal,&originals,&candidates,&raw),
+                Ok(Err(error))=>return Err(error),
+                Err(_)=>anyhow::bail!("Extractive research model timed out; no verified finding"),
+            };
+            match initial {
+                Ok(report)=>return Ok(report),
+                Err(reason)=>{
+                    tracing::warn!(reason=%reason,"Extractive source selection rejected; retrying once");
+                    let second=tokio::time::timeout(Duration::from_secs(55),
+                        reviewer.model_structured_response(prompt,&payload,creds)).await
+                        .map_err(|_|anyhow::anyhow!("Extractive research retry timed out"))??;
+                    return ev::bound_selection_report(goal,&originals,&candidates,&second)
+                        .map_err(anyhow::Error::msg);
+                }
+            }
+        }
         let focused=ev::focus_sources(goal,sources,comparison);
         // Compact-model extractive review of an explicitly requested current
         // reference. Other verifier contracts remain unchanged.

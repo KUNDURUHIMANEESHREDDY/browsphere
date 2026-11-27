@@ -234,6 +234,20 @@ pub fn bound_passages(goal:&str,sources:&[SourceEvidence])->Vec<BoundPassage>{
     }
     out
 }
+/// Find the actual captured page for a single explicit, compound read-only
+/// source request. A homepage, sibling path, redirect to another origin, or
+/// unobserved URL cannot stand in for the user-requested research document.
+pub fn compound_research_source(goal:&str,sources:&[SourceEvidence])->Option<SourceEvidence>{
+    let target=super::policy::requested_compound_page_entry_url(goal)?;
+    sources.iter().filter(|source|{
+        let Some(actual)=web_url(&source.url) else{return false};
+        actual.scheme()=="https" && actual.origin()==target.origin()
+            && actual.path().trim_end_matches('/')==target.path().trim_end_matches('/')
+            && actual.query().is_none() && actual.fragment().is_none()
+            && !source.excerpt.trim().is_empty()
+    }).max_by_key(|source|source.excerpt.chars().count()).cloned()
+}
+
 pub fn bound_passage_payload(goal:&str,sources:&[SourceEvidence],candidates:&[BoundPassage])->serde_json::Value{
     let rows:Vec<_>=candidates.iter().filter_map(|p|{
         let source=sources.get(p.source_index)?;
@@ -2090,6 +2104,33 @@ mod tests {
     fn dom(url: &str, text: &str) -> DomSnapshot {
         DomSnapshot {structure: Default::default(), origin:url.into(), title:"Demo".into(),
             text_excerpt:text.into(),interactive_nodes:vec![]}
+    }
+    #[test]
+    fn compound_research_requires_exact_observed_page_and_native_quote(){
+        let goal="Visit https://web.dev/learn/accessibility and report one specific recommendation from the official accessibility guide, citing a supporting passage.";
+        let passage="For accessibility, give people clear labels on interactive controls so they can understand each control.";
+        let exact=src("https://web.dev/learn/accessibility/",passage);
+        for wrong in [
+            "https://web.dev/",
+            "https://web.dev/learn/",
+            "https://web.dev/learn/accessibility-old",
+            "https://evil.example/learn/accessibility",
+            "https://web.dev/learn/accessibility/?fake=1",
+        ] {
+            assert!(compound_research_source(goal,&[src(wrong,passage)]).is_none(),"{wrong}");
+        }
+        assert!(compound_research_source("Visit https://web.dev/learn/accessibility and purchase a subscription",&[exact.clone()]).is_none());
+        let selected=compound_research_source(goal,&[src("https://web.dev/",passage),exact]).unwrap();
+        assert_eq!(selected.url,"https://web.dev/learn/accessibility/");
+        let originals=vec![selected];
+        let candidates=bound_passages(goal,&originals);
+        assert!(!candidates.is_empty());
+        let chosen=serde_json::json!({"ids":[candidates[0].id]});
+        let report=bound_selection_report(goal,&originals,&candidates,&chosen.to_string()).unwrap();
+        assert_eq!(report.status,"evidence_checked");
+        assert_eq!(report.findings[0].quote,passage);
+        assert_eq!(report.findings[0].claim,passage);
+        assert!(bound_selection_report(goal,&originals,&candidates,r#"{"ids":["fake"]}"#).is_err());
     }
     #[test]
     fn google_search_accepts_same_query_with_extra_parameters_only(){

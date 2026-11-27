@@ -37,3 +37,85 @@ The browser launch now immediately starts accepting the OAuth callback. No
 manual Finish click is needed after a successful external browser launch.
 The listener expires after ten minutes and reports an explicit denial or
 token exchange/storage failure without exposing tokens or callback contents.
+
+## Verified calendar creation (explicit Lucia command)
+
+This separate write lane requires a trusted adapter with a user-configured
+calendar contract in the existing mcp-servers.json. Example server entry:
+
+```json
+{"calendar-demo":{"url":"http://127.0.0.1:8765/mcp","read_only_tools":["get_event"],"calendar":{"create_tool":"create_event","get_tool":"get_event"}}}
+```
+
+The adapter must expose create_event with string arguments calendar_id, title,
+start and end (RFC 3339 with offsets), explicit non-destructive write annotations,
+and structuredContent.event_id. The get_event tool must be approved read-only
+and accept calendar_id and event_id, returning structuredContent with event_id,
+calendar_id, title, start, end and status (confirmed). Provider-specific schemas
+need an adapter; this is not a built-in Google Calendar connection.
+
+Example explicit chat command (use a test calendar you control):
+
+```
+mcp calendar calendar-demo {"calendar_id":"demo","title":"Demo","start":"2026-12-01T10:00:00+05:30","end":"2026-12-01T11:00:00+05:30"}
+```
+
+Lucia dispatches create once, reconnects for readback, and checks exact IDs,
+title, confirmed status and both timestamp instants. Missing or mismatched
+readback, cancellation or timeout never triggers a second write or browser
+fallback. An unverified write may have occurred; inspect the calendar before
+trying again. The independent call still relies on the trusted provider.
+Natural-language calendar intent, arbitrary event fields, and live provider
+integration are not yet covered.
+
+
+### Official Google Calendar MCP option
+
+Google provides a hosted Calendar MCP service. Browsphere supports its
+`create_event` and `get_event` tools through the dedicated, narrow write-and-
+readback lane, using the `/mcp/v1self` endpoint, which Google documents as the
+fallback for clients without server-driven form elicitation.
+
+To preserve existing configured MCP servers and register this endpoint, run:
+
+```powershell
+python scripts/maintenance/configure_google_calendar_mcp.py
+```
+
+The resulting entry in `%LOCALAPPDATA%\\BrowsphereAI\\mcp-servers.json` is:
+
+```json
+"calendar": {
+  "url": "https://calendarmcp.googleapis.com/mcp/v1self",
+  "read_only_tools": ["get_event"],
+  "calendar": {"provider": "google", "create_tool": "create_event", "get_tool": "get_event", "timezone_offset": "+05:30"}
+}
+```
+
+This registers an endpoint, **not a Google connection or an OAuth grant**.
+Google requires a Google Cloud project with the Calendar and Calendar MCP APIs
+enabled and an OAuth client marked for AI agents. The user must authorize
+`https://www.googleapis.com/auth/calendar.events` for the exact MCP resource
+URL. Do not put access tokens or client secrets in this JSON or in chat. If
+the OAuth metadata flow is incompatible with Google's authorization server,
+Browsphere must report authorization as unsupported; it cannot silently
+fall back to an unrelated identity.
+
+Chatbox phrases:
+* `Schedule a project meeting tomorrow at 4 PM`
+* `Schedule team standup on 2026-12-01 at 16:30 for 30 minutes`
+
+Relative dates use the explicitly configured timezone offset (+05:30 for India), not the Windows machine timezone. In the absence of
+an explicit duration, the minimal parser uses 60 minutes and reports it.
+Ambiguous times, past events, and unsupported input formats fail without
+dispatch. Only the primary calendar is selected by natural-language requests.
+Attendees, recurring events, conflict checking, location, notes, and reminders
+are outside this first P0 milestone.
+
+Successful tool responses are never completion evidence by themselves.
+After creation, Lucia opens a fresh MCP session and requires get_event to
+return the same ID, summary, start/end instants and confirmed status.
+For uncertain or failed readback, no automatic retry is performed, because
+creation might already have happened.
+
+Google documentation: https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server

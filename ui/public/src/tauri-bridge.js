@@ -250,7 +250,7 @@
   window.aetherBridge = {
     searchMcpMarketplace: (query) => invoke('mcp_marketplace_search', {query}),
     connectMcp: (url) => invoke('mcp_connect', {url}),
-    beginMcpOAuth: (resource,issuer,clientId,scope) => invoke('mcp_oauth_begin', {resource,issuer,clientId,scope}),
+    beginMcpOAuth: (resource,issuer,clientId,scope,clientSecret) => invoke('mcp_oauth_begin', {resource,issuer,clientId,scope,clientSecret:clientSecret || null}),
     finishMcpOAuth: (id) => invoke('mcp_oauth_finish', {id}),
     listMcpOAuthBrowsers: () => invoke('mcp_oauth_browsers'),
     openMcpOAuthBrowser: (id,browser) => invoke('mcp_oauth_open_browser', {id,browser}),
