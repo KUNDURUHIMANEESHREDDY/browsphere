@@ -133,6 +133,8 @@ jobs:
       - name: Verify both Authenticode layers and fresh installed binary
         id: signature
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           $ErrorActionPreference = 'Stop'
           $expected = $env:BROWSPHERE_SIGNER_THUMBPRINT
