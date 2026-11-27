@@ -48,6 +48,7 @@ jobs:
           node --check tests/e2e/lucia-start-page-navigation.cjs
           node --check tests/e2e/lucia-local-model-server.cjs
           node --check tests/e2e/lucia-multistep-mock.cjs
+          node --check tests/e2e/lucia-playwright-mcp-native.cjs
           node --check tests/e2e/lucia-wikipedia-article.cjs
           node --check tests/e2e/lucia-play-any-song-entry.cjs
           Get-ChildItem tests -Filter *.test.cjs | ForEach-Object { node --test $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
@@ -61,6 +62,11 @@ jobs:
         with:
           projectPath: src-tauri
           args: --bundles nsis
+
+      - name: Verify REAL Microsoft Playwright MCP snapshot on isolated Windows WebView2
+        shell: pwsh
+        timeout-minutes: 8
+        run: ./tests/e2e/run-lucia-multistep.ps1 -PlaywrightSmoke -CdpPort 9277 -ModelPort 18778 -FixturePort 18779 -McpPort 18931
 
       - name: Run isolated native Lucia multi-step and recovery E2E
         shell: pwsh
