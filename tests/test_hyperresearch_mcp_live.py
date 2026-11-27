@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -28,7 +29,7 @@ URL = "http://127.0.0.1:8765/mcp"
 
 
 async def connect_and_verify() -> None:
-    async with streamablehttp_client(URL, timeout=2) as (reader, writer, _):
+    async with streamablehttp_client(URL) as (reader, writer, _):
         async with ClientSession(reader, writer) as client:
             await client.initialize()
             tools = (await client.list_tools()).tools
@@ -104,25 +105,19 @@ class RealGatewayTests(unittest.TestCase):
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
             )
             try:
-                last_error = None
-                for _ in range(35):
+                # Wait until the genuine HTTP process is listening before a
+                # single protocol test. Do not confuse startup with retries.
+                for _ in range(50):
                     if proc.poll() is not None:
                         raise AssertionError(f"Gateway exited early: {proc.stderr.read()[-2500:]}")
                     try:
-                        asyncio.run(connect_and_verify())
-                        break
-                    except (OSError, ConnectionError) as exc:
-                        last_error = exc
+                        with socket.create_connection(("127.0.0.1", 8765), timeout=0.2):
+                            break
+                    except OSError:
                         time.sleep(0.2)
-                    except Exception as exc:
-                        # HTTP endpoint can refuse initialization while booting.
-                        if "connect" in str(exc).lower():
-                            last_error = exc
-                            time.sleep(0.2)
-                        else:
-                            raise
                 else:
-                    raise AssertionError(f"MCP initialization timed out: {last_error}")
+                    raise AssertionError("Gateway never opened the loopback listener")
+                asyncio.run(connect_and_verify())
             finally:
                 proc.terminate()
                 try:
