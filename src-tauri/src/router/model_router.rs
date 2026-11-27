@@ -1629,6 +1629,29 @@ User text: <text>{}</text>"#,
                     total_ms = ?duration_ms("total_duration"),
                     "ollama_action_inference"
                 );
+                // The release metadata subscriber deliberately discards
+                // tracing fields. Persist counters ONLY during an explicitly
+                // isolated real-Qwen Windows CI run (never regular or private
+                // browsing), using the existing diagnostics numeric allowlist.
+                if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+                    && std::env::var("LUCIA_E2E_REAL_MODEL").ok().as_deref()
+                        == Some(self.config.ollama_model.as_str()) {
+                    crate::diagnostics::record("model", "ollama_action_inference", json!({
+                        "model_route": route_label,
+                        "step": attempt + 1,
+                        "latency_ms": inference_started.elapsed().as_millis() as u64,
+                        "prompt_bytes":prompt.len(),
+                        "system_bytes":system_prompt.len(),
+                        "schema_constrained":tiny.is_some(),
+                        "prompt_tokens":val.get("prompt_eval_count").and_then(|v|v.as_u64()),
+                        "cached_prompt_tokens":val.get("prompt_eval_cached_count").and_then(|v|v.as_u64()),
+                        "generated_tokens":val.get("eval_count").and_then(|v|v.as_u64()),
+                        "model_load_ms":duration_ms("load_duration"),
+                        "prompt_eval_ms":duration_ms("prompt_eval_duration"),
+                        "generation_ms":duration_ms("eval_duration"),
+                        "total_ms":duration_ms("total_duration")
+                    }));
+                }
                 let raw = val.get("response").and_then(|v| v.as_str()).unwrap_or("");
                 rejection = if raw.trim().is_empty() {
                     "Empty action response"
