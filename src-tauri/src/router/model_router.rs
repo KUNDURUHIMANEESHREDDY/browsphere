@@ -1520,6 +1520,18 @@ User text: <text>{}</text>"#,
             creds, voice_mode).await
     }
 
+    /// Bound local action-generation cost without changing native action or
+    /// evidence verification. Qwen 3B on CPU can exhaust its 65-second action
+    /// deadline when generating 384 tokens; a browser action generally needs
+    /// far less. Keep other model behavior unchanged.
+    fn local_action_generation_options(model: &str) -> serde_json::Value {
+        if model == "qwen2.5:3b-instruct" {
+            json!({"temperature":0,"num_predict":192,"num_ctx":3072})
+        } else {
+            json!({"temperature":0,"num_predict":384,"num_ctx":4096})
+        }
+    }
+
     /// One specialist's actual LLM action proposal, executed by the existing policy-gated runtime.
     pub async fn propose_specialist_action(
         &self,
@@ -1574,7 +1586,7 @@ User text: <text>{}</text>"#,
                     "prompt": prompt,
                     "stream": false,
                     "format": format,
-                    "options": {"temperature": 0, "num_predict": 384, "num_ctx": 4096}
+                    "options": Self::local_action_generation_options(&self.config.ollama_model)
                 });
                 // Keep hybrid-model action generation within the structured output budget.
                 if self.config.ollama_model.starts_with("qwen3.5:")
@@ -2225,6 +2237,17 @@ User text: <text>{}</text>"#,
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn qwen_cpu_action_budget_is_bounded_without_downgrading_other_models() {
+        let compact = ModelRouter::local_action_generation_options("qwen2.5:3b-instruct");
+        assert_eq!(compact["num_predict"],192);
+        assert_eq!(compact["num_ctx"],3072);
+        assert_eq!(compact["temperature"],0);
+        let unchanged = ModelRouter::local_action_generation_options("lfm3:1.7b");
+        assert_eq!(unchanged["num_predict"],384);
+        assert_eq!(unchanged["num_ctx"],4096);
+    }
+
     use super::*;
 
     #[test]
