@@ -2,7 +2,9 @@ name: Windows CI — Test and Build Installer
 
 on:
   push:
-    branches: [main, master]
+    # Temporary branch-specific acceptance while PR #17 is based on draft #15.
+    # Keep the signed/default release path unchanged.
+    branches: [main, master, feature/browsphere-upstream-reuse-20261127]
   pull_request:
     branches: [main, master]
   workflow_dispatch:
