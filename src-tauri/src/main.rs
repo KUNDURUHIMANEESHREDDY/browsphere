@@ -1347,6 +1347,7 @@ async fn close_tab_webview(
             .unwrap_or_else(|| TabManagerState::sanitize_label(&tab_id))
     };
     if let Some(wv) = app.get_webview(&label) {
+        agent::live_visual::detach(&wv,&label);
         let _ = wv.close();
     }
     // Do not retain a closed tab's page text or private session observations.
