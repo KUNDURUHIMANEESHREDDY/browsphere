@@ -35,7 +35,7 @@ test('official MCP v2 server discovers only explicit read-only Stagehand tools a
   const p=await freePort(),fixture=await serveFixture(),fixturePort=fixture.address().port;
   const child=spawn(process.execPath,['server.mjs'],{
     cwd:new URL('.',import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/,''),
-    env:{...process.env,BROWSPHERE_STAGEHAND_MCP_PORT:String(p),
+    env:{...process.env,BROWSPHERE_STAGEHAND_ENABLE:'1',BROWSPHERE_STAGEHAND_MCP_PORT:String(p),
       BROWSPHERE_STAGEHAND_CI_FIXTURE:'1',LUCIA_FIXTURE_PORT:String(fixturePort)},
     stdio:['ignore','ignore','pipe'],windowsHide:true
   });
