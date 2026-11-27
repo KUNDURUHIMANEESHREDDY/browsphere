@@ -9,6 +9,7 @@ on:
     branches:
       - feature/browsphere-runtime-security-model-gates-20261127
       - feature/lucia-upstream-action-observability-20261127
+      - feature/lucia-stagehand-upstream-action-readback-20261127
     paths:
       - '.github/workflows/lucia-real-qwen.yml'
       - 'src-tauri/src/router/model_router.rs'
