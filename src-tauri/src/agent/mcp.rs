@@ -549,6 +549,22 @@ mod tests {
         assert!(validate_args(&schema,&json!({"query":""})).is_err());
         assert!(validate_args(&schema,&json!({"query":"longer"})).is_err());
     }
+    #[test] fn upstream_stagehand_primitive_bounds_remain_selectable_and_enforced() {
+        let schema=json!({"type":"object","properties":{
+            "url":{"type":"string","minLength":11,"maxLength":2048},
+            "instruction":{"type":"string","minLength":4,"maxLength":240}
+        },"required":["url","instruction"],"additionalProperties":false});
+        assert!(simple_schema(&schema));
+        assert!(validate_args(&schema,&json!({
+            "url":"https://www.w3.org/WAI/","instruction":"Read page title"
+        })).is_ok());
+        assert!(validate_args(&schema,&json!({
+            "url":"x","instruction":"Read page title"
+        })).is_err());
+        assert!(!simple_schema(&json!({"type":"object","properties":{
+            "url":{"type":"string","pattern":".*"}
+        }})));
+    }
     #[test] fn explicit_only() {
         assert!(requested("mcp call local/search {}"));
         assert!(!requested("please search using MCP"));
@@ -792,7 +808,10 @@ fn simple_schema(schema: &Value) -> bool {
     if schema["type"] != "object" || !s.keys().all(|k| ["type","properties","required","additionalProperties","description","title","$schema"].contains(&k.as_str())) { return false; }
     let Some(p) = schema["properties"].as_object() else { return false; };
     p.len() <= 12 && p.iter().all(|(key, v)| identifier(key) &&
-        v.as_object().is_some_and(|o| o.keys().all(|k| ["type","description","title","enum","default"].contains(&k.as_str()))) &&
+        v.as_object().is_some_and(|o| o.keys().all(|k| ["type","description","title","enum","default","minLength","maxLength"].contains(&k.as_str()))
+            && ["minLength","maxLength"].iter().all(|bound| o.get(*bound).is_none_or(|v| {
+                v.as_u64().is_some_and(|n| n <= 4096) && o.get("type").and_then(Value::as_str) == Some("string")
+            }))) &&
         matches!(v["type"].as_str(),Some("string"|"integer"|"number"|"boolean")) &&
         v.get("enum").is_none_or(|e| e.as_array().is_some_and(|a| a.len() <= 16)))
 }

@@ -1,0 +1,25 @@
+{
+  "name": "@browsphere/stagehand-mcp",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Optional upstream Stagehand + official MCP SDK read-only research provider",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test",
+    "check": "node --check server.mjs && node --check stagehand-readonly.mjs",
+    "smoke": "node stagehand.smoke.mjs"
+  },
+  "dependencies": {
+    "@browserbasehq/stagehand": "4.5.0",
+    "@modelcontextprotocol/server": "2.4.0",
+    "@modelcontextprotocol/node": "2.1.2",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0"
+  }
+}
