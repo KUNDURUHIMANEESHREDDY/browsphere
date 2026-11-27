@@ -71,8 +71,7 @@ jobs:
         shell: pwsh
         timeout-minutes: 30
         run: |
-          if ($env:GITHUB_REF -eq 'refs/heads/fix/lucia-qwen-upstream-ollama-action-budget-20261127' -and
-              '${{ github.event_name }}' -eq 'push') {
+          if ($env:GITHUB_REF -eq 'refs/heads/verify/lucia-action-qwen-20261127122057') {
             # Per-change evidence: ONE trial on each unfamiliar site. Even if
             # both pass, this is not the six-run release acceptance gate.
             ./tests/e2e/run-lucia-real-qwen.ps1 -UnfamiliarSites -Scenario all -Repetitions 1
