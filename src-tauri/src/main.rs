@@ -1740,6 +1740,60 @@ fn bench_percentile(mut values: Vec<f64>, percentile: usize) -> Option<f64> {
     Some(values[((values.len()*percentile+99)/100).saturating_sub(1).min(values.len()-1)])
 }
 
+#[derive(serde::Serialize)]
+struct LiveVisualSmokeReport {
+    first_frame_ms:u64,
+    second_frame_ms:u64,
+    first_frame_chars:usize,
+    second_frame_chars:usize,
+    changed:bool,
+    brpr_signaled:bool,
+}
+
+/// CI-only, fixture-scoped acceptance check for the real WebView2 CDP
+/// screencast path. No images, URLs, or page content ever return to the UI.
+#[tauri::command]
+async fn run_live_visual_smoke(
+    webview:tauri::Webview,
+    app:tauri::AppHandle,
+    state:tauri::State<'_, Arc<AppState>>,
+)->Result<LiveVisualSmokeReport,String>{
+    use sha2::{Digest,Sha256};
+    if webview.label()!="main"||std::env::var("GITHUB_ACTIONS").ok().as_deref()!=Some("true"){
+        return Err("Live frame acceptance test requires trusted isolated CI".into());
+    }
+    let label=state.tabs.active_webview_label().await;
+    let child=app.get_webview(&label).ok_or("No isolated WebView2 fixture")?;
+    let current=child.url().map_err(|_|"Fixture URL unavailable")?;
+    if current.scheme()!="http"||current.host_str()!=Some("127.0.0.1")||
+        current.port()!=Some(18764)||current.path()!="/" {
+        return Err("Refusing visual capture outside isolated localhost fixture".into());
+    }
+    let before_signals=state.perception.status(&label).signal_count;
+    let start=std::time::Instant::now();
+    let first=agent::live_visual::sample(&app,&label).await?;
+    let first_frame_ms=start.elapsed().as_millis() as u64;
+    let first_frame_chars=first.len();
+    // Mutate ONLY our throwaway local fixture, and verify a new native
+    // BRPR signal as well as a distinct subsequent streamed image frame.
+    agent::native_eval::eval_json(&app,&label,
+        "(()=>{document.body.style.backgroundColor='rgb(24, 90, 175)'; \
+            document.documentElement.style.backgroundColor='rgb(24, 90, 175)'; \
+            return true;})()".into(),2000).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let start=std::time::Instant::now();
+    let second=agent::live_visual::sample(&app,&label).await?;
+    let second_frame_ms=start.elapsed().as_millis() as u64;
+    let second_frame_chars=second.len();
+    let changed=Sha256::digest(first.as_bytes())!=Sha256::digest(second.as_bytes());
+    let brpr_signaled=state.perception.status(&label).signal_count>before_signals;
+    if !changed||!brpr_signaled{
+        return Err("WebView2 stream or BRPR did not observe the changed fixture".into());
+    }
+    Ok(LiveVisualSmokeReport{first_frame_ms,second_frame_ms,
+        first_frame_chars,second_frame_chars,changed,brpr_signaled})
+}
+
 #[tauri::command]
 async fn run_brpr_live_benchmark(
     webview: tauri::Webview,
@@ -3082,6 +3136,7 @@ fn main() {
             get_brpr_status,
             get_brpr_cached_observation,
             run_brpr_live_benchmark,
+            run_live_visual_smoke,
             get_site_permissions,
             set_site_permission,
             switch_tab_webview,
