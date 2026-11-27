@@ -1470,31 +1470,6 @@ pub async fn run_react_loop(
         let _=app.emit("agent:run_completed",summary);
         return Ok("completed".into());
     }
-    if crate::agent::mcp::calendar_requested(&goal) || crate::agent::mcp::calendar_natural_requested(&goal) {
-        anyhow::ensure!(!private_mode, "MCP is disabled in Private Browsing");
-        while *pause_rx.borrow() {
-            tokio::select! {
-                _ = cancel.cancelled() => return Ok("cancelled".into()),
-                changed = pause_rx.changed() => { changed?; }
-            }
-        }
-        let _ = app.emit("agent:stage", serde_json::json!({"run_id":run_id,"specialist":"MCP Agent","objective":"Create calendar event once and independently read it back","status":"active","index":0}));
-        let result = crate::agent::mcp::execute_calendar(&goal,&crate::resolve_data_dir().join("mcp-servers.json"),cancel.clone()).await;
-        match result {
-            Ok(summary) => {
-                let report=VerificationReport{status:"evidence_checked",summary:summary.clone(),findings:vec![],limitations:"Verified against a fresh read-only request to the configured calendar provider; not an independent provider.".into()};
-                let _=app.emit("agent:verification_report",serde_json::json!({"run_id":run_id,"report":report}));
-                let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"MCP Agent","status":"completed","index":0,"summary":summary}));
-                let _=app.emit("agent:run_completed",summary);
-                return Ok("completed".into());
-            }
-            Err(e) => {
-                let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"MCP Agent","status":"unverified","index":0}));
-                let _=app.emit("agent:run_error",serde_json::json!({"run_id":run_id,"message":format!("{e:#}")}));
-                return Ok("unverified".into());
-            }
-        }
-    }
     if crate::agent::mcp::requested(&goal) {
         anyhow::ensure!(!private_mode, "MCP is disabled in Private Browsing");
         while *pause_rx.borrow() {
