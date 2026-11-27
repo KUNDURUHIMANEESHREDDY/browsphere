@@ -3,6 +3,8 @@
 param(
     [string]$ExecutablePath = "",
     [switch]$CloudCompat,
+    [switch]$PlaywrightSmoke,
+    [int]$McpPort = 18931,
     [int]$CdpPort = 9272,
     [int]$ModelPort = 18766,
     [int]$FixturePort = 18764
@@ -10,6 +12,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $previousCloudMode = $env:LUCIA_E2E_CLOUD_COMPAT
+$previousMcpPort = $env:LUCIA_MCP_PORT
 if ($CloudCompat) { $env:LUCIA_E2E_CLOUD_COMPAT = '1' }
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $root
@@ -37,6 +40,7 @@ New-Item -ItemType Directory -Force $env:APPDATA, $env:LOCALAPPDATA, $env:WEBVIE
 
 $modelProcess = $null
 $appProcess = $null
+$mcpProcess = $null
 # WebView2 150+ ignores CDP environment flags in elevated host processes.
 # GitHub Windows runners are elevated, so set a temporary machine-level
 # policy for this one executable in the ephemeral CI worker only.
@@ -45,6 +49,8 @@ $cdpPolicyName = [IO.Path]::GetFileName($ExecutablePath)
 $createdCdpPolicy = $false
 $serverOut = Join-Path $profile 'mock-model.stdout.log'
 $serverErr = Join-Path $profile 'mock-model.stderr.log'
+$mcpOut = Join-Path $profile 'playwright-mcp.stdout.log'
+$mcpErr = Join-Path $profile 'playwright-mcp.stderr.log'
 
 function Wait-ForLoopback($url, $tries = 35) {
     for ($i=0; $i -lt $tries; $i++) {
@@ -86,6 +92,27 @@ try {
         Write-Host "WebView2 processes observed: $($webviews.Count)"
         Write-Host 'Windows CI browser debugging port was not opened; this is a startup/CDP failure, not a passed agent test'
         throw
+    }
+
+    if ($PlaywrightSmoke) {
+        # Independent upstream MCP smoke against this same disposable WebView2
+        # instance, without using a simulated MCP provider or user profile.
+        $npx = Get-Command npx.cmd -ErrorAction Stop
+        $mcpArgs = @(
+            '--yes', '@playwright/mcp@0.0.86',
+            '--host', '127.0.0.1',
+            '--port', "$McpPort",
+            '--cdp-endpoint', "http://127.0.0.1:$CdpPort"
+        )
+        $mcpProcess = Start-Process -FilePath $npx.Source -ArgumentList $mcpArgs -WorkingDirectory $root -PassThru -RedirectStandardOutput $mcpOut -RedirectStandardError $mcpErr
+        $env:LUCIA_MCP_PORT = "$McpPort"
+        Write-Host 'LUCIA_UPSTREAM_PLAYWRIGHT_WEBVIEW2_START'
+        & node (Join-Path $root 'tests\e2e\lucia-playwright-mcp-native.cjs')
+        if ($LASTEXITCODE -ne 0) {
+            throw "Live Microsoft Playwright MCP WebView2 smoke failed ($LASTEXITCODE)"
+        }
+        Write-Host 'LUCIA_UPSTREAM_PLAYWRIGHT_WEBVIEW2_VERIFIED'
+        return
     }
 
     # Optional public-site diagnostic. Do not bypass Google challenges or
@@ -135,9 +162,19 @@ try {
     }
     Write-Host 'PASS: multi-step native browsing, recovery, tab closure, and evidence checks'
 } finally {
+    if ($mcpProcess) {
+        # Only terminate the child tree created by this isolated test.
+        & taskkill.exe /PID $mcpProcess.Id /T /F 2>$null | Out-Null
+    }
+    if (Test-Path $mcpOut) { Get-Content $mcpOut -Tail 20 }
+    if (Test-Path $mcpErr) {
+        $messages = Get-Content $mcpErr -Tail 20
+        if ($messages) { Write-Warning ($messages -join [Environment]::NewLine) }
+    }
     if ($appProcess) { Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue }
     if ($modelProcess) { Stop-Process -Id $modelProcess.Id -Force -ErrorAction SilentlyContinue }
     $env:LUCIA_E2E_CLOUD_COMPAT = $previousCloudMode
+    $env:LUCIA_MCP_PORT = $previousMcpPort
     if (Test-Path $serverOut) { Get-Content $serverOut -Tail 25 }
     if (Test-Path $serverErr) {
         $errors = Get-Content $serverErr -Tail 25
