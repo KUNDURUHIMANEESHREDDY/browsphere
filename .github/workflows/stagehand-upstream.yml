@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: upstream-stagehand-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   stagehand-upstream:
     runs-on: windows-latest
