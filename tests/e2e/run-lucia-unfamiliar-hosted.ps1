@@ -144,6 +144,26 @@ $passedCount=@($records | Where-Object {$_.passed}).Count
 $resourceBlocked=@($records | Where-Object {$_.final_status -eq 'resource_blocked'}).Count
 $executed=$records.Count-$resourceBlocked
 $failed=$executed-$passedCount
+# Report observed end-to-end duration and native action model deadlines
+# separately. Ollama counters only exist for completed HTTP responses;
+# timed-out requests are represented by the outer Rust deadline event.
+# Nearest-rank percentiles on six attempts are diagnostic, not statistically
+# reliable production p99 measurements.
+function Percentiles([object[]]$values) {
+  $ordered=@($values | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ } | Sort-Object)
+  if($ordered.Count -eq 0){return [ordered]@{samples=0;p50=$null;p95=$null;p99=$null}}
+  $n=$ordered.Count
+  return [ordered]@{
+    samples=$n
+    p50=[math]::Round($ordered[[math]::Max(0,[int][math]::Ceiling(0.5*$n)-1)],1)
+    p95=[math]::Round($ordered[[math]::Max(0,[int][math]::Ceiling(0.95*$n)-1)],1)
+    p99=[math]::Round($ordered[[math]::Max(0,[int][math]::Ceiling(0.99*$n)-1)],1)
+  }
+}
+$taskDurations=@($records | Where-Object {$_.final_status -ne 'resource_blocked'} | ForEach-Object {$_.seconds})
+$actionPerf=@($records | ForEach-Object {$record=$_; @($record.model_performance) | Where-Object {$null -ne $_ -and $null -ne $_.wall_ms}})
+$actionTimes=@($actionPerf | ForEach-Object {$_.wall_ms})
+$actionTimeouts=@($actionPerf | Where-Object {$_.timed_out -eq $true}).Count
 $report=[ordered]@{
   generated_utc=(Get-Date).ToUniversalTime().ToString('o')
   branch=(git -C $root rev-parse --abbrev-ref HEAD)
@@ -151,6 +171,12 @@ $report=[ordered]@{
   total=$records.Count;executed=$executed;resource_blocked=$resourceBlocked
   passed=$passedCount;failed=$failed
   all_passed=($passedCount -eq $records.Count -and $resourceBlocked -eq 0)
+  latency_summary=[ordered]@{
+    task_elapsed_seconds=Percentiles $taskDurations
+    native_action_wall_ms=Percentiles $actionTimes
+    native_action_timeout_events=$actionTimeouts
+    scope='Ephemeral hosted Windows real-model tasks only; six attempts cannot establish release-grade p99.'
+  }
   qualification='Resource-blocked attempts never reached task execution; they do not count as passed or failed model-driven trials. A real pass needs independent source evidence and final task verification.'
   runs=@($records)
 }
