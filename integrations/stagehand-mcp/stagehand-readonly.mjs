@@ -17,6 +17,13 @@ export async function stagehandRead({url,instruction,mode='inspect',model}, {ci=
       browser,
       model:createOllamaModel({model: model || 'qwen2.5:3b-instruct'})
     });
+    // Stagehand v4 implements this using Chrome's own request-policy engine.
+    // Enforce it BEFORE navigation: checking the final URL alone is too late
+    // to prevent a cross-origin redirect or third-party subresource request.
+    // Exact hostname, never wildcard/subdomains and never user-provided rules.
+    await browser.context.setDomainPolicy({
+      allowedDomains:[new URL(target).hostname]
+    });
     const page=await browser.context.activePage();
     if (!page) throw Error('Stagehand has no browser page');
     await page.goto(target);
@@ -31,6 +38,7 @@ export async function stagehandRead({url,instruction,mode='inspect',model}, {ci=
     }
     if (mode==='observe') {
       const out=await stagehand.observe(instruction,{timeout:40000});
+      if (await page.url() !== observedUrl) throw Error('Source changed during research observation');
       return {url:observedUrl,actions:out.data.slice(0,12).map(a=>({
         description:String(a.description||'').slice(0,180),
         method:String(a.method||'').slice(0,30),
@@ -41,7 +49,13 @@ export async function stagehandRead({url,instruction,mode='inspect',model}, {ci=
     const out=await stagehand.extract(instruction,z.object({
       facts:z.array(z.object({quote:z.string(),source_url:z.string()})).max(8)
     }),{timeout:40000});
-    return {url:observedUrl,facts:out.data.facts,verified:false,
+    if (await page.url() !== observedUrl) throw Error('Source changed during research extraction');
+    // Model-supplied facts are still untrusted and not independent evidence.
+    // Reject invented or off-source URLs before even displaying them as leads.
+    const facts=out.data.facts;
+    if (!Array.isArray(facts) || facts.some(f=>f.source_url!==observedUrl))
+      throw Error('Extracted facts claim an unobserved source');
+    return {url:observedUrl,facts,verified:false,
       provenance:'Untrusted Stagehand extraction; Lucia must independently verify quotes'};
   } finally {
     // Stagehand manages its own isolated browser. Never close a user profile.
