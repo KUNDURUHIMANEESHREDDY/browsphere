@@ -4,6 +4,12 @@ name: Lucia Real Qwen Windows E2E
 # integrations are the primary automated regression gate.
 on:
   workflow_dispatch:
+    inputs:
+      unfamiliar_sites:
+        description: "Use genuine Qwen for three source-verified runs each on web.dev and W3C"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -42,7 +48,21 @@ jobs:
       - name: Run actual Qwen 2.5 through native Windows WebView2
         shell: pwsh
         timeout-minutes: 30
-        run: ./tests/e2e/run-lucia-real-qwen.ps1
+        run: |
+          if ('${{ inputs.unfamiliar_sites }}' -eq 'true') {
+            ./tests/e2e/run-lucia-real-qwen.ps1 -UnfamiliarSites
+          } else {
+            ./tests/e2e/run-lucia-real-qwen.ps1
+          }
+
+      - name: Upload unfamiliar-site acceptance report (including failures)
+        if: always() && inputs.unfamiliar_sites
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lucia-Unfamiliar-Real-Qwen
+          path: ${{ runner.temp }}/lucia-unfamiliar-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Publish non-sensitive run summary
         if: always()
