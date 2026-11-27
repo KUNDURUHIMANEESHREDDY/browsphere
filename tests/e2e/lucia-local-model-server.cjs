@@ -1,4 +1,5 @@
 'use strict';
+const {reviewFixtureEvidence} = require('./semantic-review-fixture.cjs');
 // A loopback-only, deterministic model simulator for native Windows integration
 // testing. It never accesses public sites and never substitutes for real-LLM tests.
 const http = require('node:http');
@@ -270,6 +271,11 @@ function chat(body) {
     }]};
   } else if (system.includes('independent, READ-ONLY evidence-review specialist')) {
     response = verifyEvidence(user);
+  } else if (system.includes('Check whether these source-backed findings answer the user')) {
+    // Second-pass semantic review must be a separate response: returning a
+    // browser_task object here fails closed in Rust, but disguises a broken
+    // deterministic fixture as a browser-navigation/recovery regression.
+    response = reviewFixtureEvidence(user);
   } else {
     response = {mode:'browser_task'};
   }
