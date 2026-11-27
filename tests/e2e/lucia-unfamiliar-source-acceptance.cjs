@@ -19,6 +19,11 @@ const expectedSource=process.env.LUCIA_EXPECTED_SOURCE_URL||'';
 const requireRecovery=process.env.LUCIA_REQUIRE_RECOVERY==='1';
 const port=Number(process.env.LUCIA_CDP_PORT||9696);
 const now=()=>new Date().toISOString();
+// Bound each genuine model attempt below the whole-job deadline. This changes
+// only test observability, never Lucia's native action or evidence policies.
+const attemptBudgetMs=Number(process.env.LUCIA_TEST_ATTEMPT_TIMEOUT_MS||175000);
+if(!Number.isInteger(attemptBudgetMs)||attemptBudgetMs<60000||attemptBudgetMs>280000)
+  throw Error('Invalid unfamiliar-site attempt budget');
 async function main(){
  let target;
  for(let i=0;i<100;i++){
@@ -84,13 +89,26 @@ async function main(){
      return true;
    })()`);
    const started=Date.now();
-   let runId=null,finalStatus=null,lastCount=0;
-   while(Date.now()-started<280000){
+   let runId=null,finalStatus=null,lastCount=0,lastHeartbeat=0;
+   while(Date.now()-started<attemptBudgetMs){
      await sleep(1100);
      const d=await evaluate('({launches:window.__orchestratorProbe.launches,events:window.__orchestratorProbe.events.slice(-160)})');
      if(d.launches.length){runId=d.launches[0].runId;taskTab=d.launches[0].tab;}
      const evs=d.events.filter(e=>e.payload?.run_id===runId);
      const traces=evs.filter(e=>e.kind==='agent:trace');
+     if(Date.now()-started-lastHeartbeat>=15000){
+       lastHeartbeat=Date.now()-started;
+       const modelEvents=evs.filter(e=>e.kind==='agent:model_performance');
+       const latest=modelEvents.at(-1)?.payload||{};
+       const stage=evs.filter(e=>e.kind==='agent:stage').at(-1)?.payload||{};
+       console.log('LIVE_HEARTBEAT',JSON.stringify({
+         elapsed_s:Math.round(lastHeartbeat/1000),runIdAssigned:Boolean(runId),
+         traces:traces.length,stage:stage.specialist||null,
+         model_calls:modelEvents.length,last_model_wall_ms:Number(latest.wall_ms)||null,
+         last_model_timed_out:latest.timed_out===true,
+         run_errors:evs.filter(e=>e.kind==='agent:run_error').length
+       }));
+     }
      if(traces.length>lastCount){
        lastCount=traces.length;const e=traces.at(-1).payload;
        console.log('LIVE_ACTION',JSON.stringify({at:now(),action:e.action?.type,outcome:e.outcome,decision:e.decision,route:e.model_route}).slice(0,730));
@@ -114,6 +132,8 @@ async function main(){
    const evs=final.events.filter(e=>e.payload?.run_id===runId);
    const report=evs.filter(e=>e.kind==='agent:verification_report'&&e.payload.report?.status==='evidence_checked').at(-1)?.payload?.report;
    const errors=evs.filter(e=>e.kind==='agent:run_error').map(e=>e.payload.message);
+   const attemptTimedOut=!finalStatus;
+   if(attemptTimedOut)errors.push('No terminal status within bounded genuine-model attempt deadline');
    const replanCount=evs.filter(e=>e.kind==='agent:objective_replan').length;
    const supervisorReviews=evs.filter(e=>e.kind==='agent:supervisor'&&e.payload?.status==='reviewing').length;
    const stalledObservations=evs.filter(e=>e.kind==='agent:orchestration'&&e.payload?.stalled===true).length;
@@ -203,7 +223,7 @@ async function main(){
      &&findings.length>0&&findings.every(f=>f.url&&f.quote&&f.claim)
      &&genuineModelUsed
      &&(problemIndex<0||recoveryVerified)&&(!requireRecovery||recoveryVerified);
-   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,supervisorReviews,stalledObservations,specialistStages,failedActions,modelPerformance,recoveryStages,requireRecovery,recoveryVerified,genuineModelUsed,genuineModelActions:genuineModelActions.length,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,expectedSource,sourcePathVerified,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,requiresReport,artifactReadbackVerified,summary:report?.summary?.slice(0,500)}));
+   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus||'timed_out',attemptTimedOut,attemptBudgetMs,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,supervisorReviews,stalledObservations,specialistStages,failedActions,modelPerformance,recoveryStages,requireRecovery,recoveryVerified,genuineModelUsed,genuineModelActions:genuineModelActions.length,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,expectedSource,sourcePathVerified,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,requiresReport,artifactReadbackVerified,summary:report?.summary?.slice(0,500)}));
    if(!passed)throw Error('Native task failed one or more end-to-end criteria');
  }finally{
    try{await evaluate("window.__TAURI__.core.invoke('cancel_agent_run')")}catch{}
