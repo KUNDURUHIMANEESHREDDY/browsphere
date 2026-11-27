@@ -533,6 +533,7 @@
       var nativeHasLiteLlmKey = false;
       var nativeOllamaModels = [];
       var nativeOllamaModelsError = 'Checking Ollama models...';
+      var nativeLocalCapabilitiesStatus = '';
       var nativeModelTestStatus = '';
       var nativeCloudFetchStatus = '';
       var nativeCredentialsMeta = [];
@@ -939,6 +940,7 @@
             case 'mcp-lucia-revoke':
             case 'mcp-preset-exa':
             case 'mcp-preset-tavily':
+            case 'mcp-preset-google':
             case 'mcp-provider-key-save':
             case 'mcp-provider-key-clear':
             case 'mcp-oauth-begin':
@@ -978,6 +980,9 @@
               break;
             case 'refresh-ai-models':
               refreshNativeOllamaModels(true);
+              break;
+            case 'inspect-ai-capabilities':
+              inspectNativeLocalCapabilities();
               break;
             case 'choose-ai-local-model':
               var modelInput = document.getElementById('cfgOllamaModel');
@@ -2954,6 +2959,7 @@
             config: nativeRouterConfig,
             localModels: nativeOllamaModels,
             localModelsError: nativeOllamaModelsError,
+            localCapabilitiesStatus: nativeLocalCapabilitiesStatus,
             hasKey: nativeHasLiteLlmKey,
             testStatus: nativeModelTestStatus,
             fetchStatus: nativeCloudFetchStatus,
@@ -3973,6 +3979,15 @@
         };
         mcpBusy = true;
         try {
+          if (action === 'mcp-preset-google') {
+            endpoint = 'https://calendarmcp.googleapis.com/mcp/v1self';
+            document.getElementById('cfgMcpUrl').value = endpoint;
+            document.getElementById('cfgMcpIssuer').value = 'https://accounts.google.com/';
+            document.getElementById('cfgMcpScope').value = 'https://www.googleapis.com/auth/calendar.events';
+            document.getElementById('cfgMcpAlias').value = 'calendar';
+            render('Google Calendar endpoint configured. Create a Google Cloud Desktop OAuth client marked for an AI-powered agent, enter its client ID and secret, then select Start authorization. Browsphere cannot authorize without your Google sign-in.');
+            return;
+          }
           if (action === 'mcp-preset-exa' || action === 'mcp-preset-tavily') {
             var exa = action === 'mcp-preset-exa';
             endpoint = exa ? 'https://mcp.exa.ai/mcp/oauth' : 'https://mcp.tavily.com/mcp';
@@ -3994,13 +4009,17 @@
           } else if (action === 'mcp-oauth-begin') {
             var issuer = document.getElementById('cfgMcpIssuer')?.value.trim();
             var clientId = document.getElementById('cfgMcpClientId')?.value.trim();
+            var secretField = document.getElementById('cfgMcpClientSecret');
+            var clientSecret = secretField?.value.trim() || '';
             var scope = document.getElementById('cfgMcpScope')?.value.trim() || '';
             if (!window.confirm('Authorize this trusted MCP resource using the specified issuer?\n'+endpoint+'\n'+issuer)) return;
             var browser = await chooseMcpOAuthBrowser();
             if (!browser) return;
             mcpAuthorization = null;
             render('Checking authorization metadata...');
-            var flow = await window.aetherBridge.beginMcpOAuth(endpoint,issuer,clientId,scope);
+            var flow;
+            try { flow = await window.aetherBridge.beginMcpOAuth(endpoint,issuer,clientId,scope,clientSecret); }
+            finally { if (secretField) secretField.value = ''; clientSecret = ''; }
             mcpAuthorization = {id:flow.id,url:flow.authorizationUrl,endpoint:endpoint};
             render('Opening your chosen browser. Complete sign-in and approve access. If it does not open, use Open sign-in browser or Copy authorization URL.');
             await window.aetherBridge.openMcpOAuthBrowser(flow.id,browser);
@@ -4086,6 +4105,42 @@
           }
         } catch (err) { render('MCP error: '+String(err)); }
         finally {mcpBusy=false;}
+      }
+
+      function showLocalCapabilitiesStatus(message) {
+        nativeLocalCapabilitiesStatus = message;
+        var el = document.getElementById('cfgLocalCapabilitiesStatus');
+        if (el) el.textContent = message;
+      }
+
+      async function inspectNativeLocalCapabilities() {
+        var chosen = (document.getElementById('cfgOllamaModel')?.value || nativeRouterConfig.ollama_model || '').trim();
+        var server = (document.getElementById('cfgOllamaUrl')?.value || '').trim();
+        if (server && server !== nativeRouterConfig.ollama_url) {
+          showLocalCapabilitiesStatus('Save the Ollama server setting before inspecting models.');
+          return;
+        }
+        if (!nativeOllamaModels.includes(chosen)) {
+          showLocalCapabilitiesStatus('Choose a currently installed local model first.');
+          return;
+        }
+        if (!window.aetherBridge?.inspectLocalModelCapabilities) {
+          showLocalCapabilitiesStatus('Capability inspection requires the Windows app.');
+          return;
+        }
+        showLocalCapabilitiesStatus('Checking the local provider metadata...');
+        try {
+          var result = await window.aetherBridge.inspectLocalModelCapabilities(chosen);
+          var stateLabel = function (value) {
+            return value === true ? 'yes' : value === false ? 'no' : 'unknown';
+          };
+          showLocalCapabilitiesStatus(chosen + ' — text ' + stateLabel(result.completion) +
+            ', vision ' + stateLabel(result.vision) + ', tools ' + stateLabel(result.tools) +
+            ', thinking ' + stateLabel(result.thinking) +
+            '. Structured JSON and real task success: not verified by provider metadata.');
+        } catch (err) {
+          showLocalCapabilitiesStatus('Capability discovery failed: ' + String(err));
+        }
       }
 
       function showModelTestStatus(message) {

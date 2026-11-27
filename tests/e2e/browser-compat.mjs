@@ -68,12 +68,52 @@ try {
   const initial = await main.evaluate('({native:window.aetherBridge?.isNative,controls:!!window.browsphereSiteControls,lock:!!document.getElementById("sitePermissionsButton")})');
   record('Native UI and site controls load', initial.native && initial.controls && initial.lock, initial);
 
+  if (process.env.BROWSER_CAPABILITY_TEST === '1') {
+    // The empty-model native error proves command registration even on CI
+    // machines without Ollama. If Ollama is reachable, also check metadata.
+    const capability = await main.evaluate(`(async()=>{
+      const hasBridge=typeof window.aetherBridge?.inspectLocalModelCapabilities==='function';
+      let nativeGuard=false, nativeError='';
+      try {
+        await window.__TAURI__.core.invoke('inspect_local_model_capabilities',{model:''});
+        nativeError='Empty model unexpectedly accepted';
+      } catch(error) {
+        nativeError=String(error).slice(0,240);
+        nativeGuard=nativeError.includes('Select a currently installed local model');
+      }
+      let selected='', metadata=null, metadataError='';
+      try {
+        const models=await window.aetherBridge.listLocalModels();
+        if (Array.isArray(models)&&models.length) {
+          selected=models[0];
+          metadata=await window.__TAURI__.core.invoke('inspect_local_model_capabilities',{model:selected});
+        }
+      } catch(error) { metadataError=String(error).slice(0,240); }
+      return {hasBridge,nativeGuard,nativeError,selected,metadata,metadataError};
+    })()`);
+    record('Native capability registry command is registered',capability?.nativeGuard===true,capability?.nativeError);
+    record('Packaged UI exposes capability inspection bridge',capability?.hasBridge===true,{hasBridge:capability?.hasBridge});
+    if (capability?.selected) {
+      const meta=capability.metadata;
+      const ok=meta?.model===capability.selected && meta.provider==='ollama' &&
+        meta.source==='ollama_api_show' && typeof meta.completion==='boolean' &&
+        meta.structured_json===null && meta.live_task_verified===false;
+      record('Native capability registry reads installed Ollama metadata',ok,meta || capability?.metadataError);
+    }
+  }
+
   const sites = [
     ['Example Domain', 'https://example.com/'],
     ['GitHub', 'https://github.com/'],
     ['Wikipedia', 'https://www.wikipedia.org/'],
     ['Hacker News', 'https://news.ycombinator.com/']
   ];
+  if (process.env.BROWSER_COMPAT_UNFAMILIAR === '1') {
+    sites.push(['web.dev Accessibility', 'https://web.dev/learn/accessibility/']);
+    sites.push(['W3C Image Tutorials', 'https://www.w3.org/WAI/tutorials/images/']);
+    sites.push(['MDN JavaScript Docs', 'https://developer.mozilla.org/en-US/docs/Web/JavaScript/']);
+    sites.push(['Python Tutorial', 'https://docs.python.org/3/tutorial/']);
+  }
   for (const [label, url] of sites) {
     await main.evaluate(`window.browsphereApp.navigate(${JSON.stringify(url)})`);
     let match;

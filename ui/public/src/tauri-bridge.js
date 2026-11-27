@@ -636,6 +636,11 @@
       return invoke('list_local_models');
     },
 
+    async inspectLocalModelCapabilities(model) {
+      if (!invoke) throw new Error('Model capabilities require the native app');
+      return invoke('inspect_local_model_capabilities', { model });
+    },
+
     async askMainTabAi(messages, voiceMode = false) {
       if (!invoke) throw new Error('AI chat requires the Browsphere desktop app');
       return invoke('ask_main_tab_ai', { messages, voiceMode: Boolean(voiceMode) });
