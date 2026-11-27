@@ -1616,8 +1616,9 @@ User text: <text>{}</text>"#,
                 &crate::lucia_prompts::action_system_prompt(specialist_instructions),
                 voice_mode,
             );
+            let verification_specialist = specialist_instructions == crate::lucia_prompts::VERIFICATION_SPECIALIST;
             let tiny = if self.config.ollama_model == "qwen3.5:0.8b" || self.config.ollama_model == "lfm3" || self.config.ollama_model.starts_with("lfm3:") || prompt_payload.lines().any(|line| line.starts_with("Supervisor directive:") || line.strip_prefix("Original user goal: ").is_some_and(|g|crate::agent::policy::requested_music_entry_url(g).is_some())) {
-                Some(Self::tiny_action_context(prompt_payload))
+                Some(Self::tiny_action_context(prompt_payload, verification_specialist))
             } else { None };
             let concise = tiny.as_ref().map(|(prompt,_,_)| prompt.clone())
                 .unwrap_or_else(|| Self::compact_browser_action_prompt(prompt_payload));
@@ -1663,7 +1664,7 @@ User text: <text>{}</text>"#,
                     "Invalid action JSON or required parameters"
                 };
                 if let Some((thought, mut action)) = Self::parse_model_json(raw) {
-                    if matches!(&action, BrowserAction::Complete { .. }) && Self::completion_blocked(prompt_payload) {
+                    if matches!(&action, BrowserAction::Complete { .. }) && Self::completion_blocked_for_role(prompt_payload, verification_specialist) {
                         rejection = "Native evidence gate blocks completion; choose a productive observed action";
                         continue;
                     }
@@ -1775,7 +1776,11 @@ User text: <text>{}</text>"#,
         raw.lines().any(|line| line.starts_with("Native completion gate: blocked"))
     }
 
-    fn tiny_action_context(raw: &str) -> (String, serde_json::Value, HashMap<String, String>) {
+    fn completion_blocked_for_role(raw: &str, verification_specialist: bool) -> bool {
+        !verification_specialist && Self::completion_blocked(raw)
+    }
+
+    fn tiny_action_context(raw: &str, verification_specialist: bool) -> (String, serde_json::Value, HashMap<String, String>) {
         use serde_json::Value;
         fn variant(kind: &str, fields: Value) -> Value {
             let mut props = fields.as_object().cloned().unwrap_or_default();
@@ -2075,7 +2080,7 @@ User text: <text>{}</text>"#,
             }
             true
         });
-        if Self::completion_blocked(raw) {
+        if Self::completion_blocked_for_role(raw, verification_specialist) {
             variants.retain(|v| v["properties"]["type"]["enum"][0] != "complete");
             prompt.push_str("\nNative evidence is insufficient. Completion is unavailable; advance the goal using current observed controls.");
         }
@@ -2294,6 +2299,22 @@ User text: <text>{}</text>"#,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verifier_can_request_independent_review_when_browser_completion_is_blocked() {
+        let raw = "Original user goal: Visit https://docs.example.org/guide and cite a passage.\nNative completion gate: blocked: final evidence not checked\nInteractive nodes JSON: []";
+        let (_, browser_schema, _) = ModelRouter::tiny_action_context(raw, false);
+        let (_, verifier_schema, _) = ModelRouter::tiny_action_context(raw, true);
+        let offers_complete = |schema: &serde_json::Value| schema["properties"]["action"]["anyOf"]
+            .as_array().is_some_and(|variants| variants.iter().any(|v|
+                v["properties"]["type"]["enum"][0] == "complete"));
+        assert!(!offers_complete(&browser_schema));
+        assert!(offers_complete(&verifier_schema));
+        assert!(ModelRouter::completion_blocked_for_role(raw, false));
+        assert!(!ModelRouter::completion_blocked_for_role(raw, true));
+        assert_eq!(crate::agent::orchestrator::Specialist::Verification.instructions(),
+            crate::lucia_prompts::VERIFICATION_SPECIALIST);
+    }
 
     #[test]
     fn reference_escalation_is_configured_local_and_memory_bounded(){
@@ -2529,7 +2550,7 @@ mod tests {
         let raw=format!("Native completion gate: blocked - playback missing\nOriginal user goal: Open YouTube and play any song\nOrigin: https://www.youtube.com/\nAllowed navigation JSON: [\"https://www.youtube.com/\"]\nInteractive nodes JSON: {}",json!([
             {"node_id":"search","tag":"input","role":"searchbox","label":"Search","search_state":"empty","is_sensitive":false}
         ]));
-        let (_,schema,_)=ModelRouter::tiny_action_context(&raw);
+        let (_,schema,_)=ModelRouter::tiny_action_context(&raw, false);
         assert!(!ModelRouter::tiny_choice_allowed(&BrowserAction::Navigate{url:"https://www.youtube.com/".into()},&schema));
         let (_,action)=ModelRouter::parse_model_json(r#"{"action":{"type":"type_text","node_id":"c1","text":"music video"}}"#).unwrap();
         assert!(ModelRouter::tiny_choice_allowed(&action,&schema));
@@ -2539,7 +2560,7 @@ mod tests {
     #[test]
     fn tiny_schema_blocks_premature_completion_and_preserves_observed_actions() {
         let raw = format!("Native completion gate: blocked - missing evidence\n{}", tiny_search_fixture().replace("Enter the exact search phrase Rust programming in the empty search field.", "Advance the requested task."));
-        let (prompt, schema, _) = ModelRouter::tiny_action_context(&raw);
+        let (prompt, schema, _) = ModelRouter::tiny_action_context(&raw, false);
         assert!(prompt.contains("Native completion gate: blocked"));
         assert!(!ModelRouter::tiny_choice_allowed(&BrowserAction::Complete { summary: "Done".into() }, &schema));
         let (_, action) = ModelRouter::parse_model_json(r#"{"action":{"type":"type_text","node_id":"c1","text":"Rust programming"}}"#).unwrap();
@@ -2549,14 +2570,14 @@ mod tests {
     #[test]
     fn read_only_tiny_schema_excludes_downloads(){
         let raw="Original user goal: Find the public documentation and report its title.\nAllowed navigation JSON: []\nInteractive nodes JSON: []";
-        let (_,schema,_)=ModelRouter::tiny_action_context(raw);
+        let (_,schema,_)=ModelRouter::tiny_action_context(raw, false);
         assert!(!ModelRouter::tiny_choice_allowed(&BrowserAction::Download{url:"https://example.org/file".into(),suggested_filename:None},&schema));
         assert!(ModelRouter::tiny_choice_allowed(&BrowserAction::Scroll{delta_y:100},&schema));
     }
 
     #[test]
     fn tiny_schema_uses_current_aliases_and_disallows_empty_search_submission() {
-        let (prompt, schema, aliases) = ModelRouter::tiny_action_context(&tiny_search_fixture());
+        let (prompt, schema, aliases) = ModelRouter::tiny_action_context(&tiny_search_fixture(), false);
         assert!(!prompt.contains("native:query-987654"));
         assert_eq!(aliases.get("c1").map(String::as_str), Some("native:query-987654"));
         let choices = schema["properties"]["action"]["anyOf"].as_array().unwrap();
@@ -2594,7 +2615,7 @@ mod tests {
         ]);
         let failed=json!([{"type":"select_option","node_id":"category","key":"books"}]);
         let raw=format!("Original user goal: Select a category and format.\nFailed choices JSON: {failed}\nInteractive nodes JSON: {nodes}");
-        let (_,schema,aliases)=ModelRouter::tiny_action_context(&raw);
+        let (_,schema,aliases)=ModelRouter::tiny_action_context(&raw, false);
         let alias=|id:&str|aliases.iter().find(|(_,v)|v.as_str()==id).unwrap().0.clone();
         let choose=|id:&str,value:&str|BrowserAction::SelectOption{node_id:alias(id),option_label:value.into()};
         assert!(ModelRouter::tiny_choice_allowed(&choose("category","Maps"),&schema));
@@ -2615,7 +2636,7 @@ mod tests {
             {"node_id":"from-native","tag":"input","role":"combobox","label":"From station","search_state":"filled","is_sensitive":false}
         ]);
         let raw = format!("Original user goal: Select Central Station and journey date.\nInteractive nodes JSON: {nodes}");
-        let (prompt,schema,aliases) = ModelRouter::tiny_action_context(&raw);
+        let (prompt,schema,aliases) = ModelRouter::tiny_action_context(&raw, false);
         assert!(prompt.contains("read_only"));
         assert_eq!(aliases.get("c1").map(String::as_str), Some("station-native"));
         let (_, option) = ModelRouter::parse_model_json(r#"{"action":{"type":"click","node_id":"c1"}}"#).unwrap();
