@@ -3154,34 +3154,47 @@ async fn run_browser_loop(
                             let invalid_model_action=error.to_string()
                                 .contains("could not produce a valid browser action after two attempts")
                                 || error.to_string().contains("Lucia action model timed out");
+                            let verifier_recovery = rejected_verification_sources.is_some()
+                                && orchestrator.specialist()!=Specialist::Verification;
                             let grounded=if freshly_observed
                                 && invalid_model_action
-                                && orchestrator.specialist()==Specialist::Research
-                                && crate::agent::deliberation::read_only(&goal){
-                                crate::agent::course_comparison::next_search(
-                                    &goal,&orchestrator.evidence,&snapshot.origin)
-                                    .map(|url|BrowserAction::Navigate{url:url.to_string()})
+                                && crate::agent::deliberation::read_only(&goal)
+                                && (orchestrator.specialist()==Specialist::Research || verifier_recovery) {
+                                (if orchestrator.specialist()==Specialist::Research {
+                                    crate::agent::course_comparison::next_search(
+                                        &goal,&orchestrator.evidence,&snapshot.origin)
+                                        .map(|url|BrowserAction::Navigate{url:url.to_string()})
+                                } else {None})
                                     .or_else(||crate::agent::action_intelligence::grounded_search_result(
                                         &goal,&snapshot))
                                     .or_else(||{
-                                        // Reuse exactly the same grounded, stage-aware
-                                        // alternative selector used for stalled actions.
-                                        // Never guess a URL or execute a raw model
-                                        // response after malformed action JSON.
+                                        // After a rejected review, retry only a
+                                        // distinct control in freshly observed DOM.
+                                        // Never manufacture source evidence.
                                         replacement.next_for_stage(
                                             &goal,&semantic_focus,&snapshot,&objectives,&route_ledger)
-                                            .filter(|candidate|
-                                                !matches!(candidate,BrowserAction::Complete{..}|
-                                                    BrowserAction::Download{..}) &&
-                                                orchestrator.specialist().allows_on_page(candidate,&snapshot) &&
-                                                crate::agent::objective_gate::check(
-                                                    &goal,&initial_origin,&snapshot,&objectives,candidate).is_ok())
                                     })
+                                    .filter(|candidate|
+                                        !matches!(candidate,
+                                            BrowserAction::Complete{..}|BrowserAction::Download{..}|
+                                            BrowserAction::Click{is_submit:true,..}|
+                                            BrowserAction::TypeText{is_sensitive:true,..}) &&
+                                        !run_core.failed_before(candidate,&snapshot,orchestrator.current) &&
+                                        orchestrator.specialist().allows_on_page(candidate,&snapshot) &&
+                                        crate::agent::objective_gate::check(
+                                            &goal,&initial_origin,&snapshot,&objectives,candidate).is_ok())
                             } else {None};
                             if let Some(action)=grounded {
-                                ("Recover an invalid model action with a live observed research route".into(),
-                                    action,"course:invalid_model_action_native_fallback".into())
-                            }else{return Err(error)}
+                                ("Recover a rejected action with a newly observed safe browser route".into(),
+                                    action,"recovery:invalid_model_grounded_fallback".into())
+                            } else if verifier_recovery {
+                                let _=app.emit("agent:run_error",serde_json::json!({
+                                    "run_id":run_id,
+                                    "message":"Verifier rejected the current evidence and the model could not choose a distinct valid browser action. Stopped unverified without repeating completion."
+                                }));
+                                final_status="unverified".into();
+                                break;
+                            } else {return Err(error)}
                         }
                         else {
                             tokio::select! {
