@@ -61,6 +61,12 @@ class HyperresearchGatewayTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             core.note_result("[]")
 
+    def test_upstream_lookup_errors_and_oversize_payloads_fail_closed(self):
+        with self.assertRaises(ValueError):
+            core.note_result(json.dumps({"error": "Note not found: missing"}))
+        with self.assertRaises(ValueError):
+            core.search_results(" " * 2_000_001)
+
     def test_source_check_does_not_promote_cache_to_proof(self):
         response = json.loads(core.source_check(json.dumps({
             "exists": True, "url": "https://example.org/guide",
