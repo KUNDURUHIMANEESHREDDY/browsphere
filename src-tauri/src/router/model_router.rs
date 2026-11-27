@@ -2082,7 +2082,7 @@ User text: <text>{}</text>"#,
                     && target.query()==current.query()
             });
         if same_source {
-            prompt.push_str("\\nThe requested exact source is already open; do not navigate again. Inspect observed source controls, scroll to read, and request evidence checking only after a supporting passage is observed.");
+            prompt.push_str("\nThe requested exact source is already open; do not navigate again. Inspect observed source controls, scroll to read, and request evidence checking only after a supporting passage is observed.");
         } else if let Some(source)=exact_user_source {
             // The original goal, not a webpage or a model response, provided
             // the only allowable URL. Respect an upstream allowlist if present.
@@ -2754,7 +2754,7 @@ Interactive nodes JSON: {}"#,
     #[test]
     fn qwen_read_only_research_stops_repeating_the_already_open_user_url() {
         let raw=concat!(
-            "Original user goal: Visit https://web.dev/learn/accessibility and cite one passage.\n",
+            "Original user goal: Visit https://web.dev/learn/accessibility and report one specific recommendation, citing a supporting passage.\n",
             "Assigned stage objective: Read the observed official guide.\n",
             "Origin: https://web.dev/learn/accessibility/\n",
             "Native completion gate: blocked - source passage missing\n",
@@ -2774,7 +2774,7 @@ Interactive nodes JSON: {}"#,
     #[test]
     fn qwen_read_only_research_can_only_navigate_to_exact_user_source_before_arrival() {
         let raw=concat!(
-            "Original user goal: Visit https://web.dev/learn/accessibility and cite one passage.\n",
+            "Original user goal: Visit https://web.dev/learn/accessibility and report one specific recommendation, citing a supporting passage.\n",
             "Assigned stage objective: Open official source.\n",
             "Origin: https://example.org/\n",
             "Interactive nodes JSON: []"
