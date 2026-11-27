@@ -46,8 +46,17 @@ async function main(){
   };
   try{
     await cdp('Runtime.enable');
-    const ready=await evalMain("({tauri:!!window.__TAURI__,title:document.title})");
-    assert.equal(ready.tauri,true,'Target is not native Browsphere app shell');
+    // CDP may advertise the Tauri page while its JS bridge is still loading.
+    // Native readiness, not merely the port or URL, gates the test.
+    let ready;
+    for(let i=0;i<90;i++){
+      try {
+        ready=await evalMain("({tauri:!!window.__TAURI__?.core?.invoke,title:document.title})");
+        if(ready?.tauri)break;
+      }catch{}
+      await sleep(250);
+    }
+    assert.equal(ready?.tauri,true,'The isolated target never exposed the trusted Tauri API');
     await evalMain("window.__TAURI__.core.invoke('open_or_navigate_tab',{tabId:'live-visual-fixture',url:'http://127.0.0.1:18764/',isPrivate:true})");
     let status={};
     for(let i=0;i<60;i++){
