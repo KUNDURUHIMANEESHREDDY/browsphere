@@ -12,10 +12,26 @@ if(process.env.GITHUB_ACTIONS!=='true'||!Number.isInteger(cdpPort)||!Number.isIn
  try{
   const page=browser.contexts().flatMap(x=>x.pages()).find(x=>x.url().includes('tauri.localhost'));
   assert.ok(page,'Installed Browsphere Tauri WebView2 shell missing');
-  await page.evaluate(()=>{
+  const modelPort=Number(process.env.LUCIA_MODEL_PORT);
+  assert.ok(Number.isInteger(modelPort)&&modelPort>=1024&&modelPort<=65535,
+    'Isolated model service port missing');
+  // The existing native chatbox requires an explicit healthy model route
+  // before dispatching *any* task, even an MCP-only read. Use the same
+  // deterministic CI loopback model as Lucia's already-verified E2E runner.
+  // Do not disable or weaken the runtime's readiness admission check.
+  await page.evaluate(async port=>{
+    const cfg=await window.__TAURI__.core.invoke('get_router_config');
+    cfg.ollama_url='http://127.0.0.1:'+port;
+    cfg.ollama_model='lucia-local-e2e';
+    cfg.prefer_local_for_simple=true;
+    cfg.lucia_cloud_only=false;
+    cfg.domain_overrides={};
+    await window.__TAURI__.core.invoke('update_router_config',{config:cfg});
+  },modelPort);
+  await page.evaluate(async()=>{
     window.__upstreamMcpEvents=[];
     for(const name of ['agent:run_status','agent:run_error','agent:run_completed'])
-      window.__TAURI__.event.listen(name,e=>window.__upstreamMcpEvents.push({type:name,payload:e.payload}));
+      await window.__TAURI__.event.listen(name,e=>window.__upstreamMcpEvents.push({type:name,payload:e.payload}));
   });
   const fixture='http://127.0.0.1:'+fixturePort+'/generic-search.html';
   await page.evaluate(url=>window.browsphereApp.newTab(url),fixture);
