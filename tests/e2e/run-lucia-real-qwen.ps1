@@ -1,6 +1,11 @@
 # Genuine Qwen 2.5 native Windows test using pinned Ollama portable binaries.
 # Model and browser run only on a temporary GitHub-hosted Windows worker.
-param([string]$Model = 'qwen2.5:3b-instruct', [switch]$UnfamiliarSites)
+param(
+  [string]$Model = 'qwen2.5:3b-instruct',
+  [switch]$UnfamiliarSites,
+  [ValidateSet('all','webdev','w3c')][string]$Scenario='all',
+  [ValidateRange(1,3)][int]$Repetitions=3
+)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true') {
     throw 'Real Qwen CI experiment requires an isolated GitHub-hosted Windows runner.'
@@ -80,13 +85,18 @@ try {
             done_reason=[string]$probe.done_reason
         }
         Write-Host ('REAL_QWEN_PREFLIGHT '+($metrics|ConvertTo-Json -Compress))
-        Write-Host 'Running SIX genuinely model-driven tasks across two public unfamiliar documentation sites.'
+        $attempts=$Repetitions * $(if($Scenario -eq 'all'){2}else{1})
+        Write-Host ("Running {0} genuine-model trial(s); scenario={1}; no unverified trial counts as success." -f $attempts,$Scenario)
         $resultPath=Join-Path $env:RUNNER_TEMP 'lucia-unfamiliar-evidence.json'
-        & (Join-Path $root 'tests\e2e\run-lucia-unfamiliar-hosted.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe') -Scenario all -Repetitions 3 -ActionModel $Model -SupervisorModel $Model -ReportPath $resultPath
+        & (Join-Path $root 'tests\e2e\run-lucia-unfamiliar-hosted.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe') -Scenario $Scenario -Repetitions $Repetitions -ActionModel $Model -SupervisorModel $Model -ReportPath $resultPath
         if ($LASTEXITCODE -ne 0) {
             throw "Real Qwen unfamiliar-site acceptance failed; resource blocks and unverified outcomes are not passes."
         }
-        Write-Host 'PASS: Six independent real-Qwen unfamiliar-site task completions were source-verified.'
+        if($Scenario -eq 'all' -and $Repetitions -eq 3) {
+            Write-Host 'PASS: Six independent real-Qwen unfamiliar-site task completions were source-verified.'
+        } else {
+            Write-Host 'DIAGNOSTIC_PASS: limited trial(s) passed; full 6/6 release acceptance has NOT run.'
+        }
     } else {
         Write-Host 'Running genuine Qwen decisions through native WebView2 fixture integration.'
         & (Join-Path $root 'tests\e2e\run-lucia-multistep.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe')
