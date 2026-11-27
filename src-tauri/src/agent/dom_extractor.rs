@@ -549,7 +549,12 @@ pub fn build_snapshot_script(request_id: Uuid, max_nodes: usize, max_text_chars:
   // next snapshot exposes the rest of the page without guessing controls.
   let hitId=null;
   if (activeDialog) {{
-    walk(activeDialog);
+    // The dialog itself can be the only keyboard target (e.g. a native
+    // <dialog tabindex="0"> with no buttons). Include its observed element
+    // alongside any controls inside it; inactive page controls stay hidden.
+    // isInteractive/isVisible still gate the root, so a non-focusable modal
+    // only contributes its actual descendants.
+    walk(activeDialog, true);
   }} else {{
   // A visual hint is not an action. Sample exactly one point on the same
   // viewport and prioritize the real semantic control under that point.
@@ -937,4 +942,19 @@ pub async fn request_reference_snapshot(app:&tauri::AppHandle,label:&str,terms:&
     let script=build_snapshot_script(Uuid::new_v4(),120,24000).replace("const FOCUS_TERMS = [];",&format!("const FOCUS_TERMS = {payload};"));
     let value=crate::agent::native_eval::eval_json(app,label,script,2500).await.ok()?;
     serde_json::from_value(value).ok()
+}
+
+#[cfg(test)]
+mod dialog_root_regression {
+    use super::*;
+    #[test]
+    fn native_snapshot_includes_the_active_dialog_as_keyboard_target() {
+        let script = build_snapshot_script(Uuid::nil(), 120, 24000);
+        assert!(script.contains("walk(activeDialog, true);"));
+        assert!(script.contains("if ((!activeDialog || activeDialog.contains(current))"));
+        assert!(script.contains("const INTERACTIVE_TAGS"));
+        assert!(script.contains("\"DIALOG\""));
+        // The inactive document is only traversed in the no-modal branch.
+        assert!(script.contains("} else {"));
+    }
 }
