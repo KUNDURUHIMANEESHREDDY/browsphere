@@ -1,0 +1,62 @@
+name: Lucia Universal Model Architecture — Windows Acceptance Build
+
+on:
+  push:
+    branches: [verify/lucia-universal-agent-20261127]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  universal-model-build:
+    runs-on: windows-latest
+    timeout-minutes: 80
+    steps:
+      - name: Check out isolated source snapshot
+        uses: actions/checkout@v4
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Set up stable Windows Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Reuse Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Verify shared model contract and namespaced tag handling
+        shell: pwsh
+        run: |
+          node --check tests/e2e/lucia-orchestrator-unfamiliar-live.cjs
+          node --test tests/e2e/model-route-contract.test.cjs tests/lucia-unified-model-contract.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Universal model contract tests failed' }
+          $tokens=$null; $errors=$null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path tests/e2e/run-lucia-installed-model-matrix.ps1),[ref]$tokens,[ref]$errors) | Out-Null
+          if (@($errors).Count -gt 0) { throw 'Installed-model real-site acceptance matrix has invalid PowerShell syntax' }
+      - name: Run Rust universal router and source evidence regressions
+        shell: pwsh
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --locked --jobs 2 adaptive_reasoning_is_capability_gated_and_honors_custom_roles
+          if ($LASTEXITCODE -ne 0) { throw 'Generic role routing regression failed' }
+          cargo test --manifest-path src-tauri/Cargo.toml --locked --jobs 2 explicit_source_catalog_excludes_context_only_unrelated_passages
+          if ($LASTEXITCODE -ne 0) { throw 'Evidence verifier regression failed' }
+          cargo test --manifest-path src-tauri/Cargo.toml --locked --jobs 2 capability_registry::tests
+          if ($LASTEXITCODE -ne 0) { throw 'Capability registry regression failed' }
+      - name: Build current Rust and embedded WebView2 UI
+        shell: pwsh
+        run: |
+          npm ci --prefix ui --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'UI dependency installation failed' }
+          npm run build:css --prefix ui
+          if ($LASTEXITCODE -ne 0) { throw 'UI CSS build failed' }
+          cargo build --manifest-path src-tauri/Cargo.toml --release --locked --jobs 2
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows release build failed' }
+      - name: Publish candidate executable for genuine local-model real-site acceptance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lucia-universal-model-candidate
+          path: target/release/browsphere-core.exe
+          if-no-files-found: warn
+          retention-days: 7

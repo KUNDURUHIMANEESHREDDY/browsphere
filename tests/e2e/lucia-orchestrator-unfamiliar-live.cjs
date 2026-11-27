@@ -1,5 +1,6 @@
 'use strict';
 const fs=require('node:fs'),crypto=require('node:crypto');
+const {traceRouteMatchesModel}=require('./model-route-contract.cjs');
 // Unfamiliar-site acceptance: the REAL home chatbox dispatches the REAL native
 // task. Neither the browser action nor the independent verifier is mocked.
 // Requires an isolated Browsphere instance with remote debugging enabled.
@@ -13,7 +14,8 @@ function selectedModel(key,fallback){
   return value;
 }
 const actionModel=selectedModel('LUCIA_TEST_ACTION_MODEL','qwen3.5:0.8b');
-if(!/^qwen(?:[0-9]|[.:-])/i.test(actionModel))throw Error('Genuine-Qwen acceptance requires a Qwen action model');
+// All installed Ollama model names share the same native orchestration and
+// independently verified action contract. The test must not whitelist brands.
 const supervisorModel=selectedModel('LUCIA_TEST_SUPERVISOR_MODEL','lfm3:1.7b');
 const expected=(process.env.LUCIA_EXPECTED_HOSTS||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
 const expectedSource=process.env.LUCIA_EXPECTED_SOURCE_URL||'';
@@ -120,10 +122,11 @@ async function main(){
    const stalledObservations=evs.filter(e=>e.kind==='agent:orchestration'&&e.payload?.stalled===true).length;
    const specialistStages=evs.filter(e=>e.kind==='agent:stage').map(e=>({name:e.payload?.specialist,status:e.payload?.status}));
    const failedActions=evs.filter(e=>e.kind==='agent:trace'&&e.payload?.outcome==='failed').length;
-   // Configuring Qwen is insufficient. Require a native action trace explicitly
-   // routed to that exact local model; deterministic navigation alone cannot pass.
-   const qwenActions=evs.filter(e=>e.kind==='agent:trace'&&
-     String(e.payload?.model_route||'').toLowerCase().includes('ollama:'+actionModel.toLowerCase())&&
+   // Configuring a model is insufficient. Require a confirmed native action
+   // trace routed to that EXACT selected Ollama model. Do not count similarly
+   // prefixed model identifiers or deterministic native navigation as model work.
+   const modelActions=evs.filter(e=>e.kind==='agent:trace'&&
+     traceRouteMatchesModel(e.payload?.model_route,'ollama',actionModel)&&
      ['confirmed','ok','success'].includes(e.payload?.outcome)).length;
    const recoveryEvents=evs.filter(e=>e.kind==='agent:verification_recovery');
    const recoveryStages=recoveryEvents.map(e=>e.payload.status);
@@ -190,9 +193,9 @@ async function main(){
      &&finalStatus==='completed'&&Boolean(report)&&!missingHosts.length&&sourcePathVerified
      &&!paidUpgradeQuote&&!paidSummary&&!missingFreeProof.length&&!missingCapacityProof.length&&!incompleteSummary
      &&(!requiresReport||artifactReadbackVerified)
-     &&qwenActions>0&&findings.length>0&&findings.every(f=>f.url&&f.quote&&f.claim)
+     &&modelActions>0&&findings.length>0&&findings.every(f=>f.url&&f.quote&&f.claim)
      &&(problemIndex<0||recoveryVerified)&&(!requireRecovery||recoveryVerified);
-   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actionModel,qwenActions,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,supervisorReviews,stalledObservations,specialistStages,failedActions,recoveryStages,requireRecovery,recoveryVerified,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,expectedSource,sourcePathVerified,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,requiresReport,artifactReadbackVerified,summary:report?.summary?.slice(0,500)}));
+   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actionModel,modelActions,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,supervisorReviews,stalledObservations,specialistStages,failedActions,recoveryStages,requireRecovery,recoveryVerified,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,expectedSource,sourcePathVerified,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,requiresReport,artifactReadbackVerified,summary:report?.summary?.slice(0,500)}));
    if(!passed)throw Error('Native task failed one or more end-to-end criteria');
  }finally{
    try{await evaluate("window.__TAURI__.core.invoke('cancel_agent_run')")}catch{}

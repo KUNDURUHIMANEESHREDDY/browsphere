@@ -3629,6 +3629,9 @@ async fn run_browser_loop(
             if let Some(mut candidate)=replacement.next_for_stage(&goal,&semantic_focus,&snapshot,&objectives,&route_ledger){
                 if orchestrator.specialist().allows_on_page(&candidate,&snapshot)&&
                     !crate::agent::action_intelligence::irrelevant_control(&goal,&snapshot,&candidate)&&
+                    // Native recovery may not replace a rejected action with
+                    // another navigation outside the explicit source scope.
+                    !crate::agent::action_intelligence::outside_requested_source_page(&goal,&snapshot,&candidate)&&
                     crate::agent::objective_gate::check(&goal,&initial_origin,&snapshot,&objectives,&candidate).is_ok()&&
                     bind_action_to_live_dom(&mut candidate,&snapshot,true).is_ok(){
                     action=candidate;action_binding_error=None;

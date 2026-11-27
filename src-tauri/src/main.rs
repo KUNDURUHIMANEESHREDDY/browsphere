@@ -2303,7 +2303,7 @@ async fn inspect_local_model_capabilities(
     if !installed.iter().any(|id| id == &model) {
         return Err("Select a currently installed local model before checking capabilities".into());
     }
-    router::capability_registry::CapabilityRegistry::shared().discover_ollama(&router.get_config().ollama_url, &model).await.map_err(|e| e.to_string())
+    router.local_model_capabilities(&model).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3115,7 +3115,11 @@ fn main() {
             let private_ai = tauri::async_runtime::block_on(bundled_ai::BundledAi::launch(&resource_root))?;
             if let Some(ref service) = private_ai {
                 tauri::async_runtime::block_on(async {
-                    state_for_sched.router.lock().await.enable_bundled(service.endpoint.clone());
+                    let mut router = state_for_sched.router.lock().await;
+                    match service.profile {
+                        bundled_ai::BundledProfile::Legacy => router.enable_bundled(service.endpoint.clone()),
+                        bundled_ai::BundledProfile::Compact => router.enable_bundled_compact(service.endpoint.clone()),
+                    }
                 });
                 tracing::info!("Bundled local AI is ready");
             }

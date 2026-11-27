@@ -54,6 +54,15 @@ pub async fn infer(config:&RouterConfig,image:&str,goal:&str,candidates:&[Candid
         return Err("Local vision disabled".into());
     }
     if image.is_empty()||image.len()>12_000_000{return Err("Screenshot outside size limit".into());}
+    // Provider metadata, not model-name heuristics, determines whether a
+    // configured model explicitly lacks vision. Undisclosed metadata stays
+    // unknown and the ordinary native inference/error gates still apply.
+    if let Ok(profile)=crate::router::capability_registry::CapabilityRegistry::shared()
+        .discover_ollama(&config.ollama_url,&config.vision_model).await {
+        if profile.vision==Some(false) {
+            return Err("Configured local model does not advertise vision input".into());
+        }
+    }
     let lease=crate::router::inference_scheduler::acquire().await.map_err(|_|"Local inference resource queue unavailable")?;
     let client=reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(35)).build().map_err(|_|"Visual inference client unavailable")?;

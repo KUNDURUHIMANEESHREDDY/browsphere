@@ -1,5 +1,7 @@
 #[path = "semantic_evidence_review.rs"]
 mod semantic_evidence_review;
+#[path = "compact_decision_adapter.rs"]
+mod compact_decision_adapter;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -122,16 +124,19 @@ pub struct RouterConfig {
     pub cloud_model_catalogs: HashMap<String, Vec<String>>,
 }
 
-/// Deliberately bounded policy: a complex multi-source task retains its
-/// configured stronger planner unless memory is constrained; unknown memory
-/// keeps the configured route. Never change the action/vision/writer models.
-fn adaptive_reasoning_candidate(config:&RouterConfig,goal:&str,multi_source:bool,free:Option<u64>)->Option<&'static str>{
-    if config.ollama_model!="qwen3.5:0.8b" || config.planner_model!="qwen2.5:3b-instruct" ||
-        config.supervisor_model!="lfm3:1.7b"{return None;}
-    let free=free?;
+/// Honor an explicitly configured planner across every provider and model.
+/// If there is no planner role, a configured supervisor may cover a simple
+/// read-only research task, but never assume it is smaller from its model tag.
+/// Keep the native memory gate and leave complex tasks on their normal route.
+fn adaptive_reasoning_candidate<'a>(config:&'a RouterConfig,goal:&str,multi_source:bool,free:Option<u64>)->Option<&'a str>{
+    let supervisor=config.supervisor_model.trim();
+    if !config.planner_model.trim().is_empty() || supervisor.is_empty()
+        || supervisor==config.ollama_model.trim() || !free.is_some_and(|m|m>=3072) {
+        return None;
+    }
     let lower=goal.to_ascii_lowercase();
     let complex=multi_source||goal.len()>280||["compare ","multiple ","across ","then "," and ","verify ","evaluate ","research "].iter().any(|w|lower.contains(w));
-    if free>=2048 && (!complex||free<3072){Some("lfm3:1.7b")}else{None}
+    (!complex).then_some(supervisor)
 }
 
 fn default_supervisor_model() -> String { "lfm3:1.7b".into() }
@@ -382,6 +387,14 @@ impl ModelRouter {
         super::provider_models::fetch_models(&self.config.litellm_url, key.as_deref()).await
     }
 
+    /// Discover provider-advertised capabilities for any configured local tag.
+    /// Unknown capabilities remain unknown; this is not a performance score.
+    pub async fn local_model_capabilities(&self, model: &str)
+        -> anyhow::Result<super::capability_registry::ModelCapabilities> {
+        super::capability_registry::CapabilityRegistry::shared()
+            .discover_ollama(&self.config.ollama_url, model).await
+    }
+
     pub async fn list_local_models(&self) -> anyhow::Result<Vec<String>> {
         let url = format!("{}/api/tags", self.config.ollama_url.trim_end_matches('/'));
         let response = reqwest::Client::builder()
@@ -456,6 +469,14 @@ impl ModelRouter {
         anyhow::ensure!(installed.iter().any(|name|name==selected),
             "Lucia cannot start: local browser-action model '{}' is not installed. Available models: {}. Choose one in AI & ML settings.",
             selected,installed.join(", "));
+        // Never infer modality from a brand or tag. A provider explicitly
+        // declaring no text completion cannot serve as an action proposer.
+        // Older runtimes may omit metadata; in that case keep the existing
+        // runtime/schema validation instead of assuming unsupported features.
+        if let Ok(capabilities)=self.local_model_capabilities(selected).await {
+            anyhow::ensure!(capabilities.completion != Some(false),
+                "Selected local model '{}' does not advertise text generation. Choose a completion model for Lucia's browser-action role.",selected);
+        }
         Ok(())
     }
 
@@ -528,6 +549,21 @@ impl ModelRouter {
         self.config = config;
     }
 
+    pub fn enable_bundled_compact(&mut self, endpoint: String) {
+        self.bundled_endpoint = Some(endpoint.clone());
+        self.config.ollama_url = endpoint;
+        // Gemma is the general reasoning, planning, verification and recovery model.
+        // Tev1 is exclusively a constrained decision advisor, never a chat model.
+        self.config.ollama_model = crate::bundled_ai::COMPACT_REASON.into();
+        self.config.writer_model = crate::bundled_ai::COMPACT_REASON.into();
+        self.config.supervisor_model = crate::bundled_ai::COMPACT_REASON.into();
+        self.config.planner_model = crate::bundled_ai::COMPACT_REASON.into();
+        self.config.vision_model = crate::bundled_ai::COMPACT_VISION.into();
+        self.config.prefer_local_for_simple = true;
+        self.config.lucia_cloud_only = false;
+        self.config.domain_overrides.clear();
+    }
+
     pub fn enable_bundled(&mut self, endpoint: String) {
         self.bundled_endpoint = Some(endpoint.clone());
         self.config.ollama_url = endpoint;
@@ -568,9 +604,9 @@ impl ModelRouter {
         cfg
     }
 
-    /// Adaptive routing only within the known, explicitly configured local
-    /// profiles. Unknown/custom models and cloud preferences are untouched.
-    /// Installed tags are checked before selecting an alternative.
+    /// Adaptive routing only among configured local roles, regardless of
+    /// model family. Explicit planner settings and cloud routes are preserved.
+    /// Installed text support is checked before selecting an alternative.
     pub async fn adaptive_reasoning_profile(&self,goal:&str,origin:&str,multi_source:bool)->Self{
         let mut route=self.structured_route_for_origin(origin);
         if route.select_backend(origin)!="ollama" || !route.lucia_uses_local() ||
@@ -578,14 +614,17 @@ impl ModelRouter {
         let Ok(endpoint)=Url::parse(&route.config.ollama_url)else{return route;};
         if endpoint.scheme()!="http"||!matches!(endpoint.host_str(),Some("localhost"|"127.0.0.1"|"[::1]"))||
             !endpoint.username().is_empty()||endpoint.password().is_some()||endpoint.query().is_some()||endpoint.fragment().is_some(){return route;}
-        let Some(candidate)=adaptive_reasoning_candidate(&route.config,goal,multi_source,super::inference_scheduler::available_mib())else{return route;};
+        let Some(candidate)=adaptive_reasoning_candidate(&route.config,goal,multi_source,super::inference_scheduler::available_mib()).map(str::to_owned) else{return route;};
         let client=match reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(3)).build(){Ok(c)=>c,Err(_)=>return route};
         let response=match client.get(format!("{}/api/tags",route.config.ollama_url.trim_end_matches('/'))).send().await.and_then(|r|r.error_for_status()){Ok(r)=>r,Err(_)=>return route};
         let Ok(tags)=response.json::<serde_json::Value>().await else{return route;};
-        if tags["models"].as_array().is_some_and(|a|a.iter().any(|m|m["name"].as_str()==Some(candidate))){
-            // Runtime-only copy; never modify stored role preferences.
-            route.config.planner_model=candidate.into();
-            tracing::info!(model=candidate,"Lucia selected compact configured reasoning profile");
+        if tags["models"].as_array().is_some_and(|a|a.iter().any(|m|m["name"].as_str()==Some(candidate.as_str())))
+            && route.local_model_capabilities(&candidate).await.ok()
+                .is_some_and(|c|c.completion==Some(true)) {
+            // Runtime-only configured role. Provider metadata establishes text
+            // input support, never reliability or task completion.
+            route.config.planner_model=candidate.clone();
+            tracing::info!(model=%candidate,"Lucia selected configured local supervisor for simple research");
         }
         route
     }
@@ -622,44 +661,48 @@ impl ModelRouter {
         if id==self.config.supervisor_model.trim(){return None}
         self.local_secondary(origin,id)
     }
-    /// Escalation is opt-in through an existing configured local role and
-    /// requires a larger memory margin than ordinary compact inference.
+    /// A bounded verifier escalation may choose only an explicitly configured
+    /// local reasoning/writer role, never a hard-coded model family. This is
+    /// request-scoped: the selected primary model and saved settings stay put.
     fn reference_escalation_route(&self,origin:&str,free:Option<u64>)->Option<Self>{
-        const MODEL:&str="qwen2.5:3b-instruct";
-        if self.structured_local_model()!="lfm3:1.7b" || !self.lucia_uses_local()
-            || !free.is_some_and(|m|m>=3072)
-            || !(self.config.writer_model==MODEL||self.config.planner_model==MODEL){return None;}
+        if !self.lucia_uses_local() || !free.is_some_and(|m|m>=3072){return None;}
         let endpoint=Url::parse(&self.config.ollama_url).ok()?;
         if endpoint.query().is_some()||endpoint.fragment().is_some(){return None;}
-        self.local_secondary(origin,MODEL)
+        [self.config.planner_model.trim(),self.config.writer_model.trim()]
+            .into_iter().filter(|id|!id.is_empty()&&*id!=self.structured_local_model())
+            .find_map(|id|self.local_secondary(origin,id))
     }
     async fn installed_reference_escalation(&self,origin:&str)->anyhow::Result<Self>{
-        // Check configuration separately, then allow bounded reclamation
-        // following a completed compact inference. Never lower the RAM floor.
+        // Only discover a user-configured local role. The installed tag and
+        // provider-declared completion capability must both be confirmed.
         let route=self.reference_escalation_route(origin,Some(3072))
-            .ok_or_else(||anyhow::anyhow!("Qwen escalation is not configured for this local route"))?;
+            .ok_or_else(||anyhow::anyhow!("No alternate configured local verifier model"))?;
+        let selected=route.config.ollama_model.as_str();
+        let installed=route.list_local_models().await?;
+        anyhow::ensure!(installed.iter().any(|id|id==selected),
+            "Configured alternate verifier model is not installed");
+        let capability=route.local_model_capabilities(selected).await?;
+        anyhow::ensure!(capability.completion==Some(true),
+            "Alternate verifier model has no declared text-completion capability");
+        // Preserve the existing 3072 MiB admission floor. Actual inference
+        // still runs through the shared process-wide memory scheduler.
         let deadline=tokio::time::Instant::now()+Duration::from_secs(6);
         loop{
             let free=super::inference_scheduler::available_mib();
             if free.is_some_and(|m|m>=3072){break;}
             if tokio::time::Instant::now()>=deadline{
-                anyhow::bail!("Qwen escalation requires 3072 MiB available RAM; measured {}",
+                anyhow::bail!("Alternate verifier model requires at least 3072 MiB available RAM; measured {}",
                     free.map(|m|format!("{m} MiB")).unwrap_or_else(||"unknown".into()));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        let client=reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(3)).build()?;
-        let tags=client.get(format!("{}/api/tags",route.config.ollama_url.trim_end_matches('/')))
-            .send().await?.error_for_status()?.json::<serde_json::Value>().await?;
-        anyhow::ensure!(tags["models"].as_array().is_some_and(|a|a.iter().any(|m|m["name"].as_str()==Some("qwen2.5:3b-instruct"))),"Qwen escalation model is not installed");
-        anyhow::ensure!(super::inference_scheduler::available_mib().is_some_and(|m|m>=3072),"Available memory fell below the Qwen escalation threshold during discovery");
         Ok(route)
     }
     fn local_secondary(&self,origin:&str,model:&str)->Option<Self>{
         let id = model.trim();
+        // Provider identity comes from the configured endpoint, never from a
+        // string fragment in a local model's arbitrary tag.
         if id.is_empty() || id == self.config.ollama_model
-            || id.to_ascii_lowercase().contains("cloud")
             || self.config.lucia_cloud_only || self.select_backend(origin) != "ollama" {
             return None;
         }
@@ -950,18 +993,31 @@ User text: <text>{}</text>"#,
             {"role":"user","content":user_text}
         ]);
         if self.lucia_uses_local() {
+            // Adapter compatibility is discovered from the provider, not the
+            // model tag. Unknown thinking support means no think option.
+            let model=self.structured_local_model().to_string();
+            let can_disable_thinking=self.local_model_capabilities(&model).await.ok()
+                .and_then(|profile|profile.thinking)==Some(true);
             let lease=super::inference_scheduler::acquire().await?;
             let endpoint = format!("{}/api/chat", self.config.ollama_url.trim_end_matches('/'));
-            let response = client.post(endpoint).json(&json!({
-                "model": self.structured_local_model(),
+            let mut request=json!({
+                "model": model,
                 "keep_alive": lease.keep_alive(),
                 "messages": messages,
                 "stream": false,
-                "think": false,
                 "format": Self::structured_schema(system_prompt,user_text),
                 "options": {"temperature": 0, "num_predict": 700, "num_ctx": 4096}
-            })).send().await?.error_for_status()?;
-            let body: serde_json::Value = response.json().await?;
+            });
+            if can_disable_thinking { request["think"]=json!(false); }
+            let mut response=client.post(&endpoint).json(&request).send().await?;
+            // The upstream decoder may reject a complex schema even when
+            // plain JSON is supported. Only 400/422 permit one bounded retry;
+            // the same Rust contract still validates every returned object.
+            if matches!(response.status().as_u16(),400|422) && request["format"]!=json!("json") {
+                request["format"]=json!("json");
+                response=client.post(&endpoint).json(&request).send().await?;
+            }
+            let body: serde_json::Value = response.error_for_status()?.json().await?;
             Ok(body.pointer("/message/content").and_then(|v| v.as_str())
                 .unwrap_or("").to_string())
         } else {
@@ -1489,8 +1545,14 @@ User text: <text>{}</text>"#,
                 Ok(report)=>return Ok(report),
                 Err(reason)=>{
                     tracing::warn!(reason=%reason,"Extractive source selection rejected; retrying once");
+                    // Repeating the identical prompt can repeat the identical
+                    // unsupported ID. Only pass the verifier's own rejection
+                    // reason and original, immutable source-bound candidates.
+                    // This recovery contract is shared by every model adapter.
+                    let retry_payload=ev::bound_passage_retry_payload(
+                        goal,&originals,&candidates,&reason).to_string();
                     let second=tokio::time::timeout(Duration::from_secs(55),
-                        reviewer.model_structured_response(prompt,&payload,creds)).await
+                        reviewer.model_structured_response(prompt,&retry_payload,creds)).await
                         .map_err(|_|anyhow::anyhow!("Extractive research retry timed out"))??;
                     return ev::bound_selection_report(goal,&originals,&candidates,&second)
                         .map_err(anyhow::Error::msg);
@@ -1498,9 +1560,9 @@ User text: <text>{}</text>"#,
             }
         }
         let focused=ev::focus_sources(goal,sources,comparison);
-        // Compact-model extractive review of an explicitly requested current
-        // reference. Other verifier contracts remain unchanged.
-        if !comparison && self.lucia_uses_local() && self.structured_local_model()=="lfm3:1.7b" {
+        // Provider-independent extractive review of an explicitly requested
+        // current reference. Model choice cannot weaken the evidence contract.
+        if !comparison && self.lucia_uses_local() {
             if let Some(subject)=crate::agent::execution_intelligence::current_reference_subject(goal){
                 let original=sources.iter().filter(|s|crate::agent::browser_skills::phrase(&s.title,&subject))
                     .max_by_key(|s|s.excerpt.chars().count()).cloned()
@@ -1509,7 +1571,7 @@ User text: <text>{}</text>"#,
                 let candidates=ev::bound_passages(goal,&originals);
                 anyhow::ensure!(!candidates.is_empty(),"No observed reference passage candidates");
                 let payload=ev::bound_passage_payload(goal,&originals,&candidates).to_string();
-                tracing::info!(candidate_count=candidates.len(),model="lfm3:1.7b","Selecting native evidence IDs");
+                tracing::info!(candidate_count=candidates.len(),model=%self.structured_local_model(),"Selecting native evidence IDs");
                 let prompt=crate::lucia_prompts::PASSAGE_SELECTOR_SYSTEM;
                 let first=tokio::time::timeout(Duration::from_secs(40),
                     self.model_structured_response(prompt,&payload,creds)).await;
@@ -1517,15 +1579,17 @@ User text: <text>{}</text>"#,
                     Ok(Ok(raw))=>ev::bound_selection_report(goal,&originals,&candidates,&raw),
                     // An abandoned or failed transport does not prove the local
                     // server has stopped. Do not start another model in that case.
-                    _=>return Err(anyhow::anyhow!("Compact passage review did not complete; evidence remains unverified")),
+                    _=>return Err(anyhow::anyhow!("Local passage review did not complete; evidence remains unverified")),
                 };
                 let rejection=match first{Ok(report)=>return Ok(report),Err(reason)=>reason};
-                tracing::warn!(reason=%rejection,"Compact passage selection rejected");
+                tracing::warn!(reason=%rejection,"Local passage selection rejected");
                 let alternate=self.installed_reference_escalation(&originals[0].url).await
                     .map_err(|err|anyhow::anyhow!("Native passage selection rejected ({rejection}); escalation blocked: {err}"))?;
-                tracing::info!(model="qwen2.5:3b-instruct",candidate_count=candidates.len(),"Escalating rejected native evidence IDs once");
+                let retry_payload=ev::bound_passage_retry_payload(
+                    goal,&originals,&candidates,&rejection).to_string();
+                tracing::info!(model=%alternate.structured_local_model(),candidate_count=candidates.len(),"Escalating rejected native evidence IDs once");
                 let retry=tokio::time::timeout(Duration::from_secs(40),
-                    alternate.model_structured_response(prompt,&payload,creds)).await;
+                    alternate.model_structured_response(prompt,&retry_payload,creds)).await;
                 if let Ok(Ok(raw))=retry{
                     if let Ok(report)=ev::bound_selection_report(goal,&originals,&candidates,&raw){return Ok(report);}
                 }
@@ -1714,12 +1778,35 @@ User text: <text>{}</text>"#,
             if backend == "ollama" && self.config.ollama_model == "qwen2.5:3b-instruct" {
                 Self::tiny_action_context_with_limit(prompt_payload, 8, verification_specialist)
             } else { Self::tiny_action_context(prompt_payload, verification_specialist) };
-        let contract_prompt = format!(
+        let mut contract_prompt = format!(
             "{observed_prompt}\nAllowed native action signatures: {}\nReturn only one JSON object with an action property and no prose. Choose an allowed action; do not invent IDs, destinations, or success.",
             Self::action_contract_hint(&action_schema)
         );
+        // Compact model profile: Tev1 only scores *trusted-schema* observed action
+        // choices. It is not an action generator and cannot bypass alias/policy gates.
+        // Untrusted page content never leaves the private bundled Ollama endpoint.
+        if backend == "ollama"
+            && self.config.ollama_model == crate::bundled_ai::COMPACT_REASON
+            && self.bundled_endpoint.as_deref() == Some(self.config.ollama_url.as_str())
+        {
+            if let Ok(lease) = super::inference_scheduler::acquire().await {
+                let hint = compact_decision_adapter::suggest(
+                    &self.client, &self.config.ollama_url, &action_schema, &observed_prompt
+                ).await;
+                drop(lease);
+                if let Some(hint) = hint {
+                    contract_prompt.push_str(&format!(
+                        "\nOptional non-authoritative next-action hint from local Tev1: {hint}. This is not permission, a verified target, or completion evidence; independently select a valid observed action."
+                    ));
+                }
+            }
+        }
 
         if backend == "ollama" {
+            // Capability lookup is a cheap metadata call, not inference.
+            // Complete it before taking the single shared model lease.
+            let advertised_thinking=self.local_model_capabilities(&self.config.ollama_model)
+                .await.ok().and_then(|profile|profile.thinking)==Some(true);
             let lease=super::inference_scheduler::acquire().await?;
             let route_label = format!("ollama:{}", self.config.ollama_model);
             let url = format!("{}/api/generate", self.config.ollama_url.trim_end_matches('/'));
@@ -1746,9 +1833,7 @@ User text: <text>{}</text>"#,
                     "format": format,
                     "options": Self::local_action_generation_options(&self.config.ollama_model)
                 });
-                // Keep hybrid-model action generation within the structured output budget.
-                if self.config.ollama_model.starts_with("qwen3.5:")
-                    || self.config.ollama_model == "lfm3" || self.config.ollama_model.starts_with("lfm3:") {
+                if advertised_thinking {
                     body["think"] = json!(false);
                 }
                 // Capture the ACTUAL compressed prompt/schema sizes before
@@ -2814,8 +2899,10 @@ mod tests {
         assert_eq!(alternate.structured_local_model(),"qwen2.5:3b-instruct");
         assert_eq!(r.structured_local_model(),"lfm3:1.7b");
         assert!(alternate.reference_escalation_route(origin,Some(8192)).is_none());
-        c.writer_model="custom-writer".into();c.planner_model="custom-planner".into();
-        assert!(ModelRouter::new(c.clone()).reference_escalation_route(origin,Some(8192)).is_none());
+        c.writer_model="custom-writer".into();c.planner_model="cloudy-local-planner".into();
+        let generic=ModelRouter::new(c.clone()).reference_escalation_route(origin,Some(8192)).unwrap();
+        assert_eq!(generic.get_config().ollama_model,"cloudy-local-planner");
+        assert_eq!(generic.get_config().planner_model,"cloudy-local-planner");
         c.writer_model="qwen2.5:3b-instruct".into();c.lucia_cloud_only=true;
         assert!(ModelRouter::new(c.clone()).reference_escalation_route(origin,Some(8192)).is_none());
         c.lucia_cloud_only=false;c.ollama_url="http://remote.example.org".into();
@@ -2825,16 +2912,20 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_reasoning_is_bounded_and_keeps_explicit_custom_roles(){
-        let mut c=RouterConfig::default();c.ollama_model="qwen3.5:0.8b".into();
-        c.planner_model="qwen2.5:3b-instruct".into();c.supervisor_model="lfm3:1.7b".into();
-        assert_eq!(adaptive_reasoning_candidate(&c,"Find public documentation.",false,Some(4096)),Some("lfm3:1.7b"));
-        assert_eq!(adaptive_reasoning_candidate(&c,"Compare public documentation.",true,Some(4096)),None);
-        assert_eq!(adaptive_reasoning_candidate(&c,"Compare public documentation.",true,Some(2800)),Some("lfm3:1.7b"));
-        assert_eq!(adaptive_reasoning_candidate(&c,"Find public documentation.",false,Some(1800)),None);
-        assert_eq!(adaptive_reasoning_candidate(&c,"Find public documentation.",false,None),None);
+    fn adaptive_reasoning_is_capability_gated_and_honors_custom_roles(){
+        let mut c=RouterConfig::default();
+        c.ollama_model="unfamiliar-action-tag".into();
+        c.supervisor_model="cloudy-but-local-supervisor".into();
         c.planner_model="custom-planner".into();
+        // An explicit planner is never silently replaced because of its name.
+        assert_eq!(adaptive_reasoning_candidate(&c,"Find public documentation.",false,Some(8192)),None);
+        c.planner_model.clear();
+        assert_eq!(adaptive_reasoning_candidate(&c,"Find public documentation.",false,Some(4096)),Some("cloudy-but-local-supervisor"));
+        assert_eq!(adaptive_reasoning_candidate(&c,"Compare public documentation.",true,Some(4096)),None);
         assert_eq!(adaptive_reasoning_candidate(&c,"Find public documentation.",false,Some(2800)),None);
+        assert_eq!(adaptive_reasoning_candidate(&c,"Find public documentation.",false,None),None);
+        c.supervisor_model=c.ollama_model.clone();
+        assert_eq!(adaptive_reasoning_candidate(&c,"Find public documentation.",false,Some(8192)),None);
     }
     #[tokio::test]
     async fn adaptive_profile_never_contacts_cloud_or_changes_manual_model(){

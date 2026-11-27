@@ -8,6 +8,7 @@ param(
   [string]$ActionModel='qwen3.5:0.8b',
   [string]$SupervisorModel='lfm3:1.7b',
   [switch]$RequireRecovery,
+  [switch]$MeasuredStartupHeadroom,
   [string]$ExecutablePath='',
   [string]$ReportPath=''
 )
@@ -33,13 +34,24 @@ $counter=0
 foreach($case in $cases){
   for($run=1;$run -le $Repetitions;$run++){
     # An isolated WebView2 shell consumes RAM before Lucia's native 2048 MiB
-    # inference admission runs. Reserve 1024 MiB for the new browser process;
-    # this is a conservative test-launch budget, not a lowered safety gate.
+    # inference admission runs. The default launch gate reserves 1024 MiB.
+    # Optional diagnostic mode remeasures post-start RAM before model dispatch.
     $availableMiB=[math]::Floor((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1024)
-    $requiredLaunchMiB=3072
+    # Default acceptance retains the original conservative 3072 MiB gate.
+    # Explicit diagnostic mode can launch with 512 MiB startup reserve,
+    # but must remeasure RAM after WebView2 startup before any model task.
+    $requiredLaunchMiB=if($MeasuredStartupHeadroom){2560}else{3072}
+    # Windows free RAM can fluctuate by tens of MiB between launch checks.
+    # Briefly resample only near the gate; never lower it or launch below it.
+    if($availableMiB -ge ($requiredLaunchMiB - 128)){
+      for($headroomRetry=0; $headroomRetry -lt 5 -and $availableMiB -lt $requiredLaunchMiB; $headroomRetry++){
+        Start-Sleep -Seconds 2
+        $availableMiB=[math]::Floor((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1024)
+      }
+    }
     if($availableMiB -lt $requiredLaunchMiB){
       $message="Insufficient browser + model headroom: $availableMiB MiB free before launch, $requiredLaunchMiB MiB needed for 2048 MiB native minimum plus browser startup"
-      $records.Add([ordered]@{case=$case.name;run=$run;passed=$false;exit_code=2;seconds=0;final_status='resource_blocked';actions=0;qwen_actions=0;findings=0;errors=@($message);log=''})
+      $records.Add([ordered]@{case=$case.name;run=$run;passed=$false;exit_code=2;seconds=0;final_status='resource_blocked';actions=0;model_actions=0;qwen_actions=0;findings=0;errors=@($message);log=''})
       Write-Output ("$($case.name) #$run SKIPPED: $message")
       continue
     }
@@ -51,6 +63,7 @@ foreach($case in $cases){
     $started=Get-Date
     $app=$null
     $exitCode=-1
+    $resourceBlockReason=$null
     try{
       $env:APPDATA=Join-Path $profile 'Roaming'
       $env:LOCALAPPDATA=Join-Path $profile 'Local'
@@ -73,6 +86,16 @@ foreach($case in $cases){
         Start-Sleep -Milliseconds 400
       }
       if(-not $ready){throw 'No isolated native chatbox CDP target'}
+      if($MeasuredStartupHeadroom){
+        # Measure the actual isolated WebView2 footprint before dispatching
+        # the real model. Native inference independently enforces this floor.
+        $afterStartupMiB=[math]::Floor((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1024)
+        if($afterStartupMiB -lt 2048){
+          $resourceBlockReason="Insufficient local-model headroom after isolated WebView2 launch: $afterStartupMiB MiB free (2048 MiB native minimum)"
+          throw $resourceBlockReason
+        }
+        Write-Output "MEASURED_POST_BROWSER_FREE_MIB=$afterStartupMiB"
+      }
       Push-Location $root
       try {
         # Native Node stderr can become a PowerShell error record under
@@ -99,15 +122,16 @@ foreach($case in $cases){
     $resultLine=@($raw -split "\r?\n" | Where-Object {$_ -match '^ORCHESTRATOR_RESULT '}) | Select-Object -Last 1
     $result=$null
     if($resultLine){try{$result=($resultLine -replace '^ORCHESTRATOR_RESULT ','') | ConvertFrom-Json}catch{}}
-    $passed=$exitCode -eq 0 -and $null -ne $result -and $result.passed -eq $true -and $result.status -eq 'completed'
+    $passed=(!$resourceBlockReason) -and $exitCode -eq 0 -and $null -ne $result -and $result.passed -eq $true -and $result.status -eq 'completed'
     $record=[ordered]@{
-      case=$case.name; run=$run; passed=$passed; exit_code=$exitCode
+      case=$case.name; run=$run; passed=$passed; exit_code=if($resourceBlockReason){2}else{$exitCode}
       seconds=[math]::Round(((Get-Date)-$started).TotalSeconds,1)
-      final_status=if($result){$result.status}else{'no verified result'}
-      actions=if($result){$result.actions}else{0}
-      qwen_actions=if($result){$result.qwenActions}else{0}
-      findings=if($result){$result.findings}else{0}
-      errors=if($result){@($result.errors)}else{@('No machine-readable verified completion')}
+      final_status=if($resourceBlockReason){'resource_blocked'}elseif($result){$result.status}else{'no verified result'}
+      actions=if($resourceBlockReason){0}elseif($result){$result.actions}else{0}
+      model_actions=if($resourceBlockReason){0}elseif($result){$result.modelActions}else{0}
+      qwen_actions=if($ActionModel -match '^qwen' -and $result){$result.modelActions}else{0}
+      findings=if($resourceBlockReason){0}elseif($result){$result.findings}else{0}
+      errors=if($resourceBlockReason){@($resourceBlockReason)}elseif($result){@($result.errors)}else{@('No machine-readable verified completion')}
       log=$logFile
     }
     $records.Add($record)
