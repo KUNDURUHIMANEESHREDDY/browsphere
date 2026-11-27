@@ -113,9 +113,24 @@ async function main(){
        lastCount=traces.length;const e=traces.at(-1).payload;
        console.log('LIVE_ACTION',JSON.stringify({at:now(),action:e.action?.type,outcome:e.outcome,decision:e.decision,route:e.model_route}).slice(0,730));
      }
+     // Match statuses actually returned by the Rust loop_runner/main.rs.
+     // In particular "unverified", "halted" and "max_steps" are FINISHED
+     // failures, not live tasks; previously every such trial idled until its
+     // 280-second deadline and the final sixth-run CI report was lost.
+     const terminalStatuses=new Set([
+       'completed','failed','cancelled','stopped','timed_out',
+       'unverified','halted','max_steps','tab_closed','tab_missing'
+     ]);
      const ended=evs.find(e=>e.kind==='agent:run_status'&&
-       ['completed','failed','cancelled','stopped','timed_out'].includes(e.payload?.status));
-     if(ended){finalStatus=ended.payload.status;break;}
+       terminalStatuses.has(e.payload?.status));
+     if(ended){
+       finalStatus=ended.payload.status;
+       console.log('LIVE_TERMINAL',JSON.stringify({
+         elapsed_s:Math.round((Date.now()-started)/1000),
+         status:finalStatus,observed_actions:traces.length
+       }));
+       break;
+     }
      if(!runId&&d.launches.some(l=>l.error)){
        const error=String(d.launches.find(l=>l.error).error).slice(0,350);
        console.log('ADMISSION_DIAGNOSTIC',JSON.stringify({error}));
