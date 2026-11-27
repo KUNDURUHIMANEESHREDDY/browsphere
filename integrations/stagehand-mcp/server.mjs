@@ -7,7 +7,11 @@ import {stagehandRead} from './stagehand-readonly.mjs';
 if (process.env.BROWSPHERE_STAGEHAND_ENABLE !== '1') {
   throw Error('Stagehand MCP requires explicit BROWSPHERE_STAGEHAND_ENABLE=1 opt-in');
 }
+if (process.env.BROWSPHERE_STAGEHAND_ENABLE !== '1') {
+  throw Error('Stagehand research sidecar requires explicit opt-in; never start in a standard Browsphere release');
+}
 const port=Number(process.env.BROWSPHERE_STAGEHAND_MCP_PORT||18888);
+let active=0;
 if (!Number.isInteger(port)||port<1024||port>65535) throw Error('Invalid loopback MCP port');
 const ci=process.env.GITHUB_ACTIONS==='true' && process.env.BROWSPHERE_STAGEHAND_CI_FIXTURE==='1';
 const fixturePort=ci?process.env.LUCIA_FIXTURE_PORT:'';
@@ -23,6 +27,8 @@ function register(server,name,mode){
     }),
     annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:true}
   },async({url,instruction})=>{
+    if(active >= 1) return {content:[{type:'text',text:'Stagehand browser capacity busy'}],isError:true};
+    active++;
     try{
       const result=await stagehandRead({url,instruction,mode,model:process.env.BROWSPHERE_STAGEHAND_OLLAMA_MODEL},
         {ci,fixturePort});
@@ -30,7 +36,7 @@ function register(server,name,mode){
     }catch(err){
       // Never echo prompt text, credentials, paths or URL back to a page.
       return {content:[{type:'text',text:'Stagehand capability not available or source unverified'}],isError:true};
-    }
+    } finally {active--;}
   });
 }
 const handler=createMcpHandler(()=>{
@@ -46,6 +52,9 @@ const http=createServer((req,res)=>{
     if(!res.headersSent){res.statusCode=404;res.end();}
     return;
   }
+  // MCP tools permit short JSON arguments only, never arbitrary streamed uploads.
+  const length=Number(req.headers['content-length']??0);
+  if(!Number.isSafeInteger(length) || length>32768){res.writeHead(413);res.end();return;}
   void asNode(req,res);
 });
 http.listen(port,'127.0.0.1',()=>{console.error('Stagehand upstream MCP ready on loopback only')});
