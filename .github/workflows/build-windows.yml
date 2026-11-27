@@ -51,6 +51,7 @@ jobs:
           node --check tests/e2e/lucia-wikipedia-article.cjs
           node --check tests/e2e/lucia-play-any-song-entry.cjs
           Get-ChildItem tests -Filter *.test.cjs | ForEach-Object { node --test $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+          ./tests/e2e/process-tree-metrics.test.ps1
 
       - name: Run Rust safety and regression tests
         run: cargo test --workspace --locked
