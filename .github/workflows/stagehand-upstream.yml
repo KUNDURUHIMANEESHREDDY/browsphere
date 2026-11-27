@@ -26,19 +26,22 @@ jobs:
           node-version: 22
       - name: Install exact upstream SDK package versions without running install scripts
         shell: pwsh
+        working-directory: integrations/stagehand-mcp
         run: |
-          npm install --prefix integrations/stagehand-mcp --ignore-scripts --no-audit --no-fund --package-lock=false
+          npm install --ignore-scripts --no-audit --no-fund --package-lock=false
           if($LASTEXITCODE -ne 0){throw "Official Stagehand/MCP packages could not be installed."}
       - name: Syntax validation
         shell: pwsh
+        working-directory: integrations/stagehand-mcp
         run: |
-          npm run check --prefix integrations/stagehand-mcp
+          npm run check
           if($LASTEXITCODE -ne 0){throw "Stagehand integration JavaScript syntax failure"}
       - name: Official MCP protocol + Stagehand isolated browser readback
         shell: pwsh
+        working-directory: integrations/stagehand-mcp
         timeout-minutes: 10
         env:
           STAGEHAND_BROWSER_E2E: '1'
         run: |
-          npm test --prefix integrations/stagehand-mcp
+          npm test
           if($LASTEXITCODE -ne 0){throw "Upstream browser/MCP integration is not verified"}
