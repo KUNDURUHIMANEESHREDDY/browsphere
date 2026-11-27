@@ -89,3 +89,47 @@ jobs:
           path: target/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
           retention-days: 14
+
+  clean-installed-acceptance:
+    name: Verify fresh NSIS installation through WebView2
+    needs: test-and-build
+    runs-on: windows-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      # This is a NEW disposable runner: no Rust compiler, developer profile,
+      # old Browsphere install, or preexisting model configuration is required.
+      - name: Checkout acceptance tests
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node for test harness only
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download built NSIS installer
+        uses: actions/download-artifact@v4
+        with:
+          name: Browsphere-Windows-Installer
+          path: dist/ci-installer
+
+      - name: Install, exercise, and uninstall actual packaged browser
+        shell: pwsh
+        timeout-minutes: 25
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @(Get-ChildItem dist/ci-installer -Recurse -Filter '*-setup.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one downloaded NSIS installer.' }
+          ./tests/e2e/run-lucia-clean-installed.ps1 -InstallerPath $installers[0].FullName -EvidenceDirectory (Join-Path $env:RUNNER_TEMP 'BrowsphereInstalledEvidence')
+
+      - name: Upload privacy-safe installed-browser timing and memory evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Browsphere-Clean-Installed-Acceptance
+          path: ${{ runner.temp }}/BrowsphereInstalledEvidence/*.json
+          if-no-files-found: warn
+          retention-days: 14
