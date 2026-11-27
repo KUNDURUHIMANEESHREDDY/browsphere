@@ -60,3 +60,30 @@ No Stagehand or Playwright agent gets credentials or page-driven permissions.
 
 **Current verdict:** The upstream Playwright adapter has been committed
 but needs a passing fresh installed-WebView2 CI run. Stagehand's read-only MCP sidecar and the `rmcp` standalone interoperability probe exist only in the experimental branch; their live Windows verification is pending. BrowserGym and Browser Use are **not** integrated. No claim of production readiness.
+
+
+## Integrated Windows acceptance — Stagehand upstream initialization boundary (27 Nov 2026)
+
+This consolidation intentionally distinguishes **three different facts**:
+
+- Official Stagehand v4 `localBrowser.connect({cdpUrl})` and the upstream page client can attach to a disposable installed Windows WebView2 test profile for read-only shell metadata. The CI probe uses upstream `browser.disconnect()` (introduced in Stagehand v4.4) to leave the installed browser alive.
+- Stagehand `observe` and `extract` execute through its **separate, opt-in, loopback-only MCP sidecar** with isolated upstream Chromium, not by granting Stagehand control of a consumer WebView2 profile. Lucia still treats all results as untrusted until its own verifier checks evidence.
+- Full `Stagehand.create({browser})` **has not been established as repeatably compatible** with installed WebView2. Combined installed-run [45969144624](https://github.com/KUNDURUHIMANEESHREDDY/browsphere/actions/runs/45969144624) recorded the upstream 60-second initialization timeout *after* official Playwright had observed 120 native controls. The upstream [Stagehand issue #2782](https://github.com/browserbase/stagehand/issues/2782) separately documents the same extension-worker handshake timeout, even with a valid browser session. Root cause in WebView2 is not proven.
+
+The CI-only `integrations/stagehand-mcp/webview2-attach.ci.mjs` probe
+therefore requires `BROWSPHERE_STAGEHAND_INIT_PROBE=1` for the **experimental**
+full initializer test. When this flag is not set, the test only certifies
+official `localBrowser.connect` + real Tauri shell readback, with the output
+explicitly reporting `full_stagehand_initialized:false`. Do not portray this
+as Stagehand actions/vision/extraction working inside WebView2.
+
+The clean-installed NSIS test must still pass native task completion,
+independent verification, installed WebView2 process-tree measurements, and
+uninstall. No conditional path may silently replace a failed model task with a
+simulated or unverified completion.
+
+The upstream Microsoft Playwright MCP accessibility snapshot and native CDP
+frame stream have independent *real WebView2* acceptance gates. Neither
+requires Stagehand's extension handshake. The intent is to reuse working
+upstream capabilities while isolating incomplete upstream integration—not
+reimplement Stagehand internally.
