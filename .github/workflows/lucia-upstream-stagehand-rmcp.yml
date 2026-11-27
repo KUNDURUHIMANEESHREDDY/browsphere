@@ -50,7 +50,7 @@ jobs:
         run: |
           Push-Location integrations/stagehand-mcp
           try {
-            npm run smoke
+            node stagehand.smoke.mjs
             if ($LASTEXITCODE -ne 0) { throw 'Actual upstream Stagehand browser inspection failed' }
           } finally { Pop-Location }
       - name: Compile and test official Rust MCP SDK acceptance client
