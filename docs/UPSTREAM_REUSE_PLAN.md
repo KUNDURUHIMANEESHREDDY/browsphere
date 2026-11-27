@@ -10,8 +10,8 @@ general-purpose browser/agent/protocol frameworks are not.
 | Capability to reuse | Upstream | License / language | Decision and constraints |
 | --- | --- | --- | --- |
 | Browser CDP, DOM locators, navigations, assertions, fixtures and traces | [Microsoft Playwright](https://github.com/microsoft/playwright); [official WebView2 guide](https://playwright.dev/docs/webview2) | Apache-2.0 / TypeScript, Node | **Adopted in CI:** pinned `playwright-core@1.65.1`, no managed Chromium download. See `tests/interop/`. Replace hand-written CDP test wiring incrementally only after live WebView2 checks. Not part of the release installer. |
-| Model-driven actions, extraction and cross-site agent workflows | [Browserbase Stagehand v4](https://github.com/browserbase/stagehand), [existing-CDP browser config](https://github.com/browserbase/stagehand/blob/main/packages/docs/v4/configuration/browser.mdx) | MIT / TypeScript | **Candidate, not deployed.** Official `localBrowser.connect({cdpUrl})` allows attaching to a running Chromium instance. Verify WebView2 target discovery and lifecycle in disposable CI first. Do not expose an unsecured CDP endpoint in consumer builds; treat Stagehand results as proposals subject to Lucia's existing native policy/verification. Check model/provider availability before any ship decision. |
-| MCP client protocol negotiation, transport, schema and session mechanics | [Official MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk) (`rmcp`) | mixed Apache-2.0/MIT during transition / Rust | **Preferred production migration, not yet installed.** Replace custom protocol transport in `src-tauri/src/mcp.rs` and `src-tauri/src/agent/mcp.rs` only after protocol conformance against existing MCP regression suite. **Keep** explicit user allowlisting, read-only enforcement, endpoint restrictions, payload limits, cancellation, tokens from secure storage, and independent readback. The SDK does not replace these security policies. |
+| Model-driven actions, extraction and cross-site agent workflows | [Browserbase Stagehand v4](https://github.com/browserbase/stagehand), [existing-CDP browser config](https://github.com/browserbase/stagehand/blob/main/packages/docs/v4/configuration/browser.mdx) | MIT / TypeScript | **Experimental read-only SDK bridge added in `integrations/stagehand-mcp`, not deployed.** Official `localBrowser.connect({cdpUrl})` allows attaching to a running Chromium instance. Verify WebView2 target discovery and lifecycle in disposable CI first. Do not expose an unsecured CDP endpoint in consumer builds; treat Stagehand results as proposals subject to Lucia's existing native policy/verification. Check model/provider availability before any ship decision. |
+| MCP client protocol negotiation, transport, schema and session mechanics | [Official MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk) (`rmcp`) | mixed Apache-2.0/MIT during transition / Rust | **Official `rmcp` interoperability client added under `integrations/rmcp-probe`; native transport migration not yet installed.** Replace custom protocol transport in `src-tauri/src/mcp.rs` and `src-tauri/src/agent/mcp.rs` only after protocol conformance against existing MCP regression suite. **Keep** explicit user allowlisting, read-only enforcement, endpoint restrictions, payload limits, cancellation, tokens from secure storage, and independent readback. The SDK does not replace these security policies. |
 | Repeated unfamiliar-site research benchmarks | [ServiceNow BrowserGym](https://github.com/ServiceNow/BrowserGym) | Apache-2.0 / Python | **CI-only candidate.** Adopt upstream task environment/evaluation instead of inventing fake success scores. Run independent success criteria, 3+ trials per task, and report failures. Do not ship its Python dependencies in Windows consumer installer. |
 | Agent action orchestration/recovery patterns | [Browser Use](https://github.com/browser-use/browser-use) | MIT / Python | **Evaluate, not deployed.** Useful as an independently runnable reference agent and comparator. Its Python/browser runtime would add substantial packaging/memory overhead if copied into the default Tauri app; no automatic replacement of Lucia's existing browser runtime. |
 | Agent chat framework | [Microsoft AutoGen](https://github.com/microsoft/autogen) | repository archived; mixed licensing | **Do not depend on it** for this browser. Archived software is not a maintenance strategy for a security-sensitive desktop app. |
@@ -44,11 +44,11 @@ No Stagehand or Playwright agent gets credentials or page-driven permissions.
 1. **Playwright (in progress):** pinned dependency, CI-only loopback policy,
    fresh installed-exe readback, no changes to Lucia production browser
    controls until demonstrated WebView2 compatibility. CI passing is required.
-2. **Stagehand (candidate):** isolated attach/observe/extract experiment with
+2. **Stagehand (experimental branch):** isolated launch/observe/extract experiment with
    no authenticated accounts, never model output → unchecked browser action.
    Must show equal-or-better task repeatability, bounded memory and reliable
    cancellation before switching Lucia action backends.
-3. **rmcp (candidate):** fork-free crate-based transport replacement under
+3. **rmcp (experimental probe):** fork-free SDK connection and discovery probe, followed by a crate-based native transport replacement under
    unchanged user allowlists and readback; run hostile server and OAuth
    regression tests, plus HTTP/SSE/session/version conformance.
 4. **BrowserGym/Browser Use (candidates):** external independent comparator
@@ -59,5 +59,4 @@ No Stagehand or Playwright agent gets credentials or page-driven permissions.
    Release signing and updater keys remain separate, mandatory gates.
 
 **Current verdict:** The upstream Playwright adapter has been committed
-but needs a passing fresh installed-WebView2 CI run. Stagehand, rmcp, BrowserGym,
-and Browser Use have **not** been integrated. No claim of production readiness.
+but needs a passing fresh installed-WebView2 CI run. Stagehand's read-only MCP sidecar and the `rmcp` standalone interoperability probe exist only in the experimental branch; their live Windows verification is pending. BrowserGym and Browser Use are **not** integrated. No claim of production readiness.
