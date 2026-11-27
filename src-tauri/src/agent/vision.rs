@@ -233,7 +233,7 @@ mod tests{
             let(mut socket,_)=listener.accept().await.unwrap();
             let mut bytes=Vec::new();let mut buf=[0u8;4096];
             let end=loop{let n=socket.read(&mut buf).await.unwrap();assert!(n>0);bytes.extend_from_slice(&buf[..n]);if let Some(i)=bytes.windows(4).position(|x|x==b"\r\n\r\n"){break i+4;}};
-            let headers=String::from_utf8_lossy(&bytes[..end]);
+            let headers=String::from_utf8_lossy(&bytes[..end]).into_owned();
             let len=headers.lines().find_map(|l|l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v|v.trim().parse::<usize>().ok())).unwrap();
             while bytes.len()<end+len{let n=socket.read(&mut buf).await.unwrap();assert!(n>0);bytes.extend_from_slice(&buf[..n]);}
             let r:serde_json::Value=serde_json::from_slice(&bytes[end..end+len]).unwrap();
