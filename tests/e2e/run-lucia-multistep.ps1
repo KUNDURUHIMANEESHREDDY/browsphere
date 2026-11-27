@@ -168,33 +168,25 @@ try {
     }
 
     if ($UpstreamMcpInterop) {
-        if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Stagehand WebView2 CDP attachment is restricted to disposable CI profiles' }
-        # Stagehand's upstream localBrowser.connect API, not our CDP protocol
-        # implementation. Observe shell metadata only; never act on the UI.
-        $env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI='1'
-        try {
-            Write-Host 'Checking official Stagehand CDP attachment to installed WebView2'
-            & node (Join-Path $root 'integrations\stagehand-mcp\webview2-attach.ci.mjs')
-            if ($LASTEXITCODE -ne 0) {
-                throw 'Upstream Stagehand cannot attach to the installed WebView2 CI profile; no native Stagehand backend was enabled'
-            }
-        } finally { Remove-Item Env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI -ErrorAction SilentlyContinue }
+        # Verified upstream limitation: Stagehand 4.5.0 localBrowser.connect
+        # initializes against Chrome, but timed out on the *same* installed
+        # WebView2 instance that official Microsoft Playwright attached to.
+        # Do not add a custom CDP shim or a false Stagehand native-success
+        # claim. Keep Stagehand on its own isolated Chromium research sidecar.
+        Write-Host 'STAGEHAND_WEBVIEW2_ATTACH_UNSUPPORTED: use official Playwright for installed-native WebView2; Stagehand remains isolated/read-only'
         Write-Host 'Checking official Stagehand MCP tools through actual installed Lucia chatbox'
         & node (Join-Path $root 'tests\interop\upstream-stagehand-native.cjs')
         if ($LASTEXITCODE -ne 0) {
             throw 'Native Lucia-to-upstream-Stagehand MCP end-to-end acceptance failed'
         }
-        # Execute the real upstream Stagehand act() engine on the one disposable
-        # fixture tab, then independently read back the native WebView2 DOM.
-        # This cannot run against an installed user's browsing profile.
-        $env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI='1'
-        try {
-            Write-Host 'Verifying official Stagehand actions via native WebView2 postconditions'
-            & node (Join-Path $root 'integrations\stagehand-mcp\webview2-native-actions.ci.mjs')
-            if ($LASTEXITCODE -ne 0) {
-                throw 'Stagehand action on installed WebView2 was not independently verified'
-            }
-        } finally { Remove-Item Env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI -ErrorAction SilentlyContinue }
+        # Microsoft Playwright successfully attaches to WebView2 in the
+        # earlier CDP smoke test. Exercise the upstream action engine and
+        # independently check all postconditions through native Tauri readback.
+        Write-Host 'Checking official Microsoft Playwright actions with native WebView2 readback'
+        & node (Join-Path $root 'tests\interop\playwright-native-actions.cjs')
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Official Playwright actions failed independent installed WebView2 verification'
+        }
     }
 
     # Optional public-site diagnostic. Do not bypass Google challenges or
