@@ -1471,7 +1471,17 @@ pub async fn run_react_loop(
         let result = crate::agent::mcp::execute(&goal, &crate::resolve_data_dir().join("mcp-servers.json"), cancel.clone()).await;
         if cancel.is_cancelled() { return Ok("cancelled".into()); }
         let summary = result?;
-        let _ = app.emit("agent:stage", serde_json::json!({"run_id":run_id,"specialist":"MCP Agent","status":"completed","index":0,"summary":"MCP response received; no independent verification claimed"}));
+        if crate::agent::mcp::unverified_tool_result(&goal) {
+            // A successful MCP response is *not* original WebView2 evidence.
+            // Keep the result visible, but never emit agent:run_completed
+            // for factual content that the independent verifier has not read.
+            let _ = app.emit("agent:stage", serde_json::json!({"run_id":run_id,"specialist":"MCP Agent","status":"unverified","index":0,"summary":"MCP tool executed; source facts require independent WebView verification"}));
+            let _ = app.emit("agent:run_error", serde_json::json!({"run_id":run_id,"source":"mcp","message":format!("Tool returned, but research is unverified: {summary}")}));
+            return Ok("unverified".into());
+        }
+        // Listing configured tool names is a discovery action, not a
+        // research claim. Only this read-only catalog operation completes.
+        let _ = app.emit("agent:stage", serde_json::json!({"run_id":run_id,"specialist":"MCP Agent","status":"completed","index":0,"summary":"Approved MCP tool catalog listed"}));
         let _ = app.emit("agent:run_completed", summary);
         return Ok("completed".into());
     }
