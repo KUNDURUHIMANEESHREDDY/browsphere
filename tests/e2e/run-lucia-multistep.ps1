@@ -168,6 +168,17 @@ try {
     }
 
     if ($UpstreamMcpInterop) {
+        if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Stagehand WebView2 CDP attachment is restricted to disposable CI profiles' }
+        # Stagehand's upstream localBrowser.connect API, not our CDP protocol
+        # implementation. Observe shell metadata only; never act on the UI.
+        $env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI='1'
+        try {
+            Write-Host 'Checking official Stagehand CDP attachment to installed WebView2'
+            & node (Join-Path $root 'integrations\stagehand-mcp\webview2-attach.ci.mjs')
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Upstream Stagehand cannot attach to the installed WebView2 CI profile; no native Stagehand backend was enabled'
+            }
+        } finally { Remove-Item Env:BROWSPHERE_STAGEHAND_WEBVIEW2_CI -ErrorAction SilentlyContinue }
         Write-Host 'Checking official Stagehand MCP tools through actual installed Lucia chatbox'
         & node (Join-Path $root 'tests\interop\upstream-stagehand-native.cjs')
         if ($LASTEXITCODE -ne 0) {
