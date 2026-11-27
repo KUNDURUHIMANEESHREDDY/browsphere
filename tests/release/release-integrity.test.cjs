@@ -49,7 +49,8 @@ test('protected release workflow builds a natively signed embedded app, not only
 test('unsigned development and release signing stay strictly separate', () => {
   const ci = read('.github/workflows/build-windows.yml');
   const release = read('.github/workflows/release-signed-windows.yml');
-  assert.match(ci, /Browsphere-Windows-Installer[\s\S]*unsigned test artifact/);
+  assert.match(ci, /Upload Windows installer \(unsigned test artifact\)/);
+  assert.match(ci, /Browsphere-Windows-Installer/);
   assert.doesNotMatch(ci, /gh release create/);
   assert.doesNotMatch(ci, /WINDOWS_CERT_PFX_BASE64/);
   assert.match(release, /workflow_dispatch:/);
