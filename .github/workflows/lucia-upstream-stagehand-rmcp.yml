@@ -2,7 +2,7 @@ name: Lucia experimental upstream Stagehand and rmcp interoperability
 
 on:
   push:
-    branches: [feature/browsphere-stagehand-mcp-upstream-20261127, fix/lucia-upstream-stagehand-domain-policy-20261127]
+    branches: [feature/browsphere-stagehand-mcp-upstream-20261127, fix/lucia-upstream-stagehand-domain-policy-20261127, feature/lucia-stagehand-upstream-action-readback-20261127, integration/all-prs-20261127]
   pull_request:
     paths:
       - 'integrations/stagehand-mcp/**'
@@ -58,6 +58,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Actual upstream Stagehand browser inspection failed' }
             node stagehand-domain-policy.smoke.mjs
             if ($LASTEXITCODE -ne 0) { throw 'Stagehand upstream domain policy failed the cross-origin redirect security regression' }
+            node stagehand-actions.smoke.mjs
+            if ($LASTEXITCODE -ne 0) { throw 'Official upstream Stagehand act() did not produce verified isolated DOM change' }
           } finally { Pop-Location }
       - name: Compile and test official Rust MCP SDK acceptance client
         if: success() || failure()
