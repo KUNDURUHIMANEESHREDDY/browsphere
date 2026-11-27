@@ -3104,6 +3104,7 @@ async fn run_browser_loop(
                     } else { r.local_supervisor(&snapshot.origin) }
                 } else { None };
                 let _=app.emit("agent:model_role",serde_json::json!({"run_id":run_id,"role":"action","model":r.role_model("action",&snapshot.origin),"status":"selected"}));
+                let primary_started = std::time::Instant::now();
                 let primary = if stalled && supervisor.is_some() {
                     None
                 } else {
@@ -3116,6 +3117,31 @@ async fn run_browser_loop(
                             result.unwrap_or_else(|_| Err(anyhow::anyhow!("Lucia action model timed out")))
                     })
                 };
+                // Classify the real native action decision before supervisor
+                // recovery. A timeout cannot be diagnosed using Ollama's final
+                // counters because the model future was cancelled before reply.
+                // Emit only numeric timing/size metadata for CI and diagnostics.
+                if let Some(decision) = &primary {
+                    let timed_out = decision.as_ref().err().is_some_and(|error|
+                        error.to_string().contains("Lucia action model timed out"));
+                    let elapsed_ms = primary_started.elapsed().as_millis() as u64;
+                    let _ = app.emit("agent:model_performance", serde_json::json!({
+                        "run_id":run_id,
+                        "step_index":step,
+                        "role":"action",
+                        "model":r.role_model("action",&snapshot.origin),
+                        "wall_ms":elapsed_ms,
+                        "budget_ms":action_timeout_secs*1000,
+                        "prompt_chars":prompt_payload.chars().count(),
+                        "timed_out":timed_out
+                    }));
+                    tracing::info!(
+                        target: "lucia_inference",
+                        wall_ms=elapsed_ms, budget_ms=action_timeout_secs*1000,
+                        prompt_chars=prompt_payload.chars().count(), timed_out=timed_out,
+                        "lucia_action_outcome"
+                    );
+                }
                 match primary {
                     Some(Ok(proposal)) => proposal,
                     primary_error => {
