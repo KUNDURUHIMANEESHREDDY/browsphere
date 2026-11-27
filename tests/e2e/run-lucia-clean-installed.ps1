@@ -60,7 +60,7 @@ try {
 
     # Real UI -> Rust -> installed WebView2. The runner uses a unique profile
     # and loopback model, never system accounts or external write privileges.
-    & (Join-Path $root 'tests\e2e\run-lucia-multistep.ps1') -ExecutablePath $executable -CdpPort 9317 -ModelPort 18817 -FixturePort 18818 -PerfReportPath (Join-Path $EvidenceDirectory 'native-process-metrics.json')
+    & (Join-Path $root 'tests\e2e\run-lucia-multistep.ps1') -ExecutablePath $executable -CdpPort 9317 -ModelPort 18817 -FixturePort 18818 -PlaywrightInterop -PerfReportPath (Join-Path $EvidenceDirectory 'native-process-metrics.json')
     if ($LASTEXITCODE -ne 0) { throw 'Installed native Windows task E2E failed.' }
     Assert-ProcessTreeMeasurements (Join-Path $EvidenceDirectory 'native-process-metrics.json')
     $nativePassed=$true
