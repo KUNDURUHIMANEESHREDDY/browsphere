@@ -13,6 +13,7 @@ param(
   [string]$ReportPath=''
 )
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'process-tree-metrics.ps1')
 if ($env:GITHUB_ACTIONS -ne 'true') {
     throw 'Hosted real-model unfamiliar acceptance is restricted to an ephemeral CI Windows runner.'
 }
@@ -60,6 +61,7 @@ foreach($case in $cases){
     $createdPolicy=$false
     $exitCode=-1
     $inference=@()
+    $memorySample=$null
     try{
       $env:APPDATA=Join-Path $profile 'Roaming'
       $env:LOCALAPPDATA=Join-Path $profile 'Local'
@@ -98,7 +100,17 @@ foreach($case in $cases){
     } catch {
       Add-Content -Path $logFile -Value ("RUNNER_ERROR: "+$_.Exception.Message)
     } finally {
-      if($app){Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue}
+      if($app) {
+        # Use Browsphere's existing exact PID-descendant sampler, not a
+        # machine-wide total of unrelated WebView2 or Ollama processes.
+        # End-of-run snapshot only: not peak, p95 live memory or a load test.
+        try {
+          $rows=@(Get-CimInstance Win32_Process |
+            Select-Object ProcessId,ParentProcessId,Name,WorkingSetSize,PrivatePageCount)
+          $memorySample=Get-BrowserProcessTreeSample -RootProcessId $app.Id -ProcessRows $rows
+        } catch { $memorySample=$null }
+        Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+      }
       # Capture only the explicitly allowlisted Ollama numeric counters from
       # this disposable run before its isolated profile is destroyed.
       $modelLog=Join-Path $profile 'Local\BrowsphereAI\logs\model.jsonl'
@@ -133,6 +145,7 @@ foreach($case in $cases){
       # Only quantitative model diagnostics, never the user goal or raw DOM.
       model_performance=if($result){@($result.modelPerformance)}else{@()}
       ollama_inference_counters=@($inference)
+      process_tree_end_sample=$memorySample
       errors=if($result){@($result.errors)}else{@('No machine-readable verified completion')}
       log=$logFile
     }
@@ -150,19 +163,20 @@ $failed=$executed-$passedCount
 # Nearest-rank percentiles on six attempts are diagnostic, not statistically
 # reliable production p99 measurements.
 function Percentiles([object[]]$values) {
-  $ordered=@($values | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ } | Sort-Object)
-  if($ordered.Count -eq 0){return [ordered]@{samples=0;p50=$null;p95=$null;p99=$null}}
-  $n=$ordered.Count
+  $samples=[double[]]@($values | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ })
+  if($samples.Count -eq 0){return [ordered]@{samples=0;p50=$null;p95=$null;p99=$null}}
   return [ordered]@{
-    samples=$n
-    p50=[math]::Round($ordered[[math]::Max(0,[int][math]::Ceiling(0.5*$n)-1)],1)
-    p95=[math]::Round($ordered[[math]::Max(0,[int][math]::Ceiling(0.95*$n)-1)],1)
-    p99=[math]::Round($ordered[[math]::Max(0,[int][math]::Ceiling(0.99*$n)-1)],1)
+    samples=$samples.Count
+    p50=Get-NearestRankPercentile -Values $samples -Quantile 0.5
+    p95=Get-NearestRankPercentile -Values $samples -Quantile 0.95
+    p99=Get-NearestRankPercentile -Values $samples -Quantile 0.99
   }
 }
 $taskDurations=@($records | Where-Object {$_.final_status -ne 'resource_blocked'} | ForEach-Object {$_.seconds})
 $actionPerf=@($records | ForEach-Object {$record=$_; @($record.model_performance) | Where-Object {$null -ne $_ -and $null -ne $_.wall_ms}})
 $actionTimes=@($actionPerf | ForEach-Object {$_.wall_ms})
+$treeWorkingSets=@($records | Where-Object { $null -ne $_.process_tree_end_sample } |
+  ForEach-Object { $_.process_tree_end_sample.process_tree_working_set_mb })
 $actionTimeouts=@($actionPerf | Where-Object {$_.timed_out -eq $true}).Count
 $report=[ordered]@{
   generated_utc=(Get-Date).ToUniversalTime().ToString('o')
@@ -174,8 +188,9 @@ $report=[ordered]@{
   latency_summary=[ordered]@{
     task_elapsed_seconds=Percentiles $taskDurations
     native_action_wall_ms=Percentiles $actionTimes
+    installed_process_tree_end_working_set_mb=Percentiles $treeWorkingSets
     native_action_timeout_events=$actionTimeouts
-    scope='Ephemeral hosted Windows real-model tasks only; six attempts cannot establish release-grade p99.'
+    scope='Ephemeral hosted Windows real-model tasks only; memory is a single end-of-run owned-process snapshot, not peak. Six attempts cannot establish release-grade p99.'
   }
   qualification='Resource-blocked attempts never reached task execution; they do not count as passed or failed model-driven trials. A real pass needs independent source evidence and final task verification.'
   runs=@($records)
