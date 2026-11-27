@@ -127,6 +127,14 @@ async function main(){
    const hosts=[...new Set((report?.findings||[]).map(f=>{try{return new URL(f.url).hostname.toLowerCase().replace(/^www[.]/,'')}catch{return null}}).filter(Boolean))];
    const missingHosts=expected.filter(h=>!hosts.some(observed=>observed===h||observed.endsWith('.'+h)));
    const findings=report?.findings||[];
+   // Routing a task to a configured local model is not evidence that the model
+   // actually reasoned or acted. Require a confirmed, non-completion browser
+   // action from the explicitly selected REAL Ollama model.
+   const genuineModelActions=evs.filter(e=>e.kind==='agent:trace' &&
+     e.payload?.action?.type!=='complete' &&
+     ['ok','confirmed'].includes(e.payload?.outcome) &&
+     String(e.payload?.model_route||'').includes('ollama:'+actionModel));
+   const genuineModelUsed=genuineModelActions.length>0;
    // A recovery counts only when intervention follows a problem and the
    // independent evidence report arrives after that intervention.
    const problemIndex=evs.findIndex(e=>(e.kind==='agent:trace'&&e.payload?.outcome==='failed')||
@@ -185,8 +193,9 @@ async function main(){
      &&!paidUpgradeQuote&&!paidSummary&&!missingFreeProof.length&&!missingCapacityProof.length&&!incompleteSummary
      &&(!requiresReport||artifactReadbackVerified)
      &&findings.length>0&&findings.every(f=>f.url&&f.quote&&f.claim)
+     &&genuineModelUsed
      &&(problemIndex<0||recoveryVerified)&&(!requireRecovery||recoveryVerified);
-   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,supervisorReviews,stalledObservations,specialistStages,failedActions,recoveryStages,requireRecovery,recoveryVerified,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,expectedSource,sourcePathVerified,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,requiresReport,artifactReadbackVerified,summary:report?.summary?.slice(0,500)}));
+   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,supervisorReviews,stalledObservations,specialistStages,failedActions,recoveryStages,requireRecovery,recoveryVerified,genuineModelUsed,genuineModelActions:genuineModelActions.length,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,expectedSource,sourcePathVerified,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,requiresReport,artifactReadbackVerified,summary:report?.summary?.slice(0,500)}));
    if(!passed)throw Error('Native task failed one or more end-to-end criteria');
  }finally{
    try{await evaluate("window.__TAURI__.core.invoke('cancel_agent_run')")}catch{}
