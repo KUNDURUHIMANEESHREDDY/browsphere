@@ -27,11 +27,30 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     }
     assert.ok(page, 'Playwright could not attach to the actual native Tauri shell');
     assert.ok(await page.locator('body').count(), 'Native WebView2 DOM missing');
-    const snapshot = await page.evaluate(() =>
-      window.__TAURI__.core.invoke('capture_live_snapshot')
-    );
-    assert.equal(typeof snapshot?.origin, 'string', 'Native snapshot origin missing');
-    assert.ok(Array.isArray(snapshot.interactive_nodes), 'Native snapshot controls missing');
+
+    // The Tauri shell starts before any document tab is necessarily active.
+    // Open only the loopback fixture already started by the Windows harness;
+    // then verify readback from that child WebView, not an empty home view.
+    const fixturePort = Number(process.env.LUCIA_FIXTURE_PORT);
+    assert.ok(Number.isInteger(fixturePort) && fixturePort >= 1024 &&
+      fixturePort <= 65535, 'Isolated fixture port missing');
+    const fixtureUrl = 'http://127.0.0.1:' + fixturePort + '/generic-search.html';
+    await page.evaluate(url => window.browsphereApp.newTab(url), fixtureUrl);
+    let snapshot = null;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      snapshot = await page.evaluate(() =>
+        window.__TAURI__.core.invoke('capture_live_snapshot')
+      ).catch(() => null);
+      if (snapshot?.origin === fixtureUrl &&
+          Array.isArray(snapshot?.interactive_nodes) &&
+          snapshot.interactive_nodes.length > 0) break;
+      await delay(300);
+    }
+    assert.equal(snapshot?.origin, fixtureUrl,
+      'Native readback did not reach the observed isolated fixture URL');
+    assert.ok(Array.isArray(snapshot.interactive_nodes) &&
+      snapshot.interactive_nodes.length > 0,
+      'Observed fixture contains no native interactive controls');
     // Report only readiness classifications, never URL, DOM text or secrets.
     console.log('PLAYWRIGHT_WEBVIEW2_REUSE_PASS ' + JSON.stringify({
       native_shell: true,
