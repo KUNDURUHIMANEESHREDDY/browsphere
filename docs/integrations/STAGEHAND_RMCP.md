@@ -10,7 +10,7 @@ interoperability. **No native installed-WebView2 task success has been establish
   observation, structured extraction. Browsphere provides only URL policy,
   invocation, and serialization glue.
 - `@modelcontextprotocol/server@2.4.0` and
-  `@modelcontextprotocol/node@2.4.0`: official TypeScript MCP protocol
+  `@modelcontextprotocol/node@2.1.2`: official TypeScript MCP protocol
   implementation for the isolated Stagehand server.
 - `rmcp@3.12.0`: official Rust MCP SDK, currently exercised by the
   standalone `integrations/rmcp-probe` client for protocol negotiation and
@@ -25,7 +25,7 @@ migration. No unapproved tool can be called through Lucia.
 
 Install Node 22.18+ and an installed local Chromium browser. In
 `integrations/stagehand-mcp`, run `npm install`, `npm test`,
-`npm run check`, and `npm run smoke`. The smoke test launches an isolated
+`npm run check`, and `node stagehand.smoke.mjs`. The smoke test launches an isolated
 ephemeral Chromium session; it does not attach to Browsphere or an account.
 
 Set `BROWSPHERE_STAGEHAND_ENABLE=1` explicitly to permit the loopback-only
