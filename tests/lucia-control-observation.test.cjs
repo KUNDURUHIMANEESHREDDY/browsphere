@@ -16,7 +16,7 @@ const pagePrompt = (excerpt, nodes, oldEvidence = 'KEYBOARD_DIALOG_CLOSED') =>
 
 test('decisions ignore stale old evidence when current dialog is open', () => {
   const prompt = pagePrompt('Keyboard dialog is open',
-    [{node_id:'modal',label:'Keyboard dialog'},{node_id:'open',label:'Open keyboard dialog'}]);
+    [{node_id:'modal',tag:'dialog',role:'dialog',label:'Keyboard dialog'},{node_id:'open',tag:'button',role:'button',label:'Open keyboard dialog'}]);
   assert.equal(model.currentPageText(prompt),'Keyboard dialog is open');
   assert.deepEqual(model.decideAction(prompt).action,
     {type:'press_key',node_id:'modal',key:'Escape'});
