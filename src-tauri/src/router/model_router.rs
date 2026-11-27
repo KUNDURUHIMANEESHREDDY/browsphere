@@ -2056,10 +2056,47 @@ User text: <text>{}</text>"#,
                 }
             }
         }
-        match &allowed_navigation {
-            Some(urls) if !urls.is_empty()=>variants.push(variant("navigate",json!({"url":{"type":"string","enum":urls}}))),
-            None=>variants.push(variant("navigate",json!({"url":{"type":"string"}}))), // legacy direct connection probe
-            _=>{}
+        // CPU Qwen research loops previously kept navigating after reaching
+        // the exact source URL supplied by the user. Restrict ONLY this compact
+        // lane to the single trusted user URL, never a model-invented URL; once
+        // on that source, the model must read/scroll/use observed live controls
+        // instead of navigating to the same page again. Multi-source goals and
+        // every other model retain the previous action choices.
+        let exact_user_source = if cpu_compact && read_only_goal {
+            let original_goal=raw.lines().find_map(|line|line.strip_prefix("Original user goal:")).
+                unwrap_or_default();
+            let urls:Vec<Url>=original_goal.split_whitespace()
+                .filter_map(|piece|Url::parse(piece.trim_matches(|c:char|
+                    matches!(c, ',' | ';' | ')' | '(' | '"' | '\'' | '[' | ']'))).ok())
+                .filter(|url|url.scheme()=="https"&&url.host_str().is_some()
+                    &&url.username().is_empty()&&url.password().is_none())
+                .collect();
+            if urls.len()==1 { Some(urls[0].clone()) } else { None }
+        } else { None };
+        let current_origin=raw.lines().find_map(|line|line.strip_prefix("Origin: "))
+            .and_then(|line|Url::parse(line.trim()).ok());
+        let same_source=exact_user_source.as_ref().zip(current_origin.as_ref())
+            .is_some_and(|(target,current)|{
+                target.origin()==current.origin()
+                    && target.path().trim_end_matches('/')==current.path().trim_end_matches('/')
+                    && target.query()==current.query()
+            });
+        if same_source {
+            prompt.push_str("\\nThe requested exact source is already open; do not navigate again. Inspect observed source controls, scroll to read, and request evidence checking only after a supporting passage is observed.");
+        } else if let Some(source)=exact_user_source {
+            // The original goal, not a webpage or a model response, provided
+            // the only allowable URL. Respect an upstream allowlist if present.
+            let permitted=allowed_navigation.as_ref().is_none_or(|urls|
+                urls.iter().any(|candidate|candidate==source.as_str()));
+            if permitted {
+                variants.push(variant("navigate",json!({"url":{"type":"string","enum":[source.as_str()]}})));
+            }
+        } else {
+            match &allowed_navigation {
+                Some(urls) if !urls.is_empty()=>variants.push(variant("navigate",json!({"url":{"type":"string","enum":urls}}))),
+                None=>variants.push(variant("navigate",json!({"url":{"type":"string"}}))), // legacy direct connection probe
+                _=>{}
+            }
         }
         variants.push(variant("scroll",json!({"delta_y":{"type":"integer","minimum":-1400,"maximum":1400}})));
         if !read_only_goal {
@@ -2712,6 +2749,44 @@ Interactive nodes JSON: {}"#,
             &BrowserAction::Complete {summary: "Not verified".into()}, &schema
         ));
         assert!(!aliases.values().any(|value| value == "control-25"));
+    }
+
+    #[test]
+    fn qwen_read_only_research_stops_repeating_the_already_open_user_url() {
+        let raw=concat!(
+            "Original user goal: Visit https://web.dev/learn/accessibility and cite one passage.\n",
+            "Assigned stage objective: Read the observed official guide.\n",
+            "Origin: https://web.dev/learn/accessibility/\n",
+            "Native completion gate: blocked - source passage missing\n",
+            "Interactive nodes JSON: []"
+        );
+        let (_, schema, _)=ModelRouter::tiny_action_context_limited(raw,12,true);
+        let choices=schema["properties"]["action"]["anyOf"].as_array().unwrap();
+        assert!(!choices.iter().any(|v|v["properties"]["type"]["enum"][0]=="navigate"));
+        assert!(choices.iter().any(|v|v["properties"]["type"]["enum"][0]=="scroll"));
+        assert!(!choices.iter().any(|v|v["properties"]["type"]["enum"][0]=="complete"));
+        // Non-Qwen action models retain their old navigation policy.
+        let (_, old, _)=ModelRouter::tiny_action_context(raw);
+        assert!(old["properties"]["action"]["anyOf"].as_array().unwrap().iter()
+            .any(|v|v["properties"]["type"]["enum"][0]=="navigate"));
+    }
+
+    #[test]
+    fn qwen_read_only_research_can_only_navigate_to_exact_user_source_before_arrival() {
+        let raw=concat!(
+            "Original user goal: Visit https://web.dev/learn/accessibility and cite one passage.\n",
+            "Assigned stage objective: Open official source.\n",
+            "Origin: https://example.org/\n",
+            "Interactive nodes JSON: []"
+        );
+        let (_,schema,_)=ModelRouter::tiny_action_context_limited(raw,12,true);
+        let choices=schema["properties"]["action"]["anyOf"].as_array().unwrap();
+        let navigation=choices.iter().find(|v|v["properties"]["type"]["enum"][0]=="navigate").unwrap();
+        assert_eq!(navigation["properties"]["url"]["enum"][0],
+            "https://web.dev/learn/accessibility");
+        assert!(!ModelRouter::tiny_choice_allowed(&BrowserAction::Navigate {
+            url:"https://unrelated.example/".into()
+        },&schema));
     }
 
     #[test]
