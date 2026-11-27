@@ -26,7 +26,7 @@ $workingDirectory=(Split-Path -Parent $ExecutablePath)
 $policyPath='HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
 $policyName=[IO.Path]::GetFileName($ExecutablePath)
 $priorEnvironment=@{}
-foreach($name in @('APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_GOAL','LUCIA_EXPECTED_HOSTS','LUCIA_EXPECTED_SOURCE_URL','LUCIA_TEST_ACTION_MODEL','LUCIA_TEST_SUPERVISOR_MODEL','LUCIA_REQUIRE_RECOVERY','LUCIA_TEST_ATTEMPT_TIMEOUT_MS')){
+foreach($name in @('APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_GOAL','LUCIA_EXPECTED_HOSTS','LUCIA_EXPECTED_SOURCE_URL','LUCIA_TEST_ACTION_MODEL','LUCIA_TEST_SUPERVISOR_MODEL','LUCIA_REQUIRE_RECOVERY','LUCIA_TEST_ATTEMPT_TIMEOUT_MS','LUCIA_TEST_RESEARCH_DIAGNOSTIC')){
     $priorEnvironment[$name]=[Environment]::GetEnvironmentVariable($name,'Process')
 }
 if(-not $ReportPath){$ReportPath=Join-Path $root 'logs\lucia-unfamiliar-reliability.json'}
@@ -89,6 +89,7 @@ foreach($case in $cases){
     $exitCode=-1
     $inference=@()
     $memorySample=$null
+    $requests=@()
     try{
       $env:APPDATA=Join-Path $profile 'Roaming'
       $env:LOCALAPPDATA=Join-Path $profile 'Local'
@@ -102,6 +103,7 @@ foreach($case in $cases){
       $env:LUCIA_TEST_SUPERVISOR_MODEL=$SupervisorModel
       $env:LUCIA_REQUIRE_RECOVERY=if($RequireRecovery){'1'}else{'0'}
       $env:LUCIA_TEST_ATTEMPT_TIMEOUT_MS="$($AttemptBudgetSeconds*1000)"
+      $env:LUCIA_TEST_RESEARCH_DIAGNOSTIC='1'
       # An elevated hosted runner needs a per-executable WebView2 CDP policy.
       # Create only if absent; never overwrite an administrator's existing rule.
       New-Item -Path $policyPath -Force | Out-Null
@@ -120,6 +122,10 @@ foreach($case in $cases){
         Start-Sleep -Milliseconds 400
       }
       if(-not $ready){throw 'No isolated native chatbox CDP target'}
+      # Reuse Microsoft's upstream Playwright WebView2/CDP implementation
+      # for read-only attachment proof before running the real Qwen task.
+      & node (Join-Path $root 'tests\interop\playwright-native-shell.cjs')
+      if($LASTEXITCODE -ne 0){throw 'Upstream Playwright could not attach to the native Lucia shell'}
       Push-Location $root
       try {
         & node 'tests\e2e\lucia-unfamiliar-source-acceptance.cjs' *> $logFile
@@ -156,7 +162,7 @@ foreach($case in $cases){
         }
       }
       if($createdPolicy){Remove-ItemProperty -Path $policyPath -Name $policyName -ErrorAction SilentlyContinue}
-      foreach($name in 'APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_GOAL','LUCIA_EXPECTED_HOSTS','LUCIA_EXPECTED_SOURCE_URL','LUCIA_TEST_ACTION_MODEL','LUCIA_TEST_SUPERVISOR_MODEL','LUCIA_REQUIRE_RECOVERY','LUCIA_TEST_ATTEMPT_TIMEOUT_MS'){
+      foreach($name in 'APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_GOAL','LUCIA_EXPECTED_HOSTS','LUCIA_EXPECTED_SOURCE_URL','LUCIA_TEST_ACTION_MODEL','LUCIA_TEST_SUPERVISOR_MODEL','LUCIA_REQUIRE_RECOVERY','LUCIA_TEST_ATTEMPT_TIMEOUT_MS','LUCIA_TEST_RESEARCH_DIAGNOSTIC'){
         [Environment]::SetEnvironmentVariable($name,$priorEnvironment[$name],'Process')
       }
       # The disposable profile is never re-used; cleanup is best-effort.
@@ -167,16 +173,21 @@ foreach($case in $cases){
     $result=$null
     if($resultLine){try{$result=($resultLine -replace '^ORCHESTRATOR_RESULT ','') | ConvertFrom-Json}catch{}}
     $passed=$exitCode -eq 0 -and $null -ne $result -and $result.passed -eq $true -and $result.status -eq 'completed' -and
-        $result.genuineModelUsed -eq $true -and $result.genuineModelActions -ge 1
+        $result.genuineModelUsed -eq $true -and $result.genuineResearchSelections -ge 1
     $record=[ordered]@{
       case=$case.name; run=$run; passed=$passed; exit_code=$exitCode
       seconds=[math]::Round(((Get-Date)-$started).TotalSeconds,1)
       final_status=if($result){$result.status}else{'no verified result'}
       actions=if($result){$result.actions}else{0}
+
       # Only quantitative model diagnostics, never the user goal or raw DOM.
       model_performance=if($result){@($result.modelPerformance)}else{@()}
       ollama_inference_counters=@($inference)
       process_tree_end_sample=$memorySample
+      qwen_research_selections=if($result){$result.genuineResearchSelections}else{0}
+      verifier_models=if($result){@($result.verifierModels)}else{@()}
+
+      ollama_request_sizes=@($requests)
       errors=if($result){@($result.errors)}else{@('No machine-readable verified completion')}
       log=$logFile
     }

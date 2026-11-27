@@ -10,8 +10,8 @@ $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true') {
     throw 'Real Qwen CI experiment requires an isolated GitHub-hosted Windows runner.'
 }
-if ($Model -ne 'qwen2.5:3b-instruct') {
-    throw 'Only the reviewed qwen2.5:3b-instruct model is supported in this experiment.'
+if ($Model -ne 'qwen3.5:0.8b') {
+    throw 'Only the pinned qwen3.5:0.8b local model is supported in this experiment.'
 }
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $root
@@ -27,10 +27,16 @@ New-Item -Force -ItemType Directory $profile,$binaryDir,$env:OLLAMA_MODELS | Out
 $server = $null
 try {
     # Pin to a published official release. Do not pipe remote scripts to PowerShell.
-    $source = 'https://github.com/ollama/ollama/releases/download/v0.20.2/ollama-windows-amd64.zip'
+    $source = 'https://github.com/ollama/ollama/releases/download/v0.40.18/ollama-windows-amd64.zip'
     Write-Host 'Fetching pinned official Ollama Windows portable CLI.'
     Invoke-WebRequest -Uri $source -OutFile $zip -MaximumRetryCount 2 -RetryIntervalSec 3
-    if ((Get-Item $zip).Length -lt 1000000) { throw 'Ollama portable archive appears truncated' }
+    # Pin both the official release URL and GitHub's published asset checksum.
+    # The full CPU-capable Windows archive is ~1.7 GB; no arbitrary URL fallback.
+    if ((Get-Item $zip).Length -ne 1717307988) { throw 'Official Ollama archive length mismatch' }
+    $expectedSha256 = 'ca97292ac1e9acc77fcf473bb2741fa6acd12e3798f261b419680068b7cc4c16'
+    if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSha256) {
+        throw 'Official Ollama archive checksum mismatch'
+    }
     Expand-Archive -Path $zip -DestinationPath $binaryDir -Force
     $ollamaExe = Get-ChildItem -Path $binaryDir -Filter ollama.exe -File -Recurse | Select-Object -First 1 -ExpandProperty FullName
     if (-not $ollamaExe) { throw 'Portable package did not contain ollama.exe' }
@@ -48,9 +54,11 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if (-not $ready) { throw 'Real Ollama server never became available on loopback' }
-    Write-Host 'Pulling qwen2.5:3b-instruct for real inference.'
+    Write-Host 'Pulling genuine Qwen and the independent local supervisor for research verification.'
     & $ollamaExe pull $Model
     if ($LASTEXITCODE -ne 0) { throw 'Could not pull the Qwen test model' }
+    & $ollamaExe pull 'lfm3:1.7b'
+    if ($LASTEXITCODE -ne 0) { throw 'Could not pull the supervisor model' }
     $catalog = Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags'
     if (-not ($catalog.models | Where-Object { $_.name -eq $Model -or $_.model -eq $Model })) {
         throw 'The downloaded Qwen model was not listed in Ollama'

@@ -498,6 +498,17 @@ impl Orchestrator {
     /// This is an evidence gate, not a factual truth oracle.
     pub fn can_complete(&self, snapshot: &DomSnapshot) -> Result<(), String> {
         if super::deliberation::error_page(snapshot) {return Err("The current page is an error or access restriction".into());}
+        // A compound request to visit one exact source and report a fact cannot
+        // advance on a search page, a sibling guide, or a generic homepage.
+        // Only a fresh WebView observation of the requested deep link, backed
+        // by substantial original page text, may enter independent review.
+        if super::policy::requested_compound_page_entry_url(&self.plan.goal).is_some()
+            && !super::evidence_verifier::compound_research_source(&self.plan.goal,&self.evidence)
+                .is_some_and(|source|source.url==snapshot.origin
+                    && source.excerpt.trim().len()>=80)
+        {
+            return Err("Exact requested research article and readable native evidence have not been observed".into());
+        }
         if let Some(reason) = crate::agent::prerequisites::completion_blocker(&self.plan.goal,snapshot) { return Err(reason.into()); }
         if super::skills::TaskSpec::compile(&self.plan.goal).is_some_and(|spec|!spec.observed_target(snapshot)){
             return Err("Compiled target acquisition objective has not been independently observed".into());
@@ -792,6 +803,27 @@ mod tests {
     fn snapshot(url: &str, text: &str) -> DomSnapshot {
         DomSnapshot { structure: Default::default(), origin: url.to_string(), title: "Demo".into(),
             text_excerpt: text.to_string(), interactive_nodes: vec![] }
+    }
+    #[test]
+    fn compound_article_gate_rejects_homepage_and_sibling_evidence() {
+        let goal="Visit https://web.dev/learn/accessibility and report one specific recommendation from the official Learn Accessibility guide, citing a supporting passage from that exact website.";
+        let mut run=Orchestrator::from_plan(plan_task(goal));
+        run.begin();
+        let generic=snapshot("https://web.dev/",
+            &"Learn Accessibility guide recommends readable controls and semantic headings. ".repeat(4));
+        run.observe(&generic);
+        run.action_outcome(&BrowserAction::Navigate{url:generic.origin.clone()},true);
+        assert!(run.can_complete(&generic).unwrap_err().contains("Exact requested research article"));
+        let sibling=snapshot("https://web.dev/learn/html",
+            &"Learn Accessibility guide recommends readable controls and semantic headings. ".repeat(4));
+        run.observe(&sibling);
+        run.action_outcome(&BrowserAction::Navigate{url:sibling.origin.clone()},true);
+        assert!(run.can_complete(&sibling).unwrap_err().contains("Exact requested research article"));
+        let right=snapshot("https://web.dev/learn/accessibility/",
+            &"Learn Accessibility guide recommends meaningful headings and descriptive labels for all controls. ".repeat(4));
+        run.observe(&right);
+        run.action_outcome(&BrowserAction::Navigate{url:right.origin.clone()},true);
+        assert!(!run.can_complete(&right).err().is_some_and(|e|e.contains("Exact requested research article")));
     }
     #[test]
     fn video_result_requires_a_real_observed_youtube_watch_url() {
