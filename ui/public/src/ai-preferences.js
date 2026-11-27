@@ -132,17 +132,22 @@
         '<button type="button" class="mac-ai-btn" data-action="use-local-lucia-profile" data-model="role-team">Role-based local team</button></div>') +
       row('Installed models', 'Select an installed model to use it.',
         '<div class="mac-ai-installed-controls">' + chips + btn('refresh-ai-models', 'Refresh') + '</div>') +
+      row('Model capabilities', 'Inspect the selected installed model. Provider-declared text, vision, tools and thinking are not task success guarantees.',
+        '<div class="mac-ai-installed-controls">' + btn('inspect-ai-capabilities', 'Inspect selected model') +
+        '<span id="cfgLocalCapabilitiesStatus" class="mac-ai-quiet" role="status" aria-live="polite">' +
+        esc(state.localCapabilitiesStatus || 'No model inspected yet.') + '</span></div>') +
       row('Connection', 'Send a small prompt to Ollama.', btn('test-local-model', 'Test local connection')) +
       row('Lucia fallback', 'Use an installed local model when cloud free-model access is unavailable. This changes Lucia to Local, without removing your cloud provider settings.',
         models.length ? btn('use-local-lucia-fallback', 'Use local model for Lucia') :
           '<span class="mac-ai-quiet">Install or refresh an Ollama model first.</span>'));
     var mcp = section('MCP Tools', 'Connect a trusted local or HTTPS MCP server. This manual connection requires confirmation for each tool call.',
       row('MCP marketplace', 'Browse the official registry. Discovery only; review servers independently before configuring them.', input('cfgMcpSearch', '', 'Search server names') + btn('mcp-marketplace','Search registry')) +
-      row('Search provider sign-in', 'OAuth first. Choose an official provider and the external browser to open for sign-in.', btn('mcp-preset-exa','Sign in to Exa') + btn('mcp-preset-tavily','Sign in to Tavily')) +
+      row('Search provider sign-in', 'OAuth first. Choose an official provider and the external browser to open for sign-in.', btn('mcp-preset-exa','Sign in to Exa') + btn('mcp-preset-tavily','Sign in to Tavily') + btn('mcp-preset-google','Google Calendar setup')) +
       row('Optional API key', 'Alternative to OAuth for Exa or Tavily. Keys are stored in Windows Credential Manager, never in URLs. Brave uses its separately configured MCP server.', input('cfgMcpProviderKey', '', 'Provider API key', 'password') + btn('mcp-provider-key-save','Save key') + btn('mcp-provider-key-clear','Remove key')) +
       row('Server endpoint', 'Use HTTPS remotely or literal loopback HTTP locally. Connect only to servers you trust.', input('cfgMcpUrl', '', 'http://127.0.0.1:8765/mcp', 'url')) +
       row('OAuth issuer', 'Official presets fill the issuer automatically. Custom servers require a registered client.', input('cfgMcpIssuer', '', 'https://auth.example.com', 'url')) +
       row('OAuth client ID', 'Leave blank for official presets. Custom clients must support loopback redirects and S256 PKCE.', input('cfgMcpClientId', '', 'Registered public client ID')) +
+      row('Google OAuth client secret', 'Needed only for the registered Google Calendar Desktop OAuth client. It is never stored in the page or passed to an AI model.', input('cfgMcpClientSecret', '', 'Desktop OAuth client secret', 'password')) +
       row('OAuth scope', 'Optional, request only the minimum necessary scope.', input('cfgMcpScope', '', 'Read-only scope')) +
       row('Authorization', 'Choose your browser and sign in. Authorization completes automatically. Tokens stay in Windows Credential Manager.',
         btn('mcp-oauth-begin','Start authorization') + btn('mcp-oauth-open','Open sign-in browser') + btn('mcp-oauth-copy','Copy authorization URL') + btn('mcp-oauth-finish','Finish authorization') + btn('mcp-oauth-forget','Forget authorization')) +

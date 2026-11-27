@@ -2204,6 +2204,26 @@ async fn list_local_models(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec
 }
 
 #[tauri::command]
+async fn inspect_local_model_capabilities(
+    state: tauri::State<'_, Arc<AppState>>,
+    model: String,
+) -> Result<router::capability_registry::ModelCapabilities, String> {
+    // The empty-ID check is local and deterministic: CI can verify that
+    // the native command is registered without depending on Ollama service.
+    if model.trim().is_empty() {
+        return Err("Select a currently installed local model before checking capabilities".into());
+    }
+    // Never probe or download an arbitrary page-supplied model identifier.
+    // Only currently installed local tags are eligible for inspection.
+    let router = state.router.lock().await.clone();
+    let installed = router.list_local_models().await.map_err(|e| e.to_string())?;
+    if !installed.iter().any(|id| id == &model) {
+        return Err("Select a currently installed local model before checking capabilities".into());
+    }
+    router.local_model_capabilities(&model).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_history(
     state: tauri::State<'_, Arc<AppState>>,
     limit: Option<usize>,
@@ -3012,7 +3032,11 @@ fn main() {
             let private_ai = tauri::async_runtime::block_on(bundled_ai::BundledAi::launch(&resource_root))?;
             if let Some(ref service) = private_ai {
                 tauri::async_runtime::block_on(async {
-                    state_for_sched.router.lock().await.enable_bundled(service.endpoint.clone());
+                    let mut router = state_for_sched.router.lock().await;
+                    match service.profile {
+                        bundled_ai::BundledProfile::Legacy => router.enable_bundled(service.endpoint.clone()),
+                        bundled_ai::BundledProfile::Compact => router.enable_bundled_compact(service.endpoint.clone()),
+                    }
                 });
                 tracing::info!("Bundled local AI is ready");
             }
@@ -3136,6 +3160,7 @@ fn main() {
             fetch_cloud_models,
             remove_model_api_key,
             list_local_models,
+            inspect_local_model_capabilities,
             get_history,
             clear_history,
             list_memories,
