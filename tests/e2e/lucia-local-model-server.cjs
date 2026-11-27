@@ -1,5 +1,6 @@
 'use strict';
 const {reviewFixtureEvidence} = require('./semantic-review-fixture.cjs');
+const {closeObservedDetailsDialog} = require('./fixture-modal-action.cjs');
 // A loopback-only, deterministic model simulator for native Windows integration
 // testing. It never accesses public sites and never substitutes for real-LLM tests.
 const http = require('node:http');
@@ -135,10 +136,8 @@ function decideAction(prompt) {
   if (page.includes('CONTROLS_FLOW_CONFIRMED')) {
     return reply({type:'complete',summary:'Observed full browser controls confirmation'});
   }
-  if (page.includes('Dialog is open') && has('Close details')) {
-    return reply({type:'click',node_id:has('Close details').node_id,
-      element_label:'Close details',is_submit:false});
-  }
+  const detailsClose=closeObservedDetailsDialog(page,nodes);
+  if (detailsClose) return reply(detailsClose);
   if (page.includes('Advanced is enabled') &&
       page.includes('Dialog not opened') && has('Open details')) {
     return reply({type:'click',node_id:has('Open details').node_id,
