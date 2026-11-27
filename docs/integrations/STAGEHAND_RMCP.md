@@ -34,10 +34,21 @@ MCP sidecar to start, then execute `npm start`. It exposes
 and observation use the configured local Ollama model by default.
 
 **Do not start this service while browsing authenticated/private websites.**
-The read-only source allowlist and isolated profile reduce exposure, but the
-sidecar has **not** been independently security-audited for navigations or
-subresources. Never route secret-bearing URLs, credentials, or user profiles
-through the research sidecar.
+The sidecar now reuses Stagehand v4's built-in
+`browser.context.setDomainPolicy({allowedDomains:[sourceHostname]})`
+**before any page navigation**. This attempts to block cross-origin
+redirects and third-party subresource fetches at the browser request layer,
+rather than merely rejecting a redirected URL after it was already reached.
+A live upstream regression checks that a reachable localhost redirect
+is blocked without contacting the target.
+
+The policy is *hostname*-scoped, not port- or scheme-scoped. It is therefore
+not a complete SSRF/network sandbox: DNS rebinding, requests on another
+port of an approved host, browser or extension vulnerabilities, and indirect
+resources still require process/network isolation and adversarial testing.
+CI permits a dedicated loopback fixture; normal user operation only permits
+explicit public HTTPS research hostnames. Never route secrets, credentials,
+user profiles or authenticated/private tabs through this sidecar.
 
 An example *explicitly user-authorized* `mcp-servers.json` entry is:
 
@@ -70,7 +81,7 @@ directly dispatch model-generated actions against the private WebView2 profile.
 ## Acceptance tests and outstanding gates
 
 The experimental Windows workflow does four independent checks:
-Node policy/contract tests, real isolated Stagehand Chrome inspection,
+Node policy/contract tests, real isolated Stagehand Chrome inspection and a real redirect-policy regression,
 `rmcp` Rust SDK compilation, and official SDK `tools/list` against the
 live Stagehand sidecar. It keeps failed checks red and does not convert them
 into success signals.
