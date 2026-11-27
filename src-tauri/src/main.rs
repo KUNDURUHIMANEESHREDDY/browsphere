@@ -1243,6 +1243,8 @@ async fn open_or_navigate_tab_inner(
         .map_err(|e| format!("Failed to attach child WebView2 view: {e}"))?;
 
     agent::reactive_perception::attach_native_hint_receiver(&child_wv, label.clone(), state.perception.clone())?;
+    // CDP video receiver only; no image retention until a gated Lucia visual read.
+    agent::live_visual::attach(&child_wv, label.clone())?;
     state.perception.invalidate(&label);
     if effective_bounds.hidden {
         let _ = child_wv.hide();
@@ -1349,6 +1351,7 @@ async fn close_tab_webview(
     }
     // Do not retain a closed tab's page text or private session observations.
     state.perception.forget(&label);
+    agent::live_visual::forget(&label);
     Ok(())
 }
 
