@@ -28,7 +28,7 @@ function Get-BrowserProcessTreeSample {
     $webviews = @($owned | Where-Object { $_.Name -ieq 'msedgewebview2.exe' })
     $bytes = ($owned | Measure-Object -Property WorkingSetSize -Sum).Sum
     $privateBytes = ($owned | Measure-Object -Property PrivatePageCount -Sum).Sum
-    $host = @($owned | Where-Object { [int]$_.ProcessId -eq $RootProcessId })[0]
+    $rootEntry = @($owned | Where-Object { [int]$_.ProcessId -eq $RootProcessId })[0]
     $webviewBytes = ($webviews | Measure-Object -Property WorkingSetSize -Sum).Sum
     [pscustomobject]@{
         observed_at_utc = [DateTime]::UtcNow.ToString('o')
@@ -37,7 +37,7 @@ function Get-BrowserProcessTreeSample {
         process_tree_working_set_mb = [math]::Round([double]$bytes / 1MB,1)
         webview2_working_set_mb = [math]::Round([double]$webviewBytes / 1MB,1)
         process_tree_private_bytes_mb = [math]::Round([double]$privateBytes / 1MB,1)
-        native_host_working_set_mb = [math]::Round([double]$host.WorkingSetSize / 1MB,1)
+        native_host_working_set_mb = [math]::Round([double]$rootEntry.WorkingSetSize / 1MB,1)
     }
 }
 function Get-NearestRankPercentile {
