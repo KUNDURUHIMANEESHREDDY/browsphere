@@ -229,7 +229,7 @@ mod tests{
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr=listener.local_addr().unwrap();
     let server=tokio::spawn(async move{
-        for i in 0..2{
+        for i in 0..3{
             let(mut socket,_)=listener.accept().await.unwrap();
             let mut bytes=Vec::new();let mut buf=[0u8;4096];
             let end=loop{let n=socket.read(&mut buf).await.unwrap();assert!(n>0);bytes.extend_from_slice(&buf[..n]);if let Some(i)=bytes.windows(4).position(|x|x==b"\r\n\r\n"){break i+4;}};
@@ -237,8 +237,17 @@ mod tests{
             let len=headers.lines().find_map(|l|l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v|v.trim().parse::<usize>().ok())).unwrap();
             while bytes.len()<end+len{let n=socket.read(&mut buf).await.unwrap();assert!(n>0);bytes.extend_from_slice(&buf[..n]);}
             let r:serde_json::Value=serde_json::from_slice(&bytes[end..end+len]).unwrap();
-            assert_eq!(r["format"]["properties"]["controls"]["maxItems"],if i==0{3}else{1});
-            let content=if i==0{serde_json::json!({"page_kind":"documentation","layout":"document","blocker":"none","controls":[],"visible_text":["x"]})}
+            if i==0 {
+                assert!(headers.starts_with("POST /api/show "), "Expected model capability discovery before visual inference");
+                assert_eq!(r["model"],"fixture-vision");
+                let body=serde_json::json!({"capabilities":["completion","vision"]}).to_string();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).as_bytes()).await.unwrap();
+                continue;
+            }
+            assert!(headers.starts_with("POST /api/chat "));
+            let step=i-1;
+            assert_eq!(r["format"]["properties"]["controls"]["maxItems"],if step==0{3}else{1});
+            let content=if step==0{serde_json::json!({"page_kind":"documentation","layout":"document","blocker":"none","controls":[],"visible_text":["x"]})}
                 else{serde_json::json!({"page_kind":"documentation","layout":"document","blocker":"none","controls":[{"index":0,"label":"Field Guide","point":{"x":240,"y":130}}],"visible_text":[]})};
             let response=serde_json::json!({"message":{"content":content.to_string()}}).to_string();
             socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",response.len(),response).as_bytes()).await.unwrap();

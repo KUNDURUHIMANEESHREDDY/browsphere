@@ -3064,6 +3064,7 @@ mod tests {
         let addr=listener.local_addr().unwrap();
         let server=tokio::spawn(async move{
             for model in ["fixture-decomposer","fixture-planner"]{
+                for request_index in 0..2 {
                 let(mut socket,_)=listener.accept().await.unwrap();
                 let mut bytes=Vec::new();let mut buf=[0u8;4096];
                 let end=loop{
@@ -3076,11 +3077,18 @@ mod tests {
                 while bytes.len()<end+len{let n=socket.read(&mut buf).await.unwrap();assert!(n>0);bytes.extend_from_slice(&buf[..n]);}
                 let request:serde_json::Value=serde_json::from_slice(&bytes[end..end+len]).unwrap();
                 assert_eq!(request["model"],model);
-                assert!(request["messages"][1]["content"].as_str().unwrap().contains("Compare public documentation"));
-                if model=="fixture-planner"{assert!(request["messages"][1]["content"].as_str().unwrap().contains("advisory_decomposition_untrusted"));}
-                let content=json!({"stages":[{"specialist":"research","objective":"Collect public evidence","success_criteria":"Observed documentation excerpts"}]}).to_string();
-                let response=json!({"message":{"content":content}}).to_string();
+                let response = if request_index==0 {
+                    assert!(headers.starts_with("POST /api/show "), "Expected capability discovery before planning");
+                    json!({"capabilities":["completion"]}).to_string()
+                } else {
+                    assert!(headers.starts_with("POST /api/chat "));
+                    assert!(request["messages"][1]["content"].as_str().unwrap().contains("Compare public documentation"));
+                    if model=="fixture-planner"{assert!(request["messages"][1]["content"].as_str().unwrap().contains("advisory_decomposition_untrusted"));}
+                    let content=json!({"stages":[{"specialist":"research","objective":"Collect public evidence","success_criteria":"Observed documentation excerpts"}]}).to_string();
+                    json!({"message":{"content":content}}).to_string()
+                };
                 socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",response.len(),response).as_bytes()).await.unwrap();
+                }
             }
         });
         let mut cfg=RouterConfig::default();
@@ -3439,6 +3447,17 @@ Interactive nodes JSON: {}"#,serde_json::to_string(&nodes).unwrap());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
+            // Local Ollama capability discovery runs before the first action.
+            // Mock it explicitly rather than treating /api/show as a generate call.
+            {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 16384];
+                let n = stream.read(&mut request).await.unwrap();
+                assert!(String::from_utf8_lossy(&request[..n]).starts_with("POST /api/show HTTP/1.1"));
+                let body = serde_json::json!({"capabilities":["completion"]}).to_string();
+                let reply = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body);
+                stream.write_all(reply.as_bytes()).await.unwrap();
+            }
             for content in [
                 serde_json::json!({"thought":"Missing required node id",
                     "action":{"type":"click","element_label":"Search"}}).to_string(),
