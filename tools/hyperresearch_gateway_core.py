@@ -5,6 +5,7 @@ installing Hyperresearch or starting an MCP server.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 from urllib.parse import urlsplit
@@ -21,12 +22,25 @@ def note_id(value: str) -> str:
 def public_source(value: object) -> str | None:
     if not isinstance(value, str) or len(value) > 2048:
         return None
+    if any(ord(c) < 33 or ord(c) == 127 for c in value):
+        return None
     try:
         parsed = urlsplit(value)
-        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+        host = parsed.hostname
+        if (parsed.scheme not in {"http", "https"} or not host
                 or parsed.username is not None or parsed.password is not None
                 or parsed.query or parsed.fragment):
             return None
+        # Never recommend local/loopback/private addresses from cached notes.
+        # DNS resolution is not attempted; this is not an SSRF-proof fetcher.
+        if (host == "localhost" or host.endswith((".localhost", ".local", ".internal"))
+                or host.endswith(".")):
+            return None
+        try:
+            if not ipaddress.ip_address(host).is_global:
+                return None
+        except ValueError:
+            pass  # A normal public hostname, not a literal IP address.
     except ValueError:
         return None
     return value
