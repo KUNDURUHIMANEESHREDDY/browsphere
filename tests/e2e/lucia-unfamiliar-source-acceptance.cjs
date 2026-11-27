@@ -68,7 +68,7 @@ async function main(){
        const entry={goal:args[0],tab:args[3],runId:null};window.__orchestratorProbe.launches.push(entry);
        return Promise.resolve(original.apply(this,args)).then(runId=>{entry.runId=runId;return runId},error=>{entry.error=String(error);throw error});
      };
-     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan','agent:verification_recovery','agent:fact_dependencies','agent:document_artifact','agent:supervisor','agent:stage','agent:orchestration','agent:model_performance','agent:research_gate'])
+     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan','agent:verification_recovery','agent:fact_dependencies','agent:document_artifact','agent:supervisor','agent:stage','agent:orchestration','agent:model_performance','agent:research_gate','agent:model_role','agent:research_evidence_proof'])
        await window.__TAURI__.event.listen(kind,event=>
          window.__orchestratorProbe.events.push({kind,payload:event.payload}));
      const config=await window.__TAURI__.core.invoke('get_router_config');
@@ -119,7 +119,7 @@ async function main(){
      const gates=evs.filter(e=>e.kind==='agent:research_gate');
      for(const item of gates.slice(lastGateCount)){
        const e=item.payload;
-       console.log('RESEARCH_GATE',JSON.stringify({step:e.step_index,stage:e.specialist,action:e.action,reason:e.reason_code,exact:e.exact_source_observed,sources:e.captured_sources,fresh:e.freshly_observed,previous_failed:e.previous_action_failed,recoveries:e.verification_recoveries}));
+       console.log('RESEARCH_GATE',JSON.stringify({step:e.step_index,stage:e.specialist,action:e.action,reason:e.reason_code,verifier_failure:e.verifier_failure_code,exact:e.exact_source_observed,sources:e.captured_sources,fresh:e.freshly_observed,previous_failed:e.previous_action_failed,recoveries:e.verification_recoveries}));
      }
      lastGateCount=gates.length;
      // Match statuses actually returned by the Rust loop_runner/main.rs.
@@ -171,6 +171,7 @@ async function main(){
        wall_ms:Number(p.wall_ms)||0,budget_ms:Number(p.budget_ms)||0,
        prompt_chars:Number(p.prompt_chars)||0,timed_out:p.timed_out===true
      }));
+   const verifierModels=[...new Set(evs.filter(e=>e.kind==='agent:model_role'&&e.payload?.role==='verifier').map(e=>e.payload.model).filter(Boolean))];
    const recoveryEvents=evs.filter(e=>e.kind==='agent:verification_recovery');
    const recoveryStages=recoveryEvents.map(e=>e.payload.status);
    const progress=evs.filter(e=>e.kind==='agent:goal_progress').map(e=>e.payload.progress).at(-1);
@@ -179,14 +180,22 @@ async function main(){
    const hosts=[...new Set((report?.findings||[]).map(f=>{try{return new URL(f.url).hostname.toLowerCase().replace(/^www[.]/,'')}catch{return null}}).filter(Boolean))];
    const missingHosts=expected.filter(h=>!hosts.some(observed=>observed===h||observed.endsWith('.'+h)));
    const findings=report?.findings||[];
-   // Routing a task to a configured local model is not evidence that the model
-   // actually reasoned or acted. Require a confirmed, non-completion browser
-   // action from the explicitly selected REAL Ollama model.
+   // Model configuration does not prove inference. For explicit-source
+   // research, demand a native Qwen passage-selection receipt that exists only
+   // AFTER independently validated findings, not merely a browser action.
    const genuineModelActions=evs.filter(e=>e.kind==='agent:trace' &&
      e.payload?.action?.type!=='complete' &&
      ['ok','confirmed'].includes(e.payload?.outcome) &&
      String(e.payload?.model_route||'').includes('ollama:'+actionModel));
-   const genuineModelUsed=genuineModelActions.length>0;
+   // Unlike an action or model routing announcement, this proof is emitted
+   // only after Qwen's passage selection and the independent native quote,
+   // source and semantic checks all succeeded.
+   const genuineResearchSelections=evs.filter(e=>
+     e.kind==='agent:research_evidence_proof' &&
+     e.payload?.model===actionModel &&
+     e.payload?.status==='independently_checked_native_passages' &&
+     Number(e.payload?.findings)>=1);
+   const genuineModelUsed=genuineModelActions.length>0||genuineResearchSelections.length>0;
    // A recovery counts only when intervention follows a problem and the
    // independent evidence report arrives after that intervention.
    const problemIndex=evs.findIndex(e=>(e.kind==='agent:trace'&&e.payload?.outcome==='failed')||
@@ -245,9 +254,9 @@ async function main(){
      &&!paidUpgradeQuote&&!paidSummary&&!missingFreeProof.length&&!missingCapacityProof.length&&!incompleteSummary
      &&(!requiresReport||artifactReadbackVerified)
      &&findings.length>0&&findings.every(f=>f.url&&f.quote&&f.claim)
-     &&genuineModelUsed
+     &&(expectedSource?genuineResearchSelections.length>0:genuineModelUsed)
      &&(problemIndex<0||recoveryVerified)&&(!requireRecovery||recoveryVerified);
-   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus||'timed_out',attemptTimedOut,attemptBudgetMs,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,supervisorReviews,stalledObservations,specialistStages,failedActions,modelPerformance,recoveryStages,requireRecovery,recoveryVerified,genuineModelUsed,genuineModelActions:genuineModelActions.length,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,expectedSource,sourcePathVerified,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,requiresReport,artifactReadbackVerified,summary:report?.summary?.slice(0,500)}));
+   console.log('ORCHESTRATOR_RESULT',JSON.stringify({passed,status:finalStatus||'timed_out',attemptTimedOut,attemptBudgetMs,runId,actions:evs.filter(e=>e.kind==='agent:trace').length,errors,replans:replanCount,supervisorReviews,stalledObservations,specialistStages,failedActions,modelPerformance,verifierModels,recoveryStages,requireRecovery,recoveryVerified,genuineModelUsed,genuineModelActions:genuineModelActions.length,genuineResearchSelections:genuineResearchSelections.length,progress,lastFactDependencies,factDependencyHistory:factDependencyHistory.slice(-8),findings:findings.length,hosts,missingHosts,expectedSource,sourcePathVerified,paidUpgradeQuote,paidSummary,missingFreeProof,missingCapacityProof,incompleteSummary,requiresReport,artifactReadbackVerified,summary:report?.summary?.slice(0,500)}));
    if(!passed)throw Error('Native task failed one or more end-to-end criteria');
  }finally{
    try{await evaluate("window.__TAURI__.core.invoke('cancel_agent_run')")}catch{}

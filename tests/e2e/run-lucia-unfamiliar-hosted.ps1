@@ -161,12 +161,14 @@ foreach($case in $cases){
     $result=$null
     if($resultLine){try{$result=($resultLine -replace '^ORCHESTRATOR_RESULT ','') | ConvertFrom-Json}catch{}}
     $passed=$exitCode -eq 0 -and $null -ne $result -and $result.passed -eq $true -and $result.status -eq 'completed' -and
-        $result.genuineModelUsed -eq $true -and $result.genuineModelActions -ge 1
+        $result.genuineModelUsed -eq $true -and $result.genuineResearchSelections -ge 1
     $record=[ordered]@{
       case=$case.name; run=$run; passed=$passed; exit_code=$exitCode
       seconds=[math]::Round(((Get-Date)-$started).TotalSeconds,1)
       final_status=if($result){$result.status}else{'no verified result'}
       actions=if($result){$result.actions}else{0}
+      qwen_research_selections=if($result){$result.genuineResearchSelections}else{0}
+      verifier_models=if($result){@($result.verifierModels)}else{@()}
       # Only quantitative model diagnostics, never the user goal or raw DOM.
       model_performance=if($result){@($result.modelPerformance)}else{@()}
       ollama_inference_counters=@($inference)

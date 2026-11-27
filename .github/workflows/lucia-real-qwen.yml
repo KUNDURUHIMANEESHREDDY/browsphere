@@ -46,6 +46,10 @@ jobs:
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          # Cache the verified compiler outputs even if the later real-Qwen
+          # acceptance gate fails; otherwise every failure recompiles Windows.
+          cache-on-failure: true
 
       - name: Build UI assets
         shell: pwsh

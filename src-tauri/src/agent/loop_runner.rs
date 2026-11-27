@@ -3947,6 +3947,9 @@ async fn run_browser_loop(
                         let selected = {router.lock().await.clone()};
                         let selected = selected.adaptive_reasoning_profile(&goal,&snapshot.origin,is_comparison||orchestrator.evidence.len()>1).await;
                         let research_lookup=crate::agent::deliberation::lookup_subject(&goal).is_some();
+                        // Keep genuine Qwen as passage selector for user-supplied
+                        // research articles. The existing separate semantic
+                        // reviewer and Rust verifier independently check it.
                         let router=if !selected.get_config().planner_model.trim().is_empty()||research_lookup {
                             selected.local_reasoner(&snapshot.origin).or_else(||selected.local_supervisor(&snapshot.origin)).unwrap_or(selected)
                         } else if used_reviewer {selected.local_supervisor(&snapshot.origin).unwrap_or(selected)} else {selected};
@@ -3998,6 +4001,25 @@ async fn run_browser_loop(
                                 decision=PolicyDecision::Deny{reason:format!("Requirement verification failed: {reason}")};
                             }else{
                             let _=app.emit("agent:requirement_state",serde_json::json!({"run_id":run_id,"step_index":step,"ledger":&requirements}));
+                            // A real Qwen passage selection only counts AFTER
+                            // original native WebView text, quote-to-source
+                            // binding, objective coverage, and independent
+                            // evidence review all passed. A model route or
+                            // valid JSON response alone cannot emit this proof.
+                            let model=router.role_model("action",&snapshot.origin);
+                            if crate::agent::policy::requested_compound_page_entry_url(&goal).is_some()
+                                &&goal.to_ascii_lowercase().contains("report one ")
+                                &&router.select_backend(&snapshot.origin)=="ollama"
+                                &&model.to_ascii_lowercase().starts_with("qwen")
+                                &&report.status=="evidence_checked"
+                                &&!report.findings.is_empty()
+                            {
+                                let _=app.emit("agent:research_evidence_proof",serde_json::json!({
+                                    "run_id":run_id,"step_index":step,"model":model,
+                                    "status":"independently_checked_native_passages",
+                                    "findings":report.findings.len()
+                                }));
+                            }
                             // Discard the earlier model's unverified summary.
                             action = BrowserAction::Complete { summary: report.summary.clone() };
                             verified_report = Some(report);
@@ -4477,12 +4499,35 @@ async fn run_browser_loop(
                 PolicyDecision::RequireApproval{..}=>"approval_required",
                 PolicyDecision::Allow=>"allowed",
             };
+            // The raw verifier error may include model output or page text.
+            // Only publish fixed categories under the disposable CI flag.
+            let verifier_failure_code=match verification_failure_reason.as_deref(){
+                None=>"not_invoked",
+                Some(r) if r.contains("Exact requested research page")=>"source_missing",
+                Some(r) if r.contains("No relevant observed source passage")=>"passage_candidates_missing",
+                Some(r) if r.contains("Extractive research model timed out")=>"passage_selector_timeout",
+                Some(r) if r.contains("Extractive research retry timed out")=>"passage_retry_timeout",
+                Some(r) if r.contains("Semantic evidence review timed out")=>"semantic_review_timeout",
+                Some(r) if r.contains("Semantic evidence review unavailable")=>"semantic_review_unavailable",
+                Some(r) if r.contains("Source review failed or timed out")=>"source_review_timeout",
+                Some(r) if r.contains("Invalid passage ID selection")=>"passage_selection_json_invalid",
+                Some(r) if r.contains("Expected one to three passage IDs")=>"passage_selection_missing_ids",
+                Some(r) if r.contains("Unknown passage ID")=>"passage_selection_unknown_id",
+                Some(r) if r.contains("Selected passage is unrelated")=>"passage_selection_off_topic",
+                Some(r) if r.contains("Invalid semantic evidence review response")=>"semantic_review_json_invalid",
+                Some(r) if r.contains("Semantic evidence review rejected objective coverage")=>"semantic_review_objective_rejected",
+                Some(r) if r.contains("Semantic evidence review did not establish relevance")=>"semantic_review_relevance_rejected",
+                Some(r) if r.contains("Independent reviewer")=>"review_selection_invalid",
+                Some(r) if r.contains("insufficient")||r.contains("Insufficient")=>"insufficient_evidence",
+                Some(_)=>"other_verifier_failure",
+            };
             let source_current=crate::agent::evidence_verifier::compound_research_source(
                 &goal,&orchestrator.evidence).is_some_and(|e|e.url==snapshot.origin);
             let _=app.emit("agent:research_gate",serde_json::json!({
                 "run_id":run_id,"step_index":step,
                 "specialist":orchestrator.specialist().label(),"action":action_kind,
-                "reason_code":reason_code,"exact_source_observed":source_current,
+                "reason_code":reason_code,"verifier_failure_code":verifier_failure_code,
+                "exact_source_observed":source_current,
                 "captured_sources":orchestrator.evidence.len(),
                 "previous_action_failed":last_action_failed,
                 "freshly_observed":freshly_observed,
@@ -4532,7 +4577,14 @@ async fn run_browser_loop(
             let proposed_repair=verification_failure_reason.as_deref().and_then(|reason|
                 crate::agent::evidence_repair::Repair::from_failure(&goal,&orchestrator.evidence,reason));
             let named_free=crate::agent::evidence_verifier::requires_named_free_evidence(&goal);
+            // If the exact requested page has already been captured, a
+            // rejected *factual* review cannot be repaired by browsing away
+            // and replaying the same Complete action. The passage selector
+            // already attempted bounded model repair; fail closed instead.
+            let exact_source_already_read=crate::agent::evidence_verifier::compound_research_source(
+                &goal,&orchestrator.evidence).is_some();
             if factual_review_failed&&verification_recoveries==0&&(!named_free||proposed_repair.is_some())&&!current_reference&&
+                !exact_source_already_read&&
                 !objectives.active()&&orchestrator.can_reopen_research()&&
                 crate::agent::prerequisites::route_values(&goal).is_none()&&
                 crate::agent::prerequisites::filter_constraints(&goal).is_none()&&
