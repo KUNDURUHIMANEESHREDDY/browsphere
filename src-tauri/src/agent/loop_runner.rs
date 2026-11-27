@@ -43,6 +43,15 @@ fn newer_original_source_evidence(
         old.url == new.url && old.title == new.title && old.excerpt == new.excerpt))
 }
 
+// A bounded extension for CPU-only Qwen 3B, while preserving immediate
+// cancellation and native verifier gates. This is an inference deadline,
+// not a way to mark an unresponsive model or browser task successful.
+fn local_action_timeout_secs(local: bool, model: &str) -> u64 {
+    if !local { 60 }
+    else if model == "qwen2.5:3b-instruct" { 85 }
+    else { 65 }
+}
+
 pub struct ApprovalRequest {
     pub approval_id: Uuid,
     pub run_id: Uuid,
@@ -3081,9 +3090,11 @@ async fn run_browser_loop(
                 let r = router.lock().await.clone();
                 // A failed local action must leave time for an independent supervisor
                 // and a grounded recovery before the end-to-end task deadline.
-                let action_timeout_secs: u64 = if r.get_config().prefer_local_for_simple {
-                    65
-                } else { 60 };
+                let action_timeout_secs: u64 =
+                    local_action_timeout_secs(
+                        r.get_config().prefer_local_for_simple,
+                        &r.get_config().ollama_model,
+                    );
                 let stalled = run_core.stalled() || last_action_failed || duplicate_retries > 0
                     || (crate::agent::recovery::search_results(&snapshot) && auth_recovery_attempts > 0)
                     || recent_outcomes.last().is_some_and(|s| s.contains("no observed progress"));
@@ -4486,6 +4497,14 @@ async fn run_browser_loop(
 #[cfg(test)]
 mod production_safety_tests {
     use super::*;
+
+    #[test]
+    fn slow_qwen_cpu_action_deadline_is_bounded_and_no_cloud_change() {
+        assert_eq!(local_action_timeout_secs(true,"qwen2.5:3b-instruct"),85);
+        assert_eq!(local_action_timeout_secs(true,"qwen3.5:0.8b"),65);
+        assert_eq!(local_action_timeout_secs(false,"qwen2.5:3b-instruct"),60);
+    }
+
 
     #[test]
     fn rejected_verification_needs_genuinely_new_observed_source() {
