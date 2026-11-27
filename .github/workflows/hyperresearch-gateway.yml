@@ -9,6 +9,7 @@ on:
       - 'tests/e2e/seed_hyperresearch_webview_vault.py'
       - 'tests/e2e/lucia-hyperresearch-chatbox.cjs'
       - 'tests/e2e/run-hyperresearch-webview.ps1'
+      - 'tests/e2e/run-hyperresearch-installed.ps1'
       - 'src-tauri/src/agent/mcp.rs'
       - 'src-tauri/src/agent/loop_runner.rs'
       - '.github/workflows/hyperresearch-gateway.yml'
@@ -21,6 +22,7 @@ on:
       - 'tests/e2e/seed_hyperresearch_webview_vault.py'
       - 'tests/e2e/lucia-hyperresearch-chatbox.cjs'
       - 'tests/e2e/run-hyperresearch-webview.ps1'
+      - 'tests/e2e/run-hyperresearch-installed.ps1'
       - 'src-tauri/src/agent/mcp.rs'
       - 'src-tauri/src/agent/loop_runner.rs'
 
@@ -51,7 +53,7 @@ jobs:
 
   windows-native-mcp:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -73,9 +75,12 @@ jobs:
         run: python -m pip install "hyperresearch==0.13.3" "mcp>=1.8,<2"
       - name: Native Lucia client against actual Hyperresearch server
         run: python tests/run_hyperresearch_rust_ci.py
-      - name: Compile release executable for native WebView2 acceptance
-        run: cargo build --release --locked --manifest-path src-tauri/Cargo.toml
-      - name: Hyperresearch chatbox plus original-source WebView2 acceptance
+      - name: Build Windows NSIS bundle using Tauri 2
+        working-directory: src-tauri
+        run: |
+          npm install -g @tauri-apps/cli@v2
+          tauri build --bundles nsis
+      - name: Install NSIS on ephemeral Windows runner and verify WebView2 research
         shell: pwsh
-        timeout-minutes: 8
-        run: ./tests/e2e/run-hyperresearch-webview.ps1
+        timeout-minutes: 10
+        run: ./tests/e2e/run-hyperresearch-installed.ps1
