@@ -2809,7 +2809,7 @@ Interactive nodes JSON: {}"#,
 
     #[test]
     fn qwen_narrowed_action_prompt_never_advertises_forbidden_click_or_scroll(){
-        let raw=format!("Native completion gate: blocked - no evidence\\nOriginal user goal: Search for a documentation entry\\nAssigned stage objective: Enter search phrase\\nOrigin: https://docs.example.org/\\nInteractive nodes JSON: {}",json!([
+        let raw=format!("Native completion gate: blocked - no evidence\nOriginal user goal: Search for a documentation entry\nAssigned stage objective: Enter search phrase\nOrigin: https://docs.example.org/\nInteractive nodes JSON: {}",json!([
             {"node_id":"native-search","tag":"input","role":"searchbox","label":"Search","search_state":"empty","is_sensitive":false}
         ]));
         let (prompt,schema,aliases)=ModelRouter::tiny_action_context_with_limit(&raw,8);
