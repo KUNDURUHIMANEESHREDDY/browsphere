@@ -88,6 +88,18 @@ try {
         throw
     }
 
+    # Reuse official Microsoft Playwright for independent WebView2 readback.
+    # CI-only loopback CDP policy is temporary, and only the disposable app
+    # profile is inspected; do not enable CDP in the consumer installer.
+    if ($env:GITHUB_ACTIONS -eq 'true') {
+        Write-Host 'UPSTREAM_PLAYWRIGHT_WEBVIEW2_START'
+        & node (Join-Path $root 'tests\interop\playwright-webview2-smoke.cjs')
+        if ($LASTEXITCODE -ne 0) {
+            throw "Official Playwright could not read the real native WebView2"
+        }
+        Write-Host 'UPSTREAM_PLAYWRIGHT_WEBVIEW2_PASS'
+    }
+
     # Optional public-site diagnostic. Do not bypass Google challenges or
     # misrepresent fixture tests as live Google acceptance.
     if (-not $CloudCompat) {

@@ -37,6 +37,14 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build:css
 
+      - name: Install official Playwright core for CI-only native WebView2 inspection
+        shell: pwsh
+        run: |
+          npm ci --prefix tests/interop --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned upstream Playwright dependency failed to install' }
+          node --test tests/interop/playwright-interop-policy.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Playwright loopback-only policy failed' }
+
       - name: Validate frontend scripts
         shell: pwsh
         run: |
