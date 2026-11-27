@@ -167,9 +167,9 @@ function Percentiles([object[]]$values) {
   if($samples.Count -eq 0){return [ordered]@{samples=0;p50=$null;p95=$null;p99=$null}}
   return [ordered]@{
     samples=$samples.Count
-    p50=Get-NearestRankPercentile -Values $samples -Quantile 0.5
-    p95=Get-NearestRankPercentile -Values $samples -Quantile 0.95
-    p99=Get-NearestRankPercentile -Values $samples -Quantile 0.99
+    p50=(Get-NearestRankPercentile -Values $samples -Quantile 0.5)
+    p95=(Get-NearestRankPercentile -Values $samples -Quantile 0.95)
+    p99=(Get-NearestRankPercentile -Values $samples -Quantile 0.99)
   }
 }
 $taskDurations=@($records | Where-Object {$_.final_status -ne 'resource_blocked'} | ForEach-Object {$_.seconds})
@@ -186,9 +186,9 @@ $report=[ordered]@{
   passed=$passedCount;failed=$failed
   all_passed=($passedCount -eq $records.Count -and $resourceBlocked -eq 0)
   latency_summary=[ordered]@{
-    task_elapsed_seconds=Percentiles $taskDurations
-    native_action_wall_ms=Percentiles $actionTimes
-    installed_process_tree_end_working_set_mb=Percentiles $treeWorkingSets
+    task_elapsed_seconds=(Percentiles $taskDurations)
+    native_action_wall_ms=(Percentiles $actionTimes)
+    installed_process_tree_end_working_set_mb=(Percentiles $treeWorkingSets)
     native_action_timeout_events=$actionTimeouts
     scope='Ephemeral hosted Windows real-model tasks only; memory is a single end-of-run owned-process snapshot, not peak. Six attempts cannot establish release-grade p99.'
   }
