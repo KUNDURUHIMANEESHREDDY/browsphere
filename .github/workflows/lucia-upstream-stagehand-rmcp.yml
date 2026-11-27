@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: lucia-upstream-stagehand-rmcp-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   stagehand-rmcp-interop:
     name: Real Stagehand + official Rust MCP SDK (isolated Windows runner)
