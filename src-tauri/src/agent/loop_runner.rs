@@ -2397,8 +2397,13 @@ async fn run_browser_loop(
             _=>orchestrator.semantic_focus(),
         };
         let semantic_hint=orchestrator.semantic_hint();
-        let mut model_controls=if crate::agent::deliberation::read_only(&goal)&&!intelligence.managed()&&skill.is_none()&&catalog.is_none()&&
-            requested_named_result_title(&goal).is_none()&&orchestrator.plan.stages.len()>2{
+        // Reuse semantic_core's existing stage-aware DOM ranker for every
+        // multi-stage task, not just research. Otherwise form/comparison
+        // specialists can see controls ranked for an already finished stage.
+        // Single-stage and specialized flows retain their existing rankers.
+        let mut model_controls=if !intelligence.managed()&&skill.is_none()&&catalog.is_none()&&
+            requested_named_result_title(&goal).is_none()&&orchestrator.plan.stages.len()>2&&
+            orchestrator.specialist()!=Specialist::Verification{
             crate::agent::semantic_core::rank_for_stage(&snapshot,&goal,&semantic_focus,36)
         }else{controls_for_model(&snapshot,&goal)};
         for id in visual_ids.iter().rev(){
