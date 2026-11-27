@@ -2,13 +2,19 @@ name: Windows CI — Test and Build Installer
 
 on:
   push:
-    branches: [main, master]
+    # Temporary branch-specific acceptance while PR #17 is based on draft #15.
+    # Keep the signed/default release path unchanged.
+    branches: [main, master, feature/browsphere-upstream-reuse-20261127, feature/browsphere-stagehand-mcp-upstream-20261127, feature/lucia-upstream-action-observability-20261127]
   pull_request:
     branches: [main, master]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test-and-build:
@@ -48,9 +54,12 @@ jobs:
           node --check tests/e2e/lucia-start-page-navigation.cjs
           node --check tests/e2e/lucia-local-model-server.cjs
           node --check tests/e2e/lucia-multistep-mock.cjs
+          node --check tests/e2e/lucia-playwright-mcp-native.cjs
+          node --check tests/e2e/lucia-live-vision.cjs
           node --check tests/e2e/lucia-wikipedia-article.cjs
           node --check tests/e2e/lucia-play-any-song-entry.cjs
           Get-ChildItem tests -Filter *.test.cjs | ForEach-Object { node --test $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+          ./tests/e2e/process-tree-metrics.test.ps1
 
       - name: Run Rust safety and regression tests
         run: cargo test --workspace --locked
@@ -61,6 +70,16 @@ jobs:
         with:
           projectPath: src-tauri
           args: --bundles nsis
+
+      - name: Verify native realtime visual-frame stream + BRPR on isolated WebView2
+        shell: pwsh
+        timeout-minutes: 8
+        run: ./tests/e2e/run-lucia-multistep.ps1 -LiveVisionSmoke -CdpPort 9290 -ModelPort 18801 -FixturePort 18764
+
+      - name: Verify REAL Microsoft Playwright MCP snapshot on isolated Windows WebView2
+        shell: pwsh
+        timeout-minutes: 8
+        run: ./tests/e2e/run-lucia-multistep.ps1 -PlaywrightSmoke -CdpPort 9277 -ModelPort 18778 -FixturePort 18779 -McpPort 18931
 
       - name: Run isolated native Lucia multi-step and recovery E2E
         shell: pwsh
@@ -88,4 +107,61 @@ jobs:
           name: Browsphere-Windows-Installer
           path: target/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
+          retention-days: 14
+
+  clean-installed-acceptance:
+    name: Verify fresh NSIS installation through WebView2
+    needs: test-and-build
+    runs-on: windows-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      # This is a NEW disposable runner: no Rust compiler, developer profile,
+      # old Browsphere install, or preexisting model configuration is required.
+      - name: Checkout acceptance tests
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node for test harness only
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pinned upstream Playwright CDP test library (no browser download)
+        shell: pwsh
+        run: |
+          npm ci --prefix tests/interop --ignore-scripts --no-audit --no-fund
+          npm test --prefix tests/interop
+
+      - name: Install official Stagehand and MCP SDKs for isolated integration only
+        shell: pwsh
+        working-directory: integrations/stagehand-mcp
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Upstream Stagehand/MCP dependency install failed' }
+
+      - name: Download built NSIS installer
+        uses: actions/download-artifact@v4
+        with:
+          name: Browsphere-Windows-Installer
+          path: dist/ci-installer
+
+      - name: Install, exercise, and uninstall actual packaged browser
+        shell: pwsh
+        timeout-minutes: 25
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @(Get-ChildItem dist/ci-installer -Recurse -Filter '*-setup.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one downloaded NSIS installer.' }
+          ./tests/e2e/run-lucia-clean-installed.ps1 -InstallerPath $installers[0].FullName -EvidenceDirectory (Join-Path $env:RUNNER_TEMP 'BrowsphereInstalledEvidence')
+
+      - name: Upload privacy-safe installed-browser timing and memory evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Browsphere-Clean-Installed-Acceptance
+          path: ${{ runner.temp }}/BrowsphereInstalledEvidence/*.json
+          if-no-files-found: warn
           retention-days: 14

@@ -1,4 +1,6 @@
 'use strict';
+const {reviewFixtureEvidence} = require('./semantic-review-fixture.cjs');
+const {closeObservedDetailsDialog,escapeObservedKeyboardDialog} = require('./fixture-modal-action.cjs');
 // A loopback-only, deterministic model simulator for native Windows integration
 // testing. It never accesses public sites and never substitutes for real-LLM tests.
 const http = require('node:http');
@@ -17,7 +19,8 @@ const providerStats = {planner:0,actions:0,verifier:0,other:0,ollama:0};
 function cloudPhase(messages) {
   const system = String((messages || []).find(m=>m.role==='system')?.content || '').toLowerCase();
   if (system.includes('autonomous browser task planner')) return 'planner';
-  if (system.includes('independent, read-only evidence-review specialist')) return 'verifier';
+  if (system.includes('independent, read-only evidence-review specialist') ||
+      system.includes('check whether these source-backed findings answer the user')) return 'verifier';
   if (system.includes('browser agent working under lucia')) return 'actions';
   return 'other';
 }
@@ -112,8 +115,8 @@ function decideAction(prompt) {
   if (prompt.includes('Original user goal: Open keyboard dialog')) {
     if (page.includes('KEYBOARD_DIALOG_CLOSED'))
       return reply({type:'complete',summary:'Observed dialog closed after Escape'});
-    if (page.includes('Keyboard dialog is open') && has('Keyboard dialog'))
-      return reply({type:'press_key',node_id:has('Keyboard dialog').node_id,key:'Escape'});
+    const keyboardEscape=escapeObservedKeyboardDialog(page,nodes);
+    if (keyboardEscape) return reply(keyboardEscape);
     if (page.includes('Keyboard dialog not opened') && has('Open keyboard dialog'))
       return reply({type:'click',node_id:has('Open keyboard dialog').node_id,
         element_label:'Open keyboard dialog',is_submit:false});
@@ -133,10 +136,8 @@ function decideAction(prompt) {
   if (page.includes('CONTROLS_FLOW_CONFIRMED')) {
     return reply({type:'complete',summary:'Observed full browser controls confirmation'});
   }
-  if (page.includes('Dialog is open') && has('Close details')) {
-    return reply({type:'click',node_id:has('Close details').node_id,
-      element_label:'Close details',is_submit:false});
-  }
+  const detailsClose=closeObservedDetailsDialog(page,nodes);
+  if (detailsClose) return reply(detailsClose);
   if (page.includes('Advanced is enabled') &&
       page.includes('Dialog not opened') && has('Open details')) {
     return reply({type:'click',node_id:has('Open details').node_id,
@@ -270,6 +271,11 @@ function chat(body) {
     }]};
   } else if (system.includes('independent, READ-ONLY evidence-review specialist')) {
     response = verifyEvidence(user);
+  } else if (system.includes('Check whether these source-backed findings answer the user')) {
+    // Second-pass semantic review must be a separate response: returning a
+    // browser_task object here fails closed in Rust, but disguises a broken
+    // deterministic fixture as a browser-navigation/recovery regression.
+    response = reviewFixtureEvidence(user);
   } else {
     response = {mode:'browser_task'};
   }

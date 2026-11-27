@@ -1,6 +1,12 @@
 # Genuine Qwen 2.5 native Windows test using pinned Ollama portable binaries.
 # Model and browser run only on a temporary GitHub-hosted Windows worker.
-param([string]$Model = 'qwen2.5:3b-instruct')
+param(
+  [string]$Model = 'qwen2.5:3b-instruct',
+  [switch]$UnfamiliarSites,
+  [ValidateSet('all','webdev','w3c')][string]$Scenario = 'all',
+  [ValidateRange(1,10)][int]$Repetitions = 3,
+  [ValidateRange(60,280)][int]$AttemptBudgetSeconds = 175
+)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true') {
     throw 'Real Qwen CI experiment requires an isolated GitHub-hosted Windows runner.'
@@ -50,12 +56,51 @@ try {
     if (-not ($catalog.models | Where-Object { $_.name -eq $Model -or $_.model -eq $Model })) {
         throw 'The downloaded Qwen model was not listed in Ollama'
     }
-    Write-Host 'Running genuine Qwen decisions through native WebView2 integration.'
-    & (Join-Path $root 'tests\e2e\run-lucia-multistep.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe')
-    if ($LASTEXITCODE -ne 0) {
-        throw "Real Qwen native browser E2E failed with exit code $LASTEXITCODE"
+    if ($UnfamiliarSites) {
+        # A successfully downloaded model is not proof that it can respond
+        # within Lucia's actual inference deadline. Exercise the genuine
+        # Ollama binary once without any page content, then report only numeric
+        # timing metadata (not prompts, tokens, credentials, or model output).
+        $probeWatch=[Diagnostics.Stopwatch]::StartNew()
+        $probeBody=@{
+            model=$Model
+            prompt='Return one JSON object with action type scroll, delta_y 150 and no other text.'
+            format='json'
+            stream=$false
+            keep_alive='20m'
+            options=@{temperature=0;num_predict=48;num_ctx=3072}
+        } | ConvertTo-Json -Depth 6 -Compress
+        $probe=Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/generate' -Method Post -Body $probeBody -ContentType 'application/json' -TimeoutSec 120
+        $probeWatch.Stop()
+        if(-not $probe.done -or [string]::IsNullOrWhiteSpace([string]$probe.response)) {
+            throw 'Real Qwen preflight returned no completed model response; browser task repeatability cannot be measured.'
+        }
+        $metrics=[ordered]@{
+            wall_ms=[math]::Round($probeWatch.Elapsed.TotalMilliseconds,1)
+            model_load_ms=[math]::Round([double]$probe.load_duration/1000000,1)
+            prompt_eval_ms=[math]::Round([double]$probe.prompt_eval_duration/1000000,1)
+            generation_ms=[math]::Round([double]$probe.eval_duration/1000000,1)
+            prompt_tokens=[int]$probe.prompt_eval_count
+            generated_tokens=[int]$probe.eval_count
+            tokens_per_second=if($probe.eval_duration -gt 0){[math]::Round(([double]$probe.eval_count*1000000000)/[double]$probe.eval_duration,1)}else{$null}
+            done_reason=[string]$probe.done_reason
+        }
+        Write-Host ('REAL_QWEN_PREFLIGHT '+($metrics|ConvertTo-Json -Compress))
+        Write-Host ("Running {0} genuine Qwen task attempts, scenario={1}; each task has {2}s independent acceptance budget." -f $Repetitions,$Scenario,$AttemptBudgetSeconds)
+        $resultPath=Join-Path $env:RUNNER_TEMP 'lucia-unfamiliar-evidence.json'
+        & (Join-Path $root 'tests\e2e\run-lucia-unfamiliar-hosted.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe') -Scenario $Scenario -Repetitions $Repetitions -AttemptBudgetSeconds $AttemptBudgetSeconds -ActionModel $Model -SupervisorModel $Model -ReportPath $resultPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Real Qwen unfamiliar-site acceptance failed; resource blocks and unverified outcomes are not passes."
+        }
+        Write-Host 'PASS: Every requested independent real-Qwen unfamiliar-site task was source-verified.'
+    } else {
+        Write-Host 'Running genuine Qwen decisions through native WebView2 fixture integration.'
+        & (Join-Path $root 'tests\e2e\run-lucia-multistep.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe')
+        if ($LASTEXITCODE -ne 0) {
+            throw "Real Qwen native browser fixture E2E failed with exit code $LASTEXITCODE"
+        }
+        Write-Host 'PASS: Real Qwen model browser fixture E2E completed.'
     }
-    Write-Host 'PASS: Real Qwen model browser E2E completed.'
 } finally {
     if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
     if (Test-Path (Join-Path $profile 'ollama.stderr.log')) {

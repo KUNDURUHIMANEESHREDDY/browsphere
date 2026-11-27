@@ -1,0 +1,16 @@
+{
+  "name": "browsphere-upstream-browser-interop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "CI-only upstream Playwright WebView2 interop smoke tests; never bundled in the consumer browser",
+  "scripts": {
+    "smoke": "node playwright-webview2-smoke.cjs",
+    "test": "node --test playwright-interop-policy.test.cjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.65.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,51 @@
+name: Upstream Stagehand MCP — Windows integration
+
+on:
+  push:
+    branches:
+      - feature/browsphere-stagehand-mcp-upstream-20261127
+    paths:
+      - 'integrations/stagehand-mcp/**'
+      - '.github/workflows/stagehand-upstream.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-stagehand-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stagehand-upstream:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Node 22 (Stagehand v4 supports >=22.18)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install exact upstream SDK package versions without running install scripts
+        shell: pwsh
+        working-directory: integrations/stagehand-mcp
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund --package-lock=false
+          if($LASTEXITCODE -ne 0){throw "Official Stagehand/MCP packages could not be installed."}
+      - name: Syntax validation
+        shell: pwsh
+        working-directory: integrations/stagehand-mcp
+        run: |
+          npm run check
+          if($LASTEXITCODE -ne 0){throw "Stagehand integration JavaScript syntax failure"}
+      - name: Official MCP protocol + Stagehand isolated browser readback
+        shell: pwsh
+        working-directory: integrations/stagehand-mcp
+        timeout-minutes: 10
+        env:
+          STAGEHAND_BROWSER_E2E: '1'
+        run: |
+          npm test
+          if($LASTEXITCODE -ne 0){throw "Upstream browser/MCP integration is not verified"}

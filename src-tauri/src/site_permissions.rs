@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::io::Write;
 use std::sync::RwLock;
 use tauri::webview::{PermissionKind, PermissionResponse};
 
@@ -10,6 +11,23 @@ const SUPPORTED: &[&str] = &["camera", "microphone", "geolocation", "notificatio
 pub struct SitePolicy {
     pub origin: String,
     pub granted: Vec<String>,
+}
+
+// Persist in the same directory via a unique temporary file. A disk error
+// must not truncate the previously accepted permission record, and an
+// in-memory grant must never be acknowledged before the rename succeeds.
+fn atomic_write_permissions(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(||std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,"Missing permission-store directory"))?;
+    let temp = parent.join(format!("site-permissions-{}.tmp",uuid::Uuid::new_v4()));
+    let attempt = (||{
+        let mut output = std::fs::OpenOptions::new().create_new(true).write(true).open(&temp)?;
+        output.write_all(bytes)?;
+        output.sync_all()?;
+        std::fs::rename(&temp, path)
+    })();
+    if attempt.is_err() { let _ = std::fs::remove_file(&temp); }
+    attempt
 }
 
 #[derive(Default)]
@@ -67,7 +85,7 @@ impl SitePermissions {
         }
         // Never acknowledge a grant unless it has actually reached disk.
         let serialized = serde_json::to_vec_pretty(&*grants).map_err(|e| e.to_string())?;
-        if let Err(error) = std::fs::write(&self.file, serialized) {
+        if let Err(error) = atomic_write_permissions(&self.file, &serialized) {
             *grants = before;
             return Err(format!("Could not save site permissions: {error}"));
         }
@@ -139,5 +157,34 @@ mod tests {
         assert!(restored.update("http://example.com", "camera", true).is_err());
         assert!(restored.update("https://example.com", "file-system-access", true).is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_atomic_write_does_not_acknowledge_or_leak_grants() {
+        let dir = std::env::temp_dir().join(format!("browsphere-perm-write-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A directory where the JSON file should be forces rename failure
+        // consistently on Windows and Linux without changing ACLs.
+        std::fs::create_dir(dir.join("site-permissions.json")).unwrap();
+        let store = SitePermissions::new(&dir);
+        assert!(store.update("https://example.com","camera",true).is_err());
+        assert!(store.list("https://example.com").unwrap().granted.is_empty());
+        let leftover:Vec<_>=std::fs::read_dir(&dir).unwrap().filter_map(Result::ok)
+            .filter(|e|e.file_name().to_string_lossy().ends_with(".tmp")).collect();
+        assert!(leftover.is_empty(),"Failed permission writes must not leave temporary credential-like state");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn successful_permission_update_atomically_replaces_prior_grant() {
+        let dir = std::env::temp_dir().join(format!("browsphere-perm-replace-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SitePermissions::new(&dir);
+        store.update("https://example.com","camera",true).unwrap();
+        store.update("https://example.com","microphone",true).unwrap();
+        let restored = SitePermissions::new(&dir);
+        assert_eq!(restored.list("https://example.com").unwrap().granted,
+            vec!["camera".to_string(),"microphone".to_string()]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -32,6 +32,26 @@ use crate::router::model_router::ModelRouter;
 use crate::storage::credentials::CredentialStore;
 use crate::storage::sqlite_wal::{BrowserDatabase, WorkflowMacro};
 
+/// A rejected verification is never repaired by reusing the same captured
+/// source passages. A later fresh WebView observation must contain new evidence
+/// before that stage may request another completion review.
+fn newer_original_source_evidence(
+    rejected: &[crate::agent::orchestrator::SourceEvidence],
+    observed: &[crate::agent::orchestrator::SourceEvidence],
+) -> bool {
+    observed.iter().any(|new| !rejected.iter().any(|old|
+        old.url == new.url && old.title == new.title && old.excerpt == new.excerpt))
+}
+
+// A bounded extension for CPU-only Qwen 3B, while preserving immediate
+// cancellation and native verifier gates. This is an inference deadline,
+// not a way to mark an unresponsive model or browser task successful.
+fn local_action_timeout_secs(local: bool, model: &str) -> u64 {
+    if !local { 60 }
+    else if model == "qwen2.5:3b-instruct" { 85 }
+    else { 65 }
+}
+
 pub struct ApprovalRequest {
     pub approval_id: Uuid,
     pub run_id: Uuid,
@@ -1603,10 +1623,23 @@ async fn run_browser_loop(
         let selected_model = {router.lock().await.clone()};
         let selected_model = selected_model.adaptive_reasoning_profile(&goal,&snapshot.origin,false).await;
         let _=app.emit("agent:model_role",serde_json::json!({"run_id":run_id,"role":"planner","model":selected_model.role_model("planner",&snapshot.origin),"status":"selected"}));
+        // Reuse Microsoft's Playwright MCP accessibility snapshot only when
+        // the user has configured the trusted loopback, read-only tool. It is
+        // queried once on difficult initial pages and cannot dispatch actions,
+        // create evidence, or override our native WebView2 DOM observation.
+        let page_kind=crate::agent::page_understanding::classify(&snapshot).kind;
+        let upstream=if !private_mode && matches!(page_kind,
+            crate::agent::page_understanding::PageKind::Unknown |
+            crate::agent::page_understanding::PageKind::Dialog |
+            crate::agent::page_understanding::PageKind::Autocomplete) {
+            crate::agent::mcp::playwright_page_hints(
+                &crate::resolve_data_dir().join("mcp-servers.json"),
+                &snapshot.origin,cancel.clone()).await
+        } else {None};
         let result=tokio::select!{
             _=cancel.cancelled()=>return Ok("cancelled".into()),
             result=tokio::time::timeout(std::time::Duration::from_secs(120),
-                selected_model.plan_for_origin(&goal,&snapshot.origin,&creds))=>result
+                selected_model.plan_for_origin_with_page_and_upstream(&goal,&snapshot.origin,&creds,&snapshot,upstream.as_ref()))=>result
         };
         match result{
             Ok(Ok(plan))=>plan,
@@ -1631,6 +1664,10 @@ async fn run_browser_loop(
     for (i,s) in orchestrator.plan.stages.iter().enumerate(){graph.describe(stage_nodes[i],&s.objective,&s.success_criteria)?;}
     let mut recovery_node:Option<usize>=None;
     let mut verification_recoveries=0u8;
+    // Cached citations and identical live snippets cannot repair a rejected
+    // independent review. Kept only in memory for the current run.
+    let mut rejected_verification_sources:
+        Option<Vec<crate::agent::orchestrator::SourceEvidence>> = None;
     let mut recovery_observation:Option<usize>=None;
     let mut recovery_strategy:Option<crate::agent::replan::RecoveryPlan>=None;
     publish_graph!(&graph);
@@ -2397,8 +2434,13 @@ async fn run_browser_loop(
             _=>orchestrator.semantic_focus(),
         };
         let semantic_hint=orchestrator.semantic_hint();
-        let mut model_controls=if crate::agent::deliberation::read_only(&goal)&&!intelligence.managed()&&skill.is_none()&&catalog.is_none()&&
-            requested_named_result_title(&goal).is_none()&&orchestrator.plan.stages.len()>2{
+        // Reuse semantic_core's existing stage-aware DOM ranker for every
+        // multi-stage task, not just research. Otherwise form/comparison
+        // specialists can see controls ranked for an already finished stage.
+        // Single-stage and specialized flows retain their existing rankers.
+        let mut model_controls=if !intelligence.managed()&&skill.is_none()&&catalog.is_none()&&
+            requested_named_result_title(&goal).is_none()&&orchestrator.plan.stages.len()>2&&
+            orchestrator.specialist()!=Specialist::Verification{
             crate::agent::semantic_core::rank_for_stage(&snapshot,&goal,&semantic_focus,36)
         }else{controls_for_model(&snapshot,&goal)};
         for id in visual_ids.iter().rev(){
@@ -2515,6 +2557,12 @@ async fn run_browser_loop(
             }));
             final_status="unverified".into();
             break;
+        }
+        if rejected_verification_sources.as_ref().is_some_and(|prior|
+            newer_original_source_evidence(prior,&orchestrator.evidence)) {
+            // This is only permission to TRY verification again, not success.
+            // The same Rust quote/requirement/semantic gates still apply.
+            rejected_verification_sources = None;
         }
         let completion_gate = if !freshly_observed || last_action_failed {
             "blocked - fresh successful observation required".to_string()
@@ -3060,9 +3108,11 @@ async fn run_browser_loop(
                 let r = router.lock().await.clone();
                 // A failed local action must leave time for an independent supervisor
                 // and a grounded recovery before the end-to-end task deadline.
-                let action_timeout_secs: u64 = if r.get_config().prefer_local_for_simple {
-                    65
-                } else { 60 };
+                let action_timeout_secs: u64 =
+                    local_action_timeout_secs(
+                        r.get_config().prefer_local_for_simple,
+                        &r.get_config().ollama_model,
+                    );
                 let stalled = run_core.stalled() || last_action_failed || duplicate_retries > 0
                     || (crate::agent::recovery::search_results(&snapshot) && auth_recovery_attempts > 0)
                     || recent_outcomes.last().is_some_and(|s| s.contains("no observed progress"));
@@ -3072,6 +3122,7 @@ async fn run_browser_loop(
                     } else { r.local_supervisor(&snapshot.origin) }
                 } else { None };
                 let _=app.emit("agent:model_role",serde_json::json!({"run_id":run_id,"role":"action","model":r.role_model("action",&snapshot.origin),"status":"selected"}));
+                let primary_started = std::time::Instant::now();
                 let primary = if stalled && supervisor.is_some() {
                     None
                 } else {
@@ -3084,6 +3135,31 @@ async fn run_browser_loop(
                             result.unwrap_or_else(|_| Err(anyhow::anyhow!("Lucia action model timed out")))
                     })
                 };
+                // Classify the real native action decision before supervisor
+                // recovery. A timeout cannot be diagnosed using Ollama's final
+                // counters because the model future was cancelled before reply.
+                // Emit only numeric timing/size metadata for CI and diagnostics.
+                if let Some(decision) = &primary {
+                    let timed_out = decision.as_ref().err().is_some_and(|error|
+                        error.to_string().contains("Lucia action model timed out"));
+                    let elapsed_ms = primary_started.elapsed().as_millis() as u64;
+                    let _ = app.emit("agent:model_performance", serde_json::json!({
+                        "run_id":run_id,
+                        "step_index":step,
+                        "role":"action",
+                        "model":r.role_model("action",&snapshot.origin),
+                        "wall_ms":elapsed_ms,
+                        "budget_ms":action_timeout_secs*1000,
+                        "prompt_chars":prompt_payload.chars().count(),
+                        "timed_out":timed_out
+                    }));
+                    tracing::info!(
+                        target: "lucia_inference",
+                        wall_ms=elapsed_ms, budget_ms=action_timeout_secs*1000,
+                        prompt_chars=prompt_payload.chars().count(), timed_out=timed_out,
+                        "lucia_action_outcome"
+                    );
+                }
                 match primary {
                     Some(Ok(proposal)) => proposal,
                     primary_error => {
@@ -3133,34 +3209,47 @@ async fn run_browser_loop(
                             let invalid_model_action=error.to_string()
                                 .contains("could not produce a valid browser action after two attempts")
                                 || error.to_string().contains("Lucia action model timed out");
+                            let verifier_recovery = rejected_verification_sources.is_some()
+                                && orchestrator.specialist()!=Specialist::Verification;
                             let grounded=if freshly_observed
                                 && invalid_model_action
-                                && orchestrator.specialist()==Specialist::Research
-                                && crate::agent::deliberation::read_only(&goal){
-                                crate::agent::course_comparison::next_search(
-                                    &goal,&orchestrator.evidence,&snapshot.origin)
-                                    .map(|url|BrowserAction::Navigate{url:url.to_string()})
+                                && crate::agent::deliberation::read_only(&goal)
+                                && (orchestrator.specialist()==Specialist::Research || verifier_recovery) {
+                                (if orchestrator.specialist()==Specialist::Research {
+                                    crate::agent::course_comparison::next_search(
+                                        &goal,&orchestrator.evidence,&snapshot.origin)
+                                        .map(|url|BrowserAction::Navigate{url:url.to_string()})
+                                } else {None})
                                     .or_else(||crate::agent::action_intelligence::grounded_search_result(
                                         &goal,&snapshot))
                                     .or_else(||{
-                                        // Reuse exactly the same grounded, stage-aware
-                                        // alternative selector used for stalled actions.
-                                        // Never guess a URL or execute a raw model
-                                        // response after malformed action JSON.
+                                        // After a rejected review, retry only a
+                                        // distinct control in freshly observed DOM.
+                                        // Never manufacture source evidence.
                                         replacement.next_for_stage(
                                             &goal,&semantic_focus,&snapshot,&objectives,&route_ledger)
-                                            .filter(|candidate|
-                                                !matches!(candidate,BrowserAction::Complete{..}|
-                                                    BrowserAction::Download{..}) &&
-                                                orchestrator.specialist().allows_on_page(candidate,&snapshot) &&
-                                                crate::agent::objective_gate::check(
-                                                    &goal,&initial_origin,&snapshot,&objectives,candidate).is_ok())
                                     })
+                                    .filter(|candidate|
+                                        !matches!(candidate,
+                                            BrowserAction::Complete{..}|BrowserAction::Download{..}|
+                                            BrowserAction::Click{is_submit:true,..}|
+                                            BrowserAction::TypeText{is_sensitive:true,..}) &&
+                                        !run_core.failed_before(candidate,&snapshot,orchestrator.current) &&
+                                        orchestrator.specialist().allows_on_page(candidate,&snapshot) &&
+                                        crate::agent::objective_gate::check(
+                                            &goal,&initial_origin,&snapshot,&objectives,candidate).is_ok())
                             } else {None};
                             if let Some(action)=grounded {
-                                ("Recover an invalid model action with a live observed research route".into(),
-                                    action,"course:invalid_model_action_native_fallback".into())
-                            }else{return Err(error)}
+                                ("Recover a rejected action with a newly observed safe browser route".into(),
+                                    action,"recovery:invalid_model_grounded_fallback".into())
+                            } else if verifier_recovery {
+                                let _=app.emit("agent:run_error",serde_json::json!({
+                                    "run_id":run_id,
+                                    "message":"Verifier rejected the current evidence and the model could not choose a distinct valid browser action. Stopped unverified without repeating completion."
+                                }));
+                                final_status="unverified".into();
+                                break;
+                            } else {return Err(error)}
                         }
                         else {
                             tokio::select! {
@@ -3411,6 +3500,52 @@ async fn run_browser_loop(
                         "decision":"substitute_unique_relevant_observed_link"
                     }));
                 }
+            }
+        }
+        if rejected_verification_sources.is_some()
+            && orchestrator.specialist()!=Specialist::Verification
+            && matches!(action,BrowserAction::Complete{..})
+        {
+            // A model might confidently repeat "complete" even after Rust
+            // rejected its evidence. Only a different observed, read-only
+            // browser action may help; never replay a submission or infer
+            // verification from an unchanged page.
+            let candidate = replacement.next_for_stage(
+                &goal,&semantic_focus,&snapshot,&objectives,&route_ledger
+            ).filter(|a| !matches!(a,
+                BrowserAction::Complete{..}|BrowserAction::Download{..}|
+                BrowserAction::Click{is_submit:true,..}|
+                BrowserAction::TypeText{is_sensitive:true,..})
+                && !run_core.failed_before(a,&snapshot,orchestrator.current)
+                && orchestrator.specialist().allows_on_page(a,&snapshot)
+                && crate::agent::objective_gate::check(
+                    &goal,&initial_origin,&snapshot,&objectives,a).is_ok());
+            if let Some(mut alternative)=candidate {
+                if bind_action_to_live_dom(&mut alternative,&snapshot,true).is_ok() {
+                    action=alternative;
+                    action_binding_error=None;
+                    thought="Reobserve and acquire new source evidence after rejected independent verification".into();
+                    model_route="recovery:missing_verifier_evidence".into();
+                    let _=app.emit("agent:recovery",serde_json::json!({
+                        "run_id":run_id,"step_index":step,
+                        "reason":"verifier_rejected_unchanged_evidence",
+                        "strategy":"different_observed_action"
+                    }));
+                } else {
+                    let _=app.emit("agent:run_error",serde_json::json!({
+                        "run_id":run_id,
+                        "message":"Independent verification rejected the captured evidence; no safely bound alternative control was observed. Task remains unverified."
+                    }));
+                    final_status="unverified".into();
+                    break;
+                }
+            } else {
+                let _=app.emit("agent:run_error",serde_json::json!({
+                    "run_id":run_id,
+                    "message":"Independent verification rejected the current source evidence. Reobserved page offers no distinct, safe action; no repeated completion attempted."
+                }));
+                final_status="unverified".into();
+                break;
             }
         }
         let before_effect=snapshot.clone();
@@ -4242,7 +4377,9 @@ async fn run_browser_loop(
                 !crate::agent::recovery::authentication_gate(&snapshot)&&!crate::agent::deliberation::error_page(&snapshot) {
                 let verifier=stage_nodes[orchestrator.current];
                 if let Ok(id)=graph.insert_verification_research(verifier){
+                    let rejected_sources=orchestrator.evidence.clone();
                     if orchestrator.reopen_research(){
+                        rejected_verification_sources=Some(rejected_sources);
                         checkpoint_proof=None;
                         stage_nodes[orchestrator.current]=id;verification_recoveries+=1;last_action_failed=false;advisory=None;
                         recent_outcomes.push("Independent factual review found insufficient evidence. Locate the missing requested facts on relevant public source pages. Do not reuse the rejected summary.".into());
@@ -4404,6 +4541,37 @@ async fn run_browser_loop(
 #[cfg(test)]
 mod production_safety_tests {
     use super::*;
+
+    #[test]
+    fn slow_qwen_cpu_action_deadline_is_bounded_and_no_cloud_change() {
+        assert_eq!(local_action_timeout_secs(true,"qwen2.5:3b-instruct"),85);
+        assert_eq!(local_action_timeout_secs(true,"qwen3.5:0.8b"),65);
+        assert_eq!(local_action_timeout_secs(false,"qwen2.5:3b-instruct"),60);
+    }
+
+
+    #[test]
+    fn rejected_verification_needs_genuinely_new_observed_source() {
+        use crate::agent::orchestrator::SourceEvidence;
+        let cached=vec![SourceEvidence{
+            url:"https://docs.example.org/api".into(),
+            title:"API Reference".into(),
+            excerpt:"Cached claim unsupported by actual source.".into()
+        }];
+        assert!(!newer_original_source_evidence(&cached,&cached));
+        // Capturing the same text again is NOT evidence recovery.
+        assert!(!newer_original_source_evidence(&cached,&cached.clone()));
+        let mut new=cached.clone();
+        new[0].excerpt="New live original-source passage describing the API.".into();
+        assert!(newer_original_source_evidence(&cached,&new));
+        new=cached.clone();
+        new.push(SourceEvidence{
+            url:"https://docs.example.org/guide".into(),
+            title:"Guide".into(),
+            excerpt:"Fresh independent source collected.".into()
+        });
+        assert!(newer_original_source_evidence(&cached,&new));
+    }
 
     #[test]
     fn search_submit_needs_matching_new_article_and_native_source_evidence() {

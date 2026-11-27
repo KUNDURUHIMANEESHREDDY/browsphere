@@ -1243,6 +1243,8 @@ async fn open_or_navigate_tab_inner(
         .map_err(|e| format!("Failed to attach child WebView2 view: {e}"))?;
 
     agent::reactive_perception::attach_native_hint_receiver(&child_wv, label.clone(), state.perception.clone())?;
+    // CDP video receiver only; no image retention until a gated Lucia visual read.
+    agent::live_visual::attach(&child_wv, label.clone())?;
     state.perception.invalidate(&label);
     if effective_bounds.hidden {
         let _ = child_wv.hide();
@@ -1345,10 +1347,12 @@ async fn close_tab_webview(
             .unwrap_or_else(|| TabManagerState::sanitize_label(&tab_id))
     };
     if let Some(wv) = app.get_webview(&label) {
+        agent::live_visual::detach(&wv,&label);
         let _ = wv.close();
     }
     // Do not retain a closed tab's page text or private session observations.
     state.perception.forget(&label);
+    agent::live_visual::forget(&label);
     Ok(())
 }
 
@@ -1735,6 +1739,82 @@ fn bench_percentile(mut values: Vec<f64>, percentile: usize) -> Option<f64> {
     if values.is_empty() { return None; }
     values.sort_by(|a,b| a.total_cmp(b));
     Some(values[((values.len()*percentile+99)/100).saturating_sub(1).min(values.len()-1)])
+}
+
+#[derive(serde::Serialize)]
+struct LiveVisualSmokeReport {
+    first_frame_ms:u64,
+    second_frame_ms:u64,
+    first_frame_chars:usize,
+    second_frame_chars:usize,
+    changed:bool,
+    brpr_signaled:bool,
+}
+
+/// CI-only, fixture-scoped acceptance check for the real WebView2 CDP
+/// screencast path. No images, URLs, or page content ever return to the UI.
+#[tauri::command]
+async fn run_live_visual_smoke(
+    webview:tauri::Webview,
+    app:tauri::AppHandle,
+    state:tauri::State<'_, Arc<AppState>>,
+)->Result<LiveVisualSmokeReport,String>{
+    use sha2::{Digest,Sha256};
+    if webview.label()!="main"||std::env::var("GITHUB_ACTIONS").ok().as_deref()!=Some("true"){
+        return Err("Live frame acceptance test requires trusted isolated CI".into());
+    }
+    // Bind this CI-only test to the fixture by exact native tab identity.
+    // The browser chrome may switch its active tab asynchronously, so using
+    // active_webview_label would sample the wrong tab or an empty BRPR cache.
+    let label=TabManagerState::sanitize_label("live-visual-fixture");
+    let child=app.get_webview(&label).ok_or("No isolated WebView2 fixture")?;
+    let current=child.url().map_err(|_|"Fixture URL unavailable")?;
+    if current.scheme()!="http"||current.host_str()!=Some("127.0.0.1")||
+        current.port()!=Some(18764)||current.path()!="/" {
+        return Err("Refusing visual capture outside isolated localhost fixture".into());
+    }
+    // The test fixture must have completed loading and be visible before CDP
+    // can reasonably deliver screencast frame events on a Windows CI worker.
+    let mut ready=false;
+    for _ in 0..30 {
+        if agent::native_eval::eval_json(&app,&label,
+            "document.readyState === 'complete'".into(),1000).await.ok()
+            .and_then(|v|v.as_bool())==Some(true){ready=true;break;}
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if !ready{return Err("Isolated visual fixture never finished loading".into());}
+    child.show().map_err(|_|"Could not display isolated visual fixture")?;
+    let start=std::time::Instant::now();
+    let first=agent::live_visual::sample(&app,&label).await?;
+    let first_frame_ms=start.elapsed().as_millis() as u64;
+    let first_frame_chars=first.len();
+    // Snapshot the counter immediately before mutation, not before a potentially
+    // slow first frame. Initial page-load signals must not count as evidence.
+    let before_signals=state.perception.status(&label).signal_count;
+    // Mutate ONLY our throwaway local fixture, and verify a new native
+    // BRPR signal as well as a distinct subsequent streamed image frame.
+    agent::native_eval::eval_json(&app,&label,
+        "(()=>{document.body.style.backgroundColor='rgb(24, 90, 175)'; \
+            document.documentElement.style.backgroundColor='rgb(24, 90, 175)'; \
+            return true;})()".into(),2000).await?;
+    let signaled=tokio::time::timeout(std::time::Duration::from_secs(2),async {
+        loop {
+            if state.perception.status(&label).signal_count>before_signals {break true;}
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.unwrap_or(false);
+    if !signaled{return Err("BRPR did not signal the isolated visual change".into());}
+    let start=std::time::Instant::now();
+    let second=agent::live_visual::sample(&app,&label).await?;
+    let second_frame_ms=start.elapsed().as_millis() as u64;
+    let second_frame_chars=second.len();
+    let changed=Sha256::digest(first.as_bytes())!=Sha256::digest(second.as_bytes());
+    let brpr_signaled=state.perception.status(&label).signal_count>before_signals;
+    if !changed||!brpr_signaled{
+        return Err("WebView2 stream or BRPR did not observe the changed fixture".into());
+    }
+    Ok(LiveVisualSmokeReport{first_frame_ms,second_frame_ms,
+        first_frame_chars,second_frame_chars,changed,brpr_signaled})
 }
 
 #[tauri::command]
@@ -3079,6 +3159,7 @@ fn main() {
             get_brpr_status,
             get_brpr_cached_observation,
             run_brpr_live_benchmark,
+            run_live_visual_smoke,
             get_site_permissions,
             set_site_permission,
             switch_tab_webview,

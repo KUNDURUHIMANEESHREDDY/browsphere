@@ -305,6 +305,16 @@ mod tests{
   unrelated.title="Compatibility reference".into();
   assert!(navigation_relevance(goal,"Read compatibility reference",&unrelated)>0);
  }
+ #[test]fn multistage_form_ranking_prioritizes_the_current_field(){
+  let p=page(vec![
+   n("date","input","textbox","Event date"),
+   n("venue","input","textbox","Event venue"),
+  ]);
+  let goal="Fill the registration form with event date and event venue, then submit";
+  let ranked=rank_for_stage(&p,goal,"Enter event venue",1);
+  assert_eq!(ranked[0].node_id,"venue",
+   "active stage controls must outrank completed-stage fields");
+ }
  #[test]fn route_ledger_bounds_revisits_and_failed_transitions_without_blocking_new_pages(){
   let mut ledger=RouteLedger::default();
   let a="https://example.org/search";let b="https://example.org/help";

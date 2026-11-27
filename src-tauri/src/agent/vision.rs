@@ -1,4 +1,5 @@
-//! Optional screenshot perception. Images stay on the loopback Ollama API.
+//! Opt-in live WebView2 visual perception. Sample a bounded native CDP video
+//! stream and infer locally; no one-off screenshot is used by Lucia's visual agent.
 //! Vision output is untrusted context, never a direct browser action.
 use crate::router::model_router::RouterConfig;
 
@@ -6,12 +7,13 @@ use super::multimodal_perception::{self as mm,Candidate,VisualObservation};
 #[derive(Debug,Default,serde::Serialize)]
 pub struct InferenceTrace{pub attempts:u8,pub first_failure:Option<&'static str>,pub recovery:bool,pub capture_ms:u64,pub inference_ms:u64,pub provider_load_ms:u64,pub provider_prompt_ms:u64,pub provider_decode_ms:u64}
 
-/// Read only one screenshot from the dedicated tab. The caller must
+/// Read one recent frame from the live CDP stream on the dedicated tab.
+/// The caller must
 /// independently re-observe and validate the page before consuming output.
 pub async fn observe(config:&RouterConfig,app:&tauri::AppHandle,label:&str,goal:&str,candidates:&[Candidate])->Result<(VisualObservation,mm::Viewport,InferenceTrace),String>{
     let started=tokio::time::Instant::now();
     let before=viewport(app,label).await?;
-    let image=capture(app,label).await?;
+    let image=super::live_visual::sample(app,label).await?;
     let after=viewport(app,label).await?;
     if before!=after{return Err("Viewport changed during capture".into());}
     let capture_ms=started.elapsed().as_millis() as u64;
@@ -27,7 +29,7 @@ pub(super) async fn frame_signature(app:&tauri::AppHandle,label:&str,expected_ur
     use sha2::{Digest,Sha256};
     let before=viewport(app,label).await.ok()?;
     if before.origin!=expected_url{return None;}
-    let image=capture(app,label).await.ok()?;
+    let image=super::live_visual::sample(app,label).await.ok()?;
     if image.is_empty()||image.len()>12_000_000{return None;}
     if viewport(app,label).await.ok()?!=before{return None;}
     Some(FrameSignature{viewport:before,digest:Sha256::digest(image.as_bytes()).into()})
@@ -152,7 +154,7 @@ pub(super) async fn capture_with_params(_: &tauri::AppHandle, _: &str, _:String)
 
 
 // Emit only known error categories; never provider response bodies,
-// screenshot content, arbitrary exception strings or private URLs.
+// untrusted frame content, arbitrary exception strings or private URLs.
 pub fn failure_category(error:&str)->&'static str{
     match error{
         "Local visual inference timed out"|"Catalog visual recovery time limit"=>"inference_timeout",
@@ -163,7 +165,7 @@ pub fn failure_category(error:&str)->&'static str{
         "Visual output truncated"=>"output_truncated",
         "Invalid structured visual observation"|"Visual observation violates bounded schema"|"Duplicate visual control index"|"Visual output exceeds size limit"|"No structured visual observation"|"Visual JSON syntax invalid"|"Visual JSON field type or enum invalid"|"Too many visual controls"|"Visual text outside bounds"|"Visual control index outside bounds"|"Visual control label outside bounds"|"Visual coordinates outside bounds"|"Independent visual control missing point"|"Recovery observation violates compact schema"=>"invalid_observation",
         "Viewport changed during capture"|"Invalid screenshot viewport"=>"viewport_changed",
-        "Screenshot timed out"|"Screenshot callback closed"|"Screenshot returned no image"|"Screenshot outside size limit"=>"capture_failed",
+        "Screenshot timed out"|"Screenshot callback closed"|"Screenshot returned no image"|"Screenshot outside size limit"|"Live visual frame stream timed out"|"Visual stream command timed out"|"Visual stream command cancelled"|"Live vision already active on this tab"|"Live vision session capacity reached"=>"capture_failed",
         "Local vision disabled"|"Vision requires a loopback Ollama endpoint"|"Invalid Ollama URL"=>"configuration",
         "Local inference resource queue unavailable"=>"resource_unavailable",
         _=>"native_observation_failed"
