@@ -1,6 +1,6 @@
 'use strict';
 const {reviewFixtureEvidence} = require('./semantic-review-fixture.cjs');
-const {closeObservedDetailsDialog} = require('./fixture-modal-action.cjs');
+const {closeObservedDetailsDialog,escapeObservedKeyboardDialog} = require('./fixture-modal-action.cjs');
 // A loopback-only, deterministic model simulator for native Windows integration
 // testing. It never accesses public sites and never substitutes for real-LLM tests.
 const http = require('node:http');
@@ -115,8 +115,8 @@ function decideAction(prompt) {
   if (prompt.includes('Original user goal: Open keyboard dialog')) {
     if (page.includes('KEYBOARD_DIALOG_CLOSED'))
       return reply({type:'complete',summary:'Observed dialog closed after Escape'});
-    if (page.includes('Keyboard dialog is open') && has('Keyboard dialog'))
-      return reply({type:'press_key',node_id:has('Keyboard dialog').node_id,key:'Escape'});
+    const keyboardEscape=escapeObservedKeyboardDialog(page,nodes);
+    if (keyboardEscape) return reply(keyboardEscape);
     if (page.includes('Keyboard dialog not opened') && has('Open keyboard dialog'))
       return reply({type:'click',node_id:has('Open keyboard dialog').node_id,
         element_label:'Open keyboard dialog',is_submit:false});
