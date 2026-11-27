@@ -4,6 +4,24 @@ name: Lucia Real Qwen Windows E2E
 # independent native verification, and repeated unfamiliar-site completion.
 on:
   workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'Which public documentation research task?'
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - webdev
+          - w3c
+      repetitions:
+        description: 'Independent trials per selected website'
+        required: true
+        default: '3'
+        type: choice
+        options:
+          - '1'
+          - '3'
 
 permissions:
   contents: read
@@ -57,7 +75,7 @@ jobs:
       - name: Run genuine Qwen 3.5 through real Windows WebView2 on unfamiliar research sites
         shell: pwsh
         timeout-minutes: 70
-        run: ./tests/e2e/run-lucia-real-qwen.ps1 -Model 'qwen3.5:0.8b'
+        run: ./tests/e2e/run-lucia-real-qwen.ps1 -Model 'qwen3.5:0.8b' -Scenario '${{ inputs.scenario }}' -Repetitions ${{ inputs.repetitions }}
 
       - name: Preserve genuine research trial report
         if: always()

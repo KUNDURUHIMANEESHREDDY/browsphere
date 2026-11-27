@@ -2869,6 +2869,19 @@ async fn run_browser_loop(
                     .expect("checked above");
                 ("Open an observed task-relevant public search result".into(),
                  action,"research:grounded_search_result".into())
+            } else if !direct_navigation_attempted
+                && matches!(orchestrator.specialist(),Specialist::Browser|Specialist::Research)
+                && crate::agent::policy::requested_compound_page_entry_url(&goal).is_some()
+            {
+                // A single user-authored HTTPS article URL takes precedence over
+                // unrelated ranked prerequisite links. Native policy still
+                // authorizes navigation and the verifier still checks facts.
+                direct_navigation_attempted=true;
+                let url=crate::agent::policy::requested_compound_page_entry_url(&goal)
+                    .expect("checked read-only explicit source");
+                ("Open the exact user-supplied research article".into(),
+                 BrowserAction::Navigate{url:url.to_string()},
+                 "compound_source:trusted_user_url".into())
             } else if let Some((action,phase)) = prerequisite {
                 ("Resolve the next explicitly grounded prerequisite".to_string(),action,format!("prerequisite:{phase}"))
             } else if let Some(action)=crate::agent::multimodal_perception::unique_coordinate_link(&goal,&snapshot,&visual_points,&route_ledger).filter(|a|orchestrator.specialist().allows_on_page(a,&snapshot)&&crate::agent::objective_gate::check(&goal,&initial_origin,&snapshot,&objectives,a).is_ok()){
@@ -3014,19 +3027,6 @@ async fn run_browser_loop(
                 (format!("Discover the official website for the explicitly named source in stage {}",orchestrator.current+1),
                     BrowserAction::Navigate{url:url.to_string()},
                     "named_research_waypoint:user_source".into())
-            } else if !direct_navigation_attempted
-                && matches!(orchestrator.specialist(),Specialist::Browser|Specialist::Research)
-                && crate::agent::policy::requested_compound_page_entry_url(&goal).is_some()
-            {
-                // Navigate to the *full explicit path*, never an inferred site
-                // homepage. Arrival is only an intermediate research receipt;
-                // the independent verifier still must establish the fact.
-                direct_navigation_attempted=true;
-                let url=crate::agent::policy::requested_compound_page_entry_url(&goal)
-                    .expect("checked read-only explicit source");
-                ("Open the exact user-supplied public source page".into(),
-                 BrowserAction::Navigate{url:url.to_string()},
-                 "compound_source:trusted_user_url".into())
             } else if !direct_navigation_attempted
                 && orchestrator.specialist() == Specialist::Browser
                 && requested_music_entry_url(&goal).is_some()
@@ -3802,6 +3802,11 @@ async fn run_browser_loop(
             if matches!(decision, PolicyDecision::Allow)
                 && !result_opening_observed(&goal, &initial_origin, &snapshot, &recorded_steps)
                 && !lookup_landed
+                // A user-supplied article URL is not a search-result workflow.
+                // Demand the exact observed source instead of inventing a click.
+                && !crate::agent::evidence_verifier::compound_research_source(&goal,&orchestrator.evidence)
+                    .is_some_and(|source|source.url==snapshot.origin
+                        && source.excerpt.trim().len()>=80)
                 && intelligence.report(&goal,&snapshot,&orchestrator.evidence).is_err()
             {
                 decision = PolicyDecision::Deny {

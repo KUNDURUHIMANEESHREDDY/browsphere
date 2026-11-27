@@ -1,6 +1,10 @@
 # Genuine Qwen 2.5 native Windows test using pinned Ollama portable binaries.
 # Model and browser run only on a temporary GitHub-hosted Windows worker.
-param([string]$Model = 'qwen3.5:0.8b')
+param(
+    [string]$Model = 'qwen3.5:0.8b',
+    [ValidateSet('all','webdev','w3c')][string]$Scenario = 'all',
+    [ValidateRange(1,10)][int]$Repetitions = 3
+)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true') {
     throw 'Real Qwen CI experiment requires an isolated GitHub-hosted Windows runner.'
@@ -59,11 +63,11 @@ try {
         throw 'The downloaded Qwen model was not listed in Ollama'
     }
     Write-Host 'Running genuine Qwen decisions through native WebView2 integration.'
-    & (Join-Path $root 'tests\e2e\run-lucia-unfamiliar-hosted.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe') -Scenario all -Repetitions 3 -ActionModel $Model -SupervisorModel 'lfm3:1.7b' -AttemptBudgetSeconds 175
+    & (Join-Path $root 'tests\e2e\run-lucia-unfamiliar-hosted.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe') -Scenario $Scenario -Repetitions $Repetitions -ActionModel $Model -SupervisorModel 'lfm3:1.7b' -AttemptBudgetSeconds 175
     if ($LASTEXITCODE -ne 0) {
         throw "Real Qwen unfamiliar research acceptance FAILED with exit code $LASTEXITCODE"
     }
-    Write-Host 'PASS: Six independently verified real-Qwen research trials.'
+    Write-Host "PASS: $($Repetitions * $(if($Scenario -eq 'all'){2}else{1})) independently verified real-Qwen research trials."
 } finally {
     if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
     if (Test-Path (Join-Path $profile 'ollama.stderr.log')) {
