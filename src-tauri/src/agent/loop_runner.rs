@@ -88,6 +88,31 @@ fn controls_for_model(snapshot: &DomSnapshot, goal: &str) -> Vec<crate::agent::d
     scored.into_iter().map(|(_, _, node)| node.clone()).collect()
 }
 
+/// Avoid sending doomed read-only prerequisite/recovery proposals to the
+/// native action gate. This is a prefilter, not an authorization decision:
+/// the native binder, objective gate and policy still validate each action.
+/// It applies to every configured model and every model-independent recovery.
+fn prerequisite_candidate_allowed(
+    goal: &str,
+    initial_origin: &str,
+    snapshot: &DomSnapshot,
+    objectives: &crate::agent::semantic_core::ObjectiveLedger,
+    routes: &crate::agent::semantic_core::RouteLedger,
+    action: &BrowserAction,
+) -> bool {
+    if crate::agent::action_intelligence::outside_requested_source_page(
+        goal, snapshot, action,
+    ) {
+        return false;
+    }
+    if matches!(action, BrowserAction::Navigate { url } if !routes.allowed(url)) {
+        return false;
+    }
+    crate::agent::objective_gate::check(
+        goal, initial_origin, snapshot, objectives, action,
+    ).is_ok()
+}
+
 /// Never let a model-provided label or sensitivity flag lower the policy risk.
 /// Only fresh, observed DOM controls are eligible for click/type actions.
 fn bind_action_to_live_dom(
@@ -2755,7 +2780,10 @@ async fn run_browser_loop(
                     replacement.next_for_stage(&goal,&semantic_focus,&snapshot,&objectives,&route_ledger).map(|a|(a,"ranked_recovery"))
                 }else{None}
             }).filter(|(action,_)| orchestrator.specialist().allows_on_page(action,&snapshot)&&
-                skill.as_ref().map_or(true,|s|s.check(&snapshot,action).is_ok()))
+                skill.as_ref().map_or(true,|s|s.check(&snapshot,action).is_ok())&&
+                prerequisite_candidate_allowed(
+                    &goal,&initial_origin,&snapshot,&objectives,&route_ledger,action
+                ))
         } else { None };
         if crate::agent::prerequisites::route_values(&goal).is_some()&&orchestrator.specialist()!=Specialist::Verification&&
             native_objective_action.is_none()&&crate::agent::prerequisites::completion_blocker(&goal,&snapshot).is_some() {
@@ -4707,6 +4735,29 @@ async fn run_browser_loop(
 #[cfg(test)]
 mod production_safety_tests {
     use super::*;
+
+    #[test]
+    fn failed_reference_recovery_cannot_repeat_unauthorized_navigation() {
+        let goal="Visit https://web.dev/learn/accessibility and report one recommendation, citing a passage from the exact source.";
+        let page=DomSnapshot {
+            origin:"https://web.dev/learn/accessibility/".into(),
+            title:"Learn Accessibility | web.dev".into(),
+            text_excerpt:"Observed accessibility guidance on the requested page".into(),
+            structure:Default::default(),
+            interactive_nodes:vec![]
+        };
+        let objectives=crate::agent::semantic_core::ObjectiveLedger::new(goal);
+        let mut routes=crate::agent::semantic_core::RouteLedger::default();
+        routes.observe(0,&page.origin);
+        let homepage=BrowserAction::Navigate{url:"https://web.dev/".into()};
+        let same_page=BrowserAction::Navigate{url:page.origin.clone()};
+        assert!(!prerequisite_candidate_allowed(goal,"about:blank",&page,&objectives,&routes,&homepage),
+            "recovery must not leave the explicitly requested cited source");
+        assert!(!prerequisite_candidate_allowed(goal,"about:blank",&page,&objectives,&routes,&same_page),
+            "recovery must not repeat a navigation to the currently observed page");
+        assert!(prerequisite_candidate_allowed(goal,"about:blank",&page,&objectives,&routes,
+            &BrowserAction::Scroll{delta_y:300}),"read-only observation remains eligible");
+    }
 
     #[test]
     fn search_submit_needs_matching_new_article_and_native_source_evidence() {
