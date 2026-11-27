@@ -111,6 +111,12 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install pinned upstream Playwright CDP test library (no browser download)
+        shell: pwsh
+        run: |
+          npm ci --prefix tests/interop --ignore-scripts --no-audit --no-fund
+          npm test --prefix tests/interop
+
       - name: Download built NSIS installer
         uses: actions/download-artifact@v4
         with:
