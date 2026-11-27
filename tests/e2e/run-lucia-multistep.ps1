@@ -106,10 +106,17 @@ try {
         )
         $mcpProcess = Start-Process -FilePath $npx.Source -ArgumentList $mcpArgs -WorkingDirectory $root -PassThru -RedirectStandardOutput $mcpOut -RedirectStandardError $mcpErr
         $env:LUCIA_MCP_PORT = "$McpPort"
+        $env:LUCIA_PLAYWRIGHT_NATIVE_PAGE_FILE = Join-Path $profile 'playwright-target.url'
         Write-Host 'LUCIA_UPSTREAM_PLAYWRIGHT_WEBVIEW2_START'
         & node (Join-Path $root 'tests\e2e\lucia-playwright-mcp-native.cjs')
         if ($LASTEXITCODE -ne 0) {
             throw "Live Microsoft Playwright MCP WebView2 smoke failed ($LASTEXITCODE)"
+        }
+        # Separate native Rust client test verifies the same live upstream
+        # snapshot goes through Lucia's allowlist, schema, URL and role gates.
+        & cargo test --workspace --locked live_upstream_playwright_webview2 -- --ignored --nocapture
+        if ($LASTEXITCODE -ne 0) {
+            throw "Lucia native MCP adapter rejected the real upstream server ($LASTEXITCODE)"
         }
         Write-Host 'LUCIA_UPSTREAM_PLAYWRIGHT_WEBVIEW2_VERIFIED'
         return
@@ -175,6 +182,7 @@ try {
     if ($modelProcess) { Stop-Process -Id $modelProcess.Id -Force -ErrorAction SilentlyContinue }
     $env:LUCIA_E2E_CLOUD_COMPAT = $previousCloudMode
     $env:LUCIA_MCP_PORT = $previousMcpPort
+    Remove-Item Env:LUCIA_PLAYWRIGHT_NATIVE_PAGE_FILE -ErrorAction SilentlyContinue
     if (Test-Path $serverOut) { Get-Content $serverOut -Tail 25 }
     if (Test-Path $serverErr) {
         $errors = Get-Content $serverErr -Tail 25
