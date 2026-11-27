@@ -1,7 +1,7 @@
 name: Lucia Real Qwen Windows E2E
 
-# Local Qwen is an explicit, optional diagnostic; cloud provider
-# integrations are the primary automated regression gate.
+# Genuine local Qwen research is a separate acceptance gate: source quotes,
+# independent native verification, and repeated unfamiliar-site completion.
 on:
   workflow_dispatch:
 
@@ -11,7 +11,7 @@ permissions:
 jobs:
   native-real-qwen:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 100
     steps:
       - name: Checkout application
         uses: actions/checkout@v4
@@ -36,13 +36,39 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build:css
 
-      - name: Build release Browsphere executable
-        run: cargo build --manifest-path src-tauri/Cargo.toml --locked --release
-
-      - name: Run actual Qwen 2.5 through native Windows WebView2
+      - name: Install upstream Microsoft Playwright WebView2 adapter
         shell: pwsh
-        timeout-minutes: 30
-        run: ./tests/e2e/run-lucia-real-qwen.ps1
+        run: |
+          npm ci --prefix tests/interop --no-audit --no-fund
+          node --test tests/interop/playwright-interop-policy.test.cjs
+
+      - name: Validate research harness and upstream adapter syntax
+        shell: pwsh
+        run: |
+          node --check tests/e2e/lucia-unfamiliar-source-acceptance.cjs
+          node --check tests/interop/playwright-native-shell.cjs
+          python -m py_compile tests/e2e/check-lucia-compound-research.py tests/e2e/check-lucia-source-scope.py tests/e2e/check-lucia-verification-recheck.py
+
+      - name: Build release Browsphere executable
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: cargo build --manifest-path src-tauri/Cargo.toml --locked --release --jobs 2
+
+      - name: Run genuine Qwen 3.5 through real Windows WebView2 on unfamiliar research sites
+        shell: pwsh
+        timeout-minutes: 70
+        run: ./tests/e2e/run-lucia-real-qwen.ps1 -Model 'qwen3.5:0.8b'
+
+      - name: Preserve genuine research trial report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lucia-Qwen-Research-Verification
+          path: |
+            logs/lucia-unfamiliar-reliability.json
+            ${{ runner.temp }}/lucia-real-unfamiliar/*.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Publish non-sensitive run summary
         if: always()

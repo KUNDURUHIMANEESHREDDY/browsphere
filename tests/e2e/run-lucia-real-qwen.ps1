@@ -1,12 +1,12 @@
 # Genuine Qwen 2.5 native Windows test using pinned Ollama portable binaries.
 # Model and browser run only on a temporary GitHub-hosted Windows worker.
-param([string]$Model = 'qwen2.5:3b-instruct')
+param([string]$Model = 'qwen3.5:0.8b')
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true') {
     throw 'Real Qwen CI experiment requires an isolated GitHub-hosted Windows runner.'
 }
-if ($Model -ne 'qwen2.5:3b-instruct') {
-    throw 'Only the reviewed qwen2.5:3b-instruct model is supported in this experiment.'
+if ($Model -ne 'qwen3.5:0.8b') {
+    throw 'Only the pinned qwen3.5:0.8b local model is supported in this experiment.'
 }
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $root
@@ -43,19 +43,21 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if (-not $ready) { throw 'Real Ollama server never became available on loopback' }
-    Write-Host 'Pulling qwen2.5:3b-instruct for real inference.'
+    Write-Host 'Pulling genuine Qwen and the independent local supervisor for research verification.'
     & $ollamaExe pull $Model
     if ($LASTEXITCODE -ne 0) { throw 'Could not pull the Qwen test model' }
+    & $ollamaExe pull 'lfm3:1.7b'
+    if ($LASTEXITCODE -ne 0) { throw 'Could not pull the supervisor model' }
     $catalog = Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags'
     if (-not ($catalog.models | Where-Object { $_.name -eq $Model -or $_.model -eq $Model })) {
         throw 'The downloaded Qwen model was not listed in Ollama'
     }
     Write-Host 'Running genuine Qwen decisions through native WebView2 integration.'
-    & (Join-Path $root 'tests\e2e\run-lucia-multistep.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe')
+    & (Join-Path $root 'tests\e2e\run-lucia-unfamiliar-hosted.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe') -Scenario all -Repetitions 3 -ActionModel $Model -SupervisorModel 'lfm3:1.7b' -AttemptBudgetSeconds 175
     if ($LASTEXITCODE -ne 0) {
-        throw "Real Qwen native browser E2E failed with exit code $LASTEXITCODE"
+        throw "Real Qwen unfamiliar research acceptance FAILED with exit code $LASTEXITCODE"
     }
-    Write-Host 'PASS: Real Qwen model browser E2E completed.'
+    Write-Host 'PASS: Six independently verified real-Qwen research trials.'
 } finally {
     if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
     if (Test-Path (Join-Path $profile 'ollama.stderr.log')) {

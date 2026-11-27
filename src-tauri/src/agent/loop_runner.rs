@@ -605,6 +605,17 @@ fn trusted_youtube_watch_link_followup(
     Some(BrowserAction::Navigate { url: clicked_url.to_string() })
 }
 
+// A rejected verification may be retried only after the orchestrator has
+// explicitly reopened research once. This bypasses duplicate *action*
+// suppression, not evidence validation or the bounded recovery budget.
+fn bounded_verification_recheck(
+    specialist: Specialist, action: &BrowserAction, completed_recoveries: u8,
+) -> bool {
+    specialist == Specialist::Verification
+        && completed_recoveries == 1
+        && matches!(action, BrowserAction::Complete { .. })
+}
+
 fn retryable_verifier_format_error(error: &str) -> bool {
     // A malformed LLM quote/claim may be repaired by a second independent
     // review. Do not retry missing evidence, unobserved source URLs, or the
@@ -1459,6 +1470,31 @@ pub async fn run_react_loop(
         let _=app.emit("agent:run_completed",summary);
         return Ok("completed".into());
     }
+    if crate::agent::mcp::calendar_requested(&goal) || crate::agent::mcp::calendar_natural_requested(&goal) {
+        anyhow::ensure!(!private_mode, "MCP is disabled in Private Browsing");
+        while *pause_rx.borrow() {
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok("cancelled".into()),
+                changed = pause_rx.changed() => { changed?; }
+            }
+        }
+        let _ = app.emit("agent:stage", serde_json::json!({"run_id":run_id,"specialist":"MCP Agent","objective":"Create calendar event once and independently read it back","status":"active","index":0}));
+        let result = crate::agent::mcp::execute_calendar(&goal,&crate::resolve_data_dir().join("mcp-servers.json"),cancel.clone()).await;
+        match result {
+            Ok(summary) => {
+                let report=VerificationReport{status:"evidence_checked",summary:summary.clone(),findings:vec![],limitations:"Verified against a fresh read-only request to the configured calendar provider; not an independent provider.".into()};
+                let _=app.emit("agent:verification_report",serde_json::json!({"run_id":run_id,"report":report}));
+                let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"MCP Agent","status":"completed","index":0,"summary":summary}));
+                let _=app.emit("agent:run_completed",summary);
+                return Ok("completed".into());
+            }
+            Err(e) => {
+                let _=app.emit("agent:stage",serde_json::json!({"run_id":run_id,"specialist":"MCP Agent","status":"unverified","index":0}));
+                let _=app.emit("agent:run_error",serde_json::json!({"run_id":run_id,"message":format!("{e:#}")}));
+                return Ok("unverified".into());
+            }
+        }
+    }
     if crate::agent::mcp::requested(&goal) {
         anyhow::ensure!(!private_mode, "MCP is disabled in Private Browsing");
         while *pause_rx.borrow() {
@@ -1590,6 +1626,7 @@ async fn run_browser_loop(
     // planning call. The LLM still chooses the concrete webpage interactions;
     // live browser actions and independent evidence checks are mandatory.
     let model_plan = if requested_navigation_url(&goal).is_some()
+        || crate::agent::policy::requested_compound_page_entry_url(&goal).is_some()
         || requested_music_entry_url(&goal).is_some()
         || is_simple_named_title_task(&goal)
         || intelligence.managed()
@@ -2966,6 +3003,18 @@ async fn run_browser_loop(
                     "result_navigation:observed_stage_handoff".into(),
                 )
             } else if freshly_observed
+                && orchestrator.specialist()==Specialist::Browser
+                && crate::agent::policy::requested_compound_page_entry_url(&goal)
+                    .is_some_and(|url|check_navigation_result(url.as_str(),&snapshot).is_ok())
+                && orchestrator.evidence.iter().any(|e|e.url==snapshot.origin&&e.excerpt.trim().len()>=80)
+                && orchestrator.can_complete(&snapshot).is_ok()
+            {
+                // Hand the exactly observed source to the independent reviewer.
+                // Never mark the entire fact-finding objective complete here.
+                ("Exact source page and readable evidence observed; hand off for factual verification".into(),
+                 BrowserAction::Complete{summary:"Observed the requested source; independently verify the requested fact".into()},
+                 "compound_source:observed_page_handoff".into())
+            } else if freshly_observed
                 && orchestrator.specialist() == Specialist::Browser
                 && requested_navigation_url(&goal).is_some()
                 && orchestrator.can_complete(&snapshot).is_ok()
@@ -2990,6 +3039,19 @@ async fn run_browser_loop(
                 (format!("Discover the official website for the explicitly named source in stage {}",orchestrator.current+1),
                     BrowserAction::Navigate{url:url.to_string()},
                     "named_research_waypoint:user_source".into())
+            } else if !direct_navigation_attempted
+                && matches!(orchestrator.specialist(),Specialist::Browser|Specialist::Research)
+                && crate::agent::policy::requested_compound_page_entry_url(&goal).is_some()
+            {
+                // Navigate to the *full explicit path*, never an inferred site
+                // homepage. Arrival is only an intermediate research receipt;
+                // the independent verifier still must establish the fact.
+                direct_navigation_attempted=true;
+                let url=crate::agent::policy::requested_compound_page_entry_url(&goal)
+                    .expect("checked read-only explicit source");
+                ("Open the exact user-supplied public source page".into(),
+                 BrowserAction::Navigate{url:url.to_string()},
+                 "compound_source:trusted_user_url".into())
             } else if !direct_navigation_attempted
                 && orchestrator.specialist() == Specialist::Browser
                 && requested_music_entry_url(&goal).is_some()
@@ -3324,6 +3386,13 @@ async fn run_browser_loop(
         }
         let mut action_binding_error =
             bind_action_to_live_dom(&mut action, &snapshot, freshly_observed).err();
+        if crate::agent::action_intelligence::outside_requested_source_page(
+            &goal, &snapshot, &action
+        ) {
+            action_binding_error = Some(
+                "The proposed link leaves the exact user-requested source page; retain the requested page or an observed descendant until its evidence is verified".into()
+            );
+        }
         if duplicate_search_enter(&submitted_search_fields, &snapshot, &action) {
             action_binding_error = Some("Search already submitted on this page; observe results instead of pressing Enter again".into());
         }
@@ -3333,8 +3402,12 @@ async fn run_browser_loop(
             action_binding_error=Some("User requested an observed link click, not a guessed URL".into());
         }
 
+        let source_path_repair = crate::agent::action_intelligence::outside_requested_source_page(
+            &goal, &snapshot, &action
+        ) && ["ollama:","litellm:","groq:","bedrock:"]
+            .iter().any(|prefix|model_route.starts_with(prefix));
         if catalog.is_none()&&freshly_observed && action_binding_error.is_some()
-            && should_replan_invalid_control(&model_route, &action)
+            && (should_replan_invalid_control(&model_route, &action)||source_path_repair)
         {
             // The first model response was not executed. Allow one bounded
             // replan on the SAME freshly observed page, then run the native
@@ -3343,7 +3416,7 @@ async fn run_browser_loop(
             let reason = action_binding_error.as_deref().unwrap_or("invalid control");
             let repair_prompt = format!(
                 "Previous action outcomes: Native WebView rejected a proposed control: {}. \
-                 Correct the rejected action using an exact currently observed node_id. If typing, supply only literal field content, never instructions or control metadata. \
+                 Correct the rejected action using an exact currently observed node_id, or return to the exact user-supplied URL if a proposed link left that source's path. If typing, supply only literal field content, never instructions or control metadata. \
                  The page has not changed and the previous action did NOT execute.\n{}",
                 reason.chars().take(160).collect::<String>(),
                 prompt_payload
@@ -3362,8 +3435,16 @@ async fn run_browser_loop(
             };
             if let Ok(Ok((new_thought, mut candidate, new_route))) = retry {
                 let _ = rebind_unambiguous_live_control(&mut candidate, &snapshot, &goal);
-                if should_replan_invalid_control(&new_route, &candidate)
+                if (should_replan_invalid_control(&new_route, &candidate)
+                    || (source_path_repair
+                        && ["ollama:","litellm:","groq:","bedrock:"]
+                            .iter().any(|prefix|new_route.starts_with(prefix))
+                        && matches!(candidate, BrowserAction::Navigate{..}
+                            |BrowserAction::Scroll{..}|BrowserAction::Click{is_submit:false,..})))
                     && bind_action_to_live_dom(&mut candidate, &snapshot, true).is_ok()
+                    && !crate::agent::action_intelligence::outside_requested_source_page(
+                        &goal, &snapshot, &candidate
+                    )
                 {
                     thought = new_thought;
                     action = candidate;
@@ -3553,7 +3634,16 @@ async fn run_browser_loop(
         let signature = action_state_signature(orchestrator.current, &action, &snapshot);
         let redundant_navigation = matches!(&action, BrowserAction::Navigate { url }
             if requested_navigation_url(&goal).is_none() && snapshot.origin.starts_with("http") && check_navigation_result(url, &snapshot).is_ok());
-        if redundant_navigation || run_core.failed_before(&action,&snapshot,orchestrator.current) || !seen_signatures.insert(signature) {
+        // A verifier retry after one bounded research recovery must reach the
+        // independent evidence checker, even when the final Complete action
+        // has the same signature as the previously rejected verification.
+        // Never exempt browser actions or authorize a second recovery.
+        let verification_recheck = bounded_verification_recheck(
+            orchestrator.specialist(), &action, verification_recoveries
+        );
+        let failed_before = run_core.failed_before(&action,&snapshot,orchestrator.current);
+        let previously_seen = !seen_signatures.insert(signature);
+        if redundant_navigation || (!verification_recheck && (failed_before || previously_seen)) {
             // A small local model can repeat a successful click instead of
             // announcing stage completion. Request independent, read-only
             // verification against real captured page excerpts before
@@ -3672,6 +3762,16 @@ async fn run_browser_loop(
         }
         if crate::agent::action_intelligence::irrelevant_control(&goal,&snapshot,&action) {
             decision=PolicyDecision::Deny{reason:"Action intelligence: selected control does not advance the requested objective".into()};
+        }
+        // Re-check after every planner, supervisor and native recovery
+        // substitution. No route may leave a single explicitly requested deep
+        // source before source-backed verification.
+        if crate::agent::action_intelligence::outside_requested_source_page(
+            &goal, &snapshot, &action
+        ) {
+            decision=PolicyDecision::Deny{
+                reason:"Navigation leaves the exact user-requested source page".into()
+            };
         }
         if current_reference&&(!current_reference_ready||!matches!(action,BrowserAction::Complete{..})){
             decision=PolicyDecision::Deny{reason:"Current-reference research permits only review of the original observed page".into()};
@@ -3898,7 +3998,7 @@ async fn run_browser_loop(
                                 // Rust independently validates every quote and
                                 // URL again; missing evidence still fails closed.
                                 let guidance = format!(
-                                    "Retry source review with a contiguous exact quote from the observed page. Previous format/grounding error: {}",
+                                    "Repair the rejected source finding, not the browser history. Cite only an exact contiguous sentence in the observed page. State one short claim that repeats the sentence's actual recommendation, preferably using the sentence itself without paraphrase. The claim MUST be supported by that same quote; do not substitute the page title, task prompt, or an inferred fact. If no relevant supporting sentence is observed, report insufficient evidence. Previous format/grounding error: {}",
                                     error.to_string().chars().take(180).collect::<String>()
                                 );
                                 router.verify_browser_task(&goal, &guidance, &evidence,
@@ -5359,6 +5459,18 @@ mod live_loop_recovery_tests {
         assert!(bind_action_to_live_dom(&mut typed, &page, true).is_err());
         let mut click = BrowserAction::Click {node_id:"date".into(),element_label:"Journey date".into(),is_submit:false};
         assert!(bind_action_to_live_dom(&mut click, &page, true).is_ok());
+    }
+
+    #[test]
+    fn verification_recheck_is_bounded_and_never_exempts_browser_actions() {
+        let finish = BrowserAction::Complete { summary: "Check captured passage".into() };
+        let navigate = BrowserAction::Navigate { url: "https://docs.example.test/".into() };
+        assert!(!bounded_verification_recheck(Specialist::Verification, &finish, 0));
+        assert!(bounded_verification_recheck(Specialist::Verification, &finish, 1));
+        assert!(!bounded_verification_recheck(Specialist::Verification, &finish, 2));
+        assert!(!bounded_verification_recheck(Specialist::Browser, &finish, 1));
+        assert!(!bounded_verification_recheck(Specialist::Research, &finish, 1));
+        assert!(!bounded_verification_recheck(Specialist::Verification, &navigate, 1));
     }
 
     #[test]

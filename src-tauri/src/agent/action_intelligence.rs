@@ -110,6 +110,40 @@ pub fn irrelevant_control(goal:&str,page:&DomSnapshot,action:&BrowserAction)->bo
     }
 }
 
+/// A request to cite or quote one explicitly named deep HTTPS source must
+/// not silently become navigation to that site's homepage or an unrelated
+/// sibling page. Descendants and same-page anchors remain eligible. Broader
+/// exploratory goals and root-page requests retain normal navigation rules.
+pub fn outside_requested_source_page(
+    goal: &str, page: &DomSnapshot, action: &BrowserAction,
+) -> bool {
+    let lower = goal.to_ascii_lowercase();
+    if !["cite", "citing", "citation", "quote", "quoted", "passage"]
+        .iter().any(|term|lower.contains(term)) { return false; }
+    let Some(expected) = super::policy::requested_compound_page_entry_url(goal)
+        .filter(|url| url.path() != "/") else { return false };
+    let target = match action {
+        BrowserAction::Navigate { url } => Some(url.as_str()),
+        BrowserAction::Click { node_id, is_submit: false, .. } =>
+            page.interactive_nodes.iter().find(|n| n.node_id == *node_id)
+                .and_then(|n| n.href.as_deref()),
+        _ => None,
+    };
+    let Some(target) = target else { return false };
+    let parsed = url::Url::parse(target).or_else(|_| {
+        url::Url::parse(&page.origin).and_then(|origin| origin.join(target))
+    });
+    let Ok(parsed) = parsed else { return true };
+    if parsed.scheme() != "https" || parsed.origin() != expected.origin() {
+        return true;
+    }
+    let source_path = expected.path().trim_end_matches('/');
+    let destination_path = parsed.path().trim_end_matches('/');
+    destination_path != source_path
+        && !destination_path.strip_prefix(source_path)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 /// On a named-source research stage, follow only a direct observed HTTPS
 /// link to that brand's canonical-style domain in the active task tab.
 /// Search-result clicks may open an untracked popup in WebView2.
@@ -314,7 +348,10 @@ pub fn better_observed_link(
         }
         let Some(url)=node.href.as_deref() else {continue};
         let Ok(parsed)=url::Url::parse(url)else{continue};
-        if unrelated_search_vertical(goal,url){continue;}
+        if unrelated_search_vertical(goal,url)
+            || outside_requested_source_page(
+                goal,page,&BrowserAction::Navigate{url:url.to_owned()}
+            ){continue;}
         if parsed.scheme()!="https"||parsed.host_str().is_none()
             || !parsed.username().is_empty()||parsed.password().is_some()
             || parsed.fragment().is_some(){continue;}
@@ -497,6 +534,44 @@ mod tests{
         p.interactive_nodes.push(node("alternate","Plans",Some("https://www.notion.so/other-pricing")));
         assert!(observed_official_plan_link(goal,&p,0).is_none(),
             "Equally scored distinct official pricing links require disambiguation");
+    }
+    #[test]
+    fn explicit_deep_source_never_becomes_a_homepage_or_sibling_navigation() {
+        let goal="Visit https://docs.example.org/learn/accessibility and report one recommendation from that official guide, citing an exact supporting passage.";
+        let mut p=page(vec![
+            node("home","Accessibility home",Some("https://docs.example.org/")),
+            node("wrong","Accessibility overview",Some("https://docs.example.org/learn/accessibility-other")),
+            node("safe","Images tutorial",Some("https://docs.example.org/learn/accessibility/images")),
+            node("hostile","Accessibility guide",Some("https://docs.example.org.evil.test/learn/accessibility")),
+        ]);
+        p.origin="https://docs.example.org/learn/accessibility".into();
+        let navigate=|url:&str|BrowserAction::Navigate{url:url.into()};
+        assert!(outside_requested_source_page(goal,&p,&navigate("https://docs.example.org/")));
+        assert!(outside_requested_source_page(goal,&p,&navigate("https://docs.example.org/learn/accessibility-other")));
+        assert!(outside_requested_source_page(goal,&p,&navigate("https://docs.example.org.evil.test/learn/accessibility")));
+        assert!(!outside_requested_source_page(goal,&p,&navigate("https://docs.example.org/learn/accessibility/")));
+        assert!(!outside_requested_source_page(goal,&p,&navigate("https://docs.example.org/learn/accessibility/images")));
+        assert!(!outside_requested_source_page(goal,&p,&navigate("https://docs.example.org/learn/accessibility?view=compact")));
+        let click=|id:&str|BrowserAction::Click{
+            node_id:id.into(),element_label:"Observed".into(),is_submit:false
+        };
+        assert!(outside_requested_source_page(goal,&p,&click("home")));
+        assert!(outside_requested_source_page(goal,&p,&click("wrong")));
+        assert!(outside_requested_source_page(goal,&p,&click("hostile")));
+        assert!(!outside_requested_source_page(goal,&p,&click("safe")));
+        assert!(!outside_requested_source_page(goal,&p,&BrowserAction::Scroll{delta_y:400}));
+        assert!(!outside_requested_source_page("Visit https://docs.example.org/ and report the title",
+            &p,&navigate("https://docs.example.org/overview")));
+        assert!(!outside_requested_source_page(
+            "Visit https://docs.example.org/learn/accessibility and compare coverage with other news sites",
+            &p,&navigate("https://other.example.org/analysis")));
+        // The semantic link selector must not route to a wrong sibling, even
+        // when its label contains high-overlap words from the user's goal.
+        let proposed=BrowserAction::Scroll{delta_y:300};
+        if let Some(BrowserAction::Navigate{url})=
+            better_observed_link(goal,"Read the requested guide",&p,&proposed,&HashSet::new()){
+            assert!(!outside_requested_source_page(goal,&p,&navigate(&url)));
+        }
     }
     const GOAL:&str="Find the SQL INSERT command documentation and report its syntax";
     #[test]
