@@ -2697,7 +2697,7 @@ Interactive nodes JSON: {}"#,
             "is_sensitive": false, "href": format!("https://web.dev/learn/accessibility/section-{i}")
         })).collect();
         let raw = format!(
-            "Original user goal: Read accessibility recommendations and cite source.\\nAssigned stage objective: Inspect the official document.\\nNative completion gate: blocked - no exact citation yet\\nOrigin: https://web.dev/learn/accessibility\\nInteractive nodes JSON: {}",
+            "Original user goal: Read accessibility recommendations and cite source.\nAssigned stage objective: Inspect the official document.\nNative completion gate: blocked - no exact citation yet\nOrigin: https://web.dev/learn/accessibility\nInteractive nodes JSON: {}",
             json!(nodes)
         );
         let (regular, _, old_aliases) = ModelRouter::tiny_action_context(&raw);
