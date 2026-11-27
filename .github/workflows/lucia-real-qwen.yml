@@ -3,6 +3,18 @@ name: Lucia Real Qwen Windows E2E
 # Local Qwen is an explicit, optional diagnostic; cloud provider
 # integrations are the primary automated regression gate.
 on:
+  # Temporary acceptance branch only. An ordinary CI push does not
+  # trigger a multi-gigabyte real-model pull on main or other PRs.
+  push:
+    branches:
+      - feature/browsphere-runtime-security-model-gates-20261127
+    paths:
+      - '.github/workflows/lucia-real-qwen.yml'
+      - 'src-tauri/src/router/model_router.rs'
+      - 'src-tauri/src/agent/loop_runner.rs'
+      - 'tests/e2e/run-lucia-real-qwen.ps1'
+      - 'tests/e2e/run-lucia-unfamiliar-hosted.ps1'
+      - 'tests/e2e/lucia-unfamiliar-source-acceptance.cjs'
   workflow_dispatch:
     inputs:
       unfamiliar_sites:
@@ -49,14 +61,14 @@ jobs:
         shell: pwsh
         timeout-minutes: 30
         run: |
-          if ('${{ inputs.unfamiliar_sites }}' -eq 'true') {
+          if ('${{ github.event_name }}' -eq 'push' -or '${{ inputs.unfamiliar_sites }}' -eq 'true') {
             ./tests/e2e/run-lucia-real-qwen.ps1 -UnfamiliarSites
           } else {
             ./tests/e2e/run-lucia-real-qwen.ps1
           }
 
       - name: Upload unfamiliar-site acceptance report (including failures)
-        if: always() && inputs.unfamiliar_sites
+        if: always() && (github.event_name == 'push' || inputs.unfamiliar_sites)
         uses: actions/upload-artifact@v4
         with:
           name: Lucia-Unfamiliar-Real-Qwen
