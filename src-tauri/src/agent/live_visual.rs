@@ -5,13 +5,17 @@
 //!
 //! This is a bounded, short-lived frame stream used on already-authorized,
 //! public pages. It does NOT grant the model new browser actions.
-use std::{collections::HashMap,sync::{Mutex,OnceLock},time::{Duration,Instant}};
+use std::{collections::HashMap,sync::{Mutex,OnceLock,atomic::{AtomicU64,Ordering}},time::{Duration,Instant}};
 use tauri::Manager;
 
 const MAX_FRAME_CHARS:usize=3_000_000; // max ~2.25 MB JPEG (base64)
 const MAX_TABS:usize=8;
 const FRAME_MAX_AGE:Duration=Duration::from_millis(1250);
 const STREAM_WAIT:Duration=Duration::from_secs(4);
+// Content-free native diagnostics for isolated Windows CDP debugging.
+static REGISTERED_RECEIVERS:AtomicU64=AtomicU64::new(0);
+static FRAME_EVENTS:AtomicU64=AtomicU64::new(0);
+static ACCEPTED_FRAMES:AtomicU64=AtomicU64::new(0);
 
 #[derive(Default)]
 struct Slot {
@@ -42,6 +46,7 @@ fn store(label:&str,encoded:&str){
     if let Some(slot)=map.get_mut(label){
         if slot.active{
             slot.frame=Some((Instant::now(),encoded.to_owned()));
+            ACCEPTED_FRAMES.fetch_add(1,Ordering::Relaxed);
         }
     }
 }
@@ -81,6 +86,7 @@ pub fn attach(child:&tauri::Webview,label:String)->Result<(),String>{
         };
         let handler=DevToolsProtocolEventReceivedEventHandler::create(Box::new(move |sender,args|{
             let Some(args)=args else{return Ok(());};
+            FRAME_EVENTS.fetch_add(1,Ordering::Relaxed);
             // Frame packet is untrusted data. Restrict size before parsing;
             // store only compressed pixels, no metadata or page URLs.
             let mut raw=std::mem::MaybeUninit::zeroed();
@@ -108,8 +114,9 @@ pub fn attach(child:&tauri::Webview,label:String)->Result<(),String>{
             Ok(())
         }));
         let mut token=Default::default();
-        if let Err(e)=unsafe{receiver.add_DevToolsProtocolEventReceived(&handler,&mut token)}{
-            tracing::warn!("Live WebView2 frame subscription failed: {e}");
+        match unsafe{receiver.add_DevToolsProtocolEventReceived(&handler,&mut token)} {
+            Ok(_) => { REGISTERED_RECEIVERS.fetch_add(1,Ordering::Relaxed); },
+            Err(e) => { tracing::warn!("Live WebView2 frame subscription failed: {e}"); }
         }
     }).map_err(|_|"Could not register native visual event receiver".to_owned())
 }
@@ -189,6 +196,9 @@ impl Drop for Session<'_>{
 pub async fn sample(app:&tauri::AppHandle,label:&str)->Result<String,String>{
     let epoch=begin(label)?;
     let mut session=Session{app,label,epoch,started:false};
+    // Enable the Page event domain before subscribing to screencast frames.
+    // An acknowledged start command alone does not establish event delivery.
+    cdp(app,label,"Page.enable","{}").await?;
     // Ask for the first available frame even on an otherwise static page.
     // EveryNthFrame=15 can suppress every frame on a low-redraw page.
     // The host keeps only the latest compressed frame (no frame queue).
@@ -205,6 +215,15 @@ pub async fn sample(app:&tauri::AppHandle,label:&str)->Result<String,String>{
             return Ok(frame);
         }
         if tokio::time::Instant::now()>=deadline{
+            // Diagnostic counters never contain a URL, frame, or user data.
+            // Keep normal product errors stable; only isolated CI gets counts.
+            if std::env::var("GITHUB_ACTIONS").ok().as_deref()==Some("true"){
+                return Err(format!(
+                    "Live visual frame stream timed out (receivers={}, events={}, accepted={})",
+                    REGISTERED_RECEIVERS.load(Ordering::Relaxed),
+                    FRAME_EVENTS.load(Ordering::Relaxed),
+                    ACCEPTED_FRAMES.load(Ordering::Relaxed)));
+            }
             return Err("Live visual frame stream timed out".into());
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
