@@ -70,7 +70,7 @@ class McpClient {
   }
   async call(name,args={}){
     const result=await this.request('tools/call',{name,arguments:args});
-    assert.equal(result.isError,false,'Upstream tool reported failure');
+    assert.notEqual(result.isError,true,'Upstream tool reported failure');
     return result.content?.filter(v=>v.type==='text').map(v=>v.text).join('\n')||'';
   }
 }
