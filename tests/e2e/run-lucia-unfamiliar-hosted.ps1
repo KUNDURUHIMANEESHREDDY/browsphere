@@ -87,6 +87,7 @@ foreach($case in $cases){
     $createdPolicy=$false
     $exitCode=-1
     $inference=@()
+    $requests=@()
     try{
       $env:APPDATA=Join-Path $profile 'Roaming'
       $env:LOCALAPPDATA=Join-Path $profile 'Local'
@@ -137,6 +138,9 @@ foreach($case in $cases){
             if ($entry.channel -eq 'model' -and $entry.event -eq 'ollama_action_inference') {
               $inference+=@($entry.fields)
             }
+            if ($entry.channel -eq 'model' -and $entry.event -eq 'ollama_action_request') {
+              $requests+=@($entry.fields)
+            }
           } catch { }
         }
       }
@@ -161,6 +165,7 @@ foreach($case in $cases){
       # Only quantitative model diagnostics, never the user goal or raw DOM.
       model_performance=if($result){@($result.modelPerformance)}else{@()}
       ollama_inference_counters=@($inference)
+      ollama_request_sizes=@($requests)
       errors=if($result){@($result.errors)}else{@('No machine-readable verified completion')}
       log=$logFile
     }
