@@ -17,6 +17,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $previousCloudMode = $env:LUCIA_E2E_CLOUD_COMPAT
+$previousMcpPort = $env:LUCIA_MCP_PORT
 if ($CloudCompat) { $env:LUCIA_E2E_CLOUD_COMPAT = '1' }
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $root
@@ -353,6 +354,8 @@ try {
     if ($stagehandProcess) { Stop-Process -Id $stagehandProcess.Id -Force -ErrorAction SilentlyContinue }
     if ($modelProcess) { Stop-Process -Id $modelProcess.Id -Force -ErrorAction SilentlyContinue }
     $env:LUCIA_E2E_CLOUD_COMPAT = $previousCloudMode
+    $env:LUCIA_MCP_PORT = $previousMcpPort
+    Remove-Item Env:LUCIA_PLAYWRIGHT_NATIVE_PAGE_FILE -ErrorAction SilentlyContinue
     if (Test-Path $serverOut) { Get-Content $serverOut -Tail 25 }
     if (Test-Path $serverErr) {
         $errors = Get-Content $serverErr -Tail 25
