@@ -59,6 +59,7 @@ foreach($case in $cases){
     $app=$null
     $createdPolicy=$false
     $exitCode=-1
+    $inference=@()
     try{
       $env:APPDATA=Join-Path $profile 'Roaming'
       $env:LOCALAPPDATA=Join-Path $profile 'Local'
@@ -98,6 +99,19 @@ foreach($case in $cases){
       Add-Content -Path $logFile -Value ("RUNNER_ERROR: "+$_.Exception.Message)
     } finally {
       if($app){Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue}
+      # Capture only the explicitly allowlisted Ollama numeric counters from
+      # this disposable run before its isolated profile is destroyed.
+      $modelLog=Join-Path $profile 'Local\BrowsphereAI\logs\model.jsonl'
+      if (Test-Path -LiteralPath $modelLog) {
+        foreach ($line in Get-Content -LiteralPath $modelLog -ErrorAction SilentlyContinue) {
+          try {
+            $entry=$line | ConvertFrom-Json -ErrorAction Stop
+            if ($entry.channel -eq 'model' -and $entry.event -eq 'ollama_action_inference') {
+              $inference+=@($entry.fields)
+            }
+          } catch { }
+        }
+      }
       if($createdPolicy){Remove-ItemProperty -Path $policyPath -Name $policyName -ErrorAction SilentlyContinue}
       foreach($name in 'APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_GOAL','LUCIA_EXPECTED_HOSTS','LUCIA_EXPECTED_SOURCE_URL','LUCIA_TEST_ACTION_MODEL','LUCIA_TEST_SUPERVISOR_MODEL','LUCIA_REQUIRE_RECOVERY'){
         [Environment]::SetEnvironmentVariable($name,$priorEnvironment[$name],'Process')
@@ -118,6 +132,7 @@ foreach($case in $cases){
       actions=if($result){$result.actions}else{0}
       # Only quantitative model diagnostics, never the user goal or raw DOM.
       model_performance=if($result){@($result.modelPerformance)}else{@()}
+      ollama_inference_counters=@($inference)
       errors=if($result){@($result.errors)}else{@('No machine-readable verified completion')}
       log=$logFile
     }
