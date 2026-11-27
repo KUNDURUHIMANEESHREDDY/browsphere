@@ -196,7 +196,13 @@ pub async fn sample(app:&tauri::AppHandle,label:&str)->Result<String,String>{
     session.started=true;
     let deadline=tokio::time::Instant::now()+STREAM_WAIT;
     loop {
-        if let Some(frame)=latest(label,epoch){return Ok(frame);}
+        if let Some(frame)=latest(label,epoch){
+            // Await the real stop acknowledgment before the next session can
+            // start: an asynchronous stop from Drop could cancel that stream.
+            cdp(app,label,"Page.stopScreencast","{}").await?;
+            session.started=false;
+            return Ok(frame);
+        }
         if tokio::time::Instant::now()>=deadline{
             return Err("Live visual frame stream timed out".into());
         }
