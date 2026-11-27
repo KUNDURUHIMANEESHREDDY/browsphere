@@ -329,7 +329,9 @@ pub async fn playwright_page_hints(
             let snapshot=reply["content"].as_array()?.iter()
                 .filter(|item|item["type"]=="text")
                 .filter_map(|item|item["text"].as_str())
-                .find(|item|item.starts_with("### Page Info\n"))?;
+                .find(|item|item.starts_with("### Page\n")
+                    ||item.starts_with("### Page Info\n")
+                    ||item.starts_with("### Open tabs\n"))?;
             parse_playwright_snapshot(snapshot,expected_url)
         }.await;
         session.close().await;
