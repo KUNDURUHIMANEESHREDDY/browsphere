@@ -44,6 +44,12 @@ class HyperresearchGatewayTests(unittest.TestCase):
             with self.subTest(url=bad):
                 self.assertIsNone(core.public_source(bad))
         self.assertEqual(core.public_source("https://example.org/guide"), "https://example.org/guide")
+        for internal in ("http://127.0.0.1/secret", "http://[::1]/config",
+                         "http://192.168.1.1/", "https://localhost/",
+                         "https://service.internal/", "http://10.0.0.2/",
+                         "https://example.org/evil\\rInjected"):
+            with self.subTest(internal=internal):
+                self.assertIsNone(core.public_source(internal))
 
     def test_search_and_sources_have_bounded_counts(self):
         notes = [{"id": str(i), "title": "x" * 1000, "body": "secret"} for i in range(200)]
