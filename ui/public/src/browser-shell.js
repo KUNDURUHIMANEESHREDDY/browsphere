@@ -533,6 +533,7 @@
       var nativeHasLiteLlmKey = false;
       var nativeOllamaModels = [];
       var nativeOllamaModelsError = 'Checking Ollama models...';
+      var nativeLocalCapabilitiesStatus = '';
       var nativeModelTestStatus = '';
       var nativeCloudFetchStatus = '';
       var nativeCredentialsMeta = [];
@@ -979,6 +980,9 @@
               break;
             case 'refresh-ai-models':
               refreshNativeOllamaModels(true);
+              break;
+            case 'inspect-ai-capabilities':
+              inspectNativeLocalCapabilities();
               break;
             case 'choose-ai-local-model':
               var modelInput = document.getElementById('cfgOllamaModel');
@@ -2955,6 +2959,7 @@
             config: nativeRouterConfig,
             localModels: nativeOllamaModels,
             localModelsError: nativeOllamaModelsError,
+            localCapabilitiesStatus: nativeLocalCapabilitiesStatus,
             hasKey: nativeHasLiteLlmKey,
             testStatus: nativeModelTestStatus,
             fetchStatus: nativeCloudFetchStatus,
@@ -4100,6 +4105,42 @@
           }
         } catch (err) { render('MCP error: '+String(err)); }
         finally {mcpBusy=false;}
+      }
+
+      function showLocalCapabilitiesStatus(message) {
+        nativeLocalCapabilitiesStatus = message;
+        var el = document.getElementById('cfgLocalCapabilitiesStatus');
+        if (el) el.textContent = message;
+      }
+
+      async function inspectNativeLocalCapabilities() {
+        var chosen = (document.getElementById('cfgOllamaModel')?.value || nativeRouterConfig.ollama_model || '').trim();
+        var server = (document.getElementById('cfgOllamaUrl')?.value || '').trim();
+        if (server && server !== nativeRouterConfig.ollama_url) {
+          showLocalCapabilitiesStatus('Save the Ollama server setting before inspecting models.');
+          return;
+        }
+        if (!nativeOllamaModels.includes(chosen)) {
+          showLocalCapabilitiesStatus('Choose a currently installed local model first.');
+          return;
+        }
+        if (!window.aetherBridge?.inspectLocalModelCapabilities) {
+          showLocalCapabilitiesStatus('Capability inspection requires the Windows app.');
+          return;
+        }
+        showLocalCapabilitiesStatus('Checking the local provider metadata...');
+        try {
+          var result = await window.aetherBridge.inspectLocalModelCapabilities(chosen);
+          var stateLabel = function (value) {
+            return value === true ? 'yes' : value === false ? 'no' : 'unknown';
+          };
+          showLocalCapabilitiesStatus(chosen + ' — text ' + stateLabel(result.completion) +
+            ', vision ' + stateLabel(result.vision) + ', tools ' + stateLabel(result.tools) +
+            ', thinking ' + stateLabel(result.thinking) +
+            '. Structured JSON and real task success: not verified by provider metadata.');
+        } catch (err) {
+          showLocalCapabilitiesStatus('Capability discovery failed: ' + String(err));
+        }
       }
 
       function showModelTestStatus(message) {

@@ -132,6 +132,10 @@
         '<button type="button" class="mac-ai-btn" data-action="use-local-lucia-profile" data-model="role-team">Role-based local team</button></div>') +
       row('Installed models', 'Select an installed model to use it.',
         '<div class="mac-ai-installed-controls">' + chips + btn('refresh-ai-models', 'Refresh') + '</div>') +
+      row('Model capabilities', 'Inspect the selected installed model. Provider-declared text, vision, tools and thinking are not task success guarantees.',
+        '<div class="mac-ai-installed-controls">' + btn('inspect-ai-capabilities', 'Inspect selected model') +
+        '<span id="cfgLocalCapabilitiesStatus" class="mac-ai-quiet" role="status" aria-live="polite">' +
+        esc(state.localCapabilitiesStatus || 'No model inspected yet.') + '</span></div>') +
       row('Connection', 'Send a small prompt to Ollama.', btn('test-local-model', 'Test local connection')) +
       row('Lucia fallback', 'Use an installed local model when cloud free-model access is unavailable. This changes Lucia to Local, without removing your cloud provider settings.',
         models.length ? btn('use-local-lucia-fallback', 'Use local model for Lucia') :

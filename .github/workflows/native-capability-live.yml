@@ -1,0 +1,63 @@
+name: Native Capability Registry — Windows Live Websites
+
+on:
+  push:
+    branches: [fix/lucia-native-capability-20261127]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-capability:
+    runs-on: windows-latest
+    timeout-minutes: 80
+    steps:
+      - name: Check out the isolated capability-fix branch
+        uses: actions/checkout@v4
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Set up Rust stable (Windows MSVC)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache compiled Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Check native capability and UI code
+        shell: pwsh
+        run: |
+          node --check ui/public/src/tauri-bridge.js
+          node --check ui/public/src/browser-shell.js
+          node --check tests/e2e/browser-compat.mjs
+          node --test tests/lucia-model-capability-ui.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Capability UI regression failed' }
+          cargo test --manifest-path src-tauri/Cargo.toml --locked capability_registry::tests --jobs 2
+          if ($LASTEXITCODE -ne 0) { throw 'Rust capability registry regression failed' }
+      - name: Build current Rust and embedded UI into a release executable
+        shell: pwsh
+        run: |
+          npm ci --prefix ui --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'UI dependencies failed' }
+          npm run build:css --prefix ui
+          if ($LASTEXITCODE -ne 0) { throw 'UI stylesheet failed' }
+          cargo build --manifest-path src-tauri/Cargo.toml --release --locked --jobs 2
+          if ($LASTEXITCODE -ne 0) { throw 'Windows MSVC release build failed' }
+      - name: Verify native command and UI bridge on real public websites
+        shell: pwsh
+        timeout-minutes: 8
+        env:
+          BROWSER_CAPABILITY_TEST: '1'
+          BROWSER_COMPAT_UNFAMILIAR: '1'
+        run: |
+          ./tests/e2e/run-lucia-cross-site-live.ps1 -OnlyCompatibility -CdpPort 9289
+          if ($LASTEXITCODE -ne 0) { throw 'Native capability integration or real-site WebView2 checks failed' }
+      - name: Upload verified Windows release binary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browsphere-native-capability-test
+          path: target/release/browsphere-core.exe
+          if-no-files-found: warn
+          retention-days: 7
