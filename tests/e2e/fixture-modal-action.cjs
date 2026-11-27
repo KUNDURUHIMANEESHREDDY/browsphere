@@ -13,4 +13,14 @@ function closeObservedDetailsDialog(page, nodes) {
   return close ? {type:'click',node_id:close.node_id,
     element_label:'Close details',is_submit:false} : null;
 }
-module.exports={closeObservedDetailsDialog};
+// Keyboard-only modal has no close button; Escape is permitted ONLY when
+// the active native DOM exposes its labeled dialog target.
+function escapeObservedKeyboardDialog(page,nodes) {
+  if (typeof page!=='string'||!Array.isArray(nodes)) return null;
+  const modal=nodes.find(n=>n&&n.label==='Keyboard dialog' &&
+    n.role==='dialog' && typeof n.node_id==='string' && !n.is_sensitive);
+  if (!modal || !/(?:active dialog:|keyboard dialog is open|press escape to close this dialog)/i.test(page))
+    return null;
+  return {type:'press_key',node_id:modal.node_id,key:'Escape'};
+}
+module.exports={closeObservedDetailsDialog,escapeObservedKeyboardDialog};
