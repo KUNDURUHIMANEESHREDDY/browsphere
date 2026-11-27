@@ -1,6 +1,6 @@
 # Genuine Qwen 2.5 native Windows test using pinned Ollama portable binaries.
 # Model and browser run only on a temporary GitHub-hosted Windows worker.
-param([string]$Model = 'qwen2.5:3b-instruct')
+param([string]$Model = 'qwen2.5:3b-instruct', [switch]$UnfamiliarSites)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true') {
     throw 'Real Qwen CI experiment requires an isolated GitHub-hosted Windows runner.'
@@ -50,12 +50,22 @@ try {
     if (-not ($catalog.models | Where-Object { $_.name -eq $Model -or $_.model -eq $Model })) {
         throw 'The downloaded Qwen model was not listed in Ollama'
     }
-    Write-Host 'Running genuine Qwen decisions through native WebView2 integration.'
-    & (Join-Path $root 'tests\e2e\run-lucia-multistep.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe')
-    if ($LASTEXITCODE -ne 0) {
-        throw "Real Qwen native browser E2E failed with exit code $LASTEXITCODE"
+    if ($UnfamiliarSites) {
+        Write-Host 'Running SIX genuinely model-driven tasks across two public unfamiliar documentation sites.'
+        $resultPath=Join-Path $env:RUNNER_TEMP 'lucia-unfamiliar-evidence.json'
+        & (Join-Path $root 'tests\e2e\run-lucia-unfamiliar-hosted.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe') -Scenario all -Repetitions 3 -ActionModel $Model -SupervisorModel $Model -ReportPath $resultPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Real Qwen unfamiliar-site acceptance failed; resource blocks and unverified outcomes are not passes."
+        }
+        Write-Host 'PASS: Six independent real-Qwen unfamiliar-site task completions were source-verified.'
+    } else {
+        Write-Host 'Running genuine Qwen decisions through native WebView2 fixture integration.'
+        & (Join-Path $root 'tests\e2e\run-lucia-multistep.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe')
+        if ($LASTEXITCODE -ne 0) {
+            throw "Real Qwen native browser fixture E2E failed with exit code $LASTEXITCODE"
+        }
+        Write-Host 'PASS: Real Qwen model browser fixture E2E completed.'
     }
-    Write-Host 'PASS: Real Qwen model browser E2E completed.'
 } finally {
     if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
     if (Test-Path (Join-Path $profile 'ollama.stderr.log')) {
