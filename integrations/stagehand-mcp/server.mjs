@@ -4,6 +4,9 @@ import {localhostHostValidation,localhostOriginValidation,toNodeHandler} from '@
 import {z} from 'zod/v4';
 import {stagehandRead} from './stagehand-readonly.mjs';
 
+if (process.env.BROWSPHERE_STAGEHAND_ENABLE !== '1') {
+  throw Error('Stagehand MCP requires explicit BROWSPHERE_STAGEHAND_ENABLE=1 opt-in');
+}
 const port=Number(process.env.BROWSPHERE_STAGEHAND_MCP_PORT||18888);
 if (!Number.isInteger(port)||port<1024||port>65535) throw Error('Invalid loopback MCP port');
 const ci=process.env.GITHUB_ACTIONS==='true' && process.env.BROWSPHERE_STAGEHAND_CI_FIXTURE==='1';
