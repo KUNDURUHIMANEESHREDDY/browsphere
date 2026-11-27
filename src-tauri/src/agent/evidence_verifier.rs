@@ -1491,7 +1491,13 @@ pub fn bound_selection_report(goal:&str,originals:&[SourceEvidence],candidates:&
 }
 pub fn require_source_coverage(goal:&str,report:&VerificationReport)->Result<(),String>{
     for target in super::deliberation::explicit_research_sources(goal){
-        if !report.findings.iter().any(|f|web_url(&f.url).as_ref()==Some(&target)){
+        if !report.findings.iter().any(|f|{
+            web_url(&f.url).is_some_and(|observed|
+                observed.origin()==target.origin()
+                    && observed.path().trim_end_matches('/')==target.path().trim_end_matches('/')
+                    && observed.query()==target.query()
+                    && observed.fragment()==target.fragment())
+        }){
             return Err("Comparison report omitted an explicitly required source".into());
         }
     }

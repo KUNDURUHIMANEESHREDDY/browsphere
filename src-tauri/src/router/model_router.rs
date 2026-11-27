@@ -3462,7 +3462,7 @@ Interactive nodes JSON: {}"#,serde_json::to_string(&nodes).unwrap());
         let creds = CredentialStore::new("browsphere-local-schema-retry-tests");
         let (_, action, route) = router.propose_specialist_action(
             "https://example.org/", "Original user goal: Click Search\nOrigin: https://example.org/\n\
-             Interactive nodes JSON: [{\"node_id\":\"n_2\",\"label\":\"Search\",\"tag\":\"button\",\"role\":\"button\"}]",
+             Interactive nodes JSON: [{\"node_id\":\"n_2\",\"label\":\"Search\",\"tag\":\"button\",\"role\":\"button\",\"is_sensitive\":false}]",
             "Click the freshly observed search control", &creds, false,
         ).await.unwrap();
         assert!(matches!(action, BrowserAction::Click { node_id, .. } if node_id == "n_2"));
