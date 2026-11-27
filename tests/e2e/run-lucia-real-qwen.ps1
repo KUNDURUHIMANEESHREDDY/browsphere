@@ -51,6 +51,35 @@ try {
         throw 'The downloaded Qwen model was not listed in Ollama'
     }
     if ($UnfamiliarSites) {
+        # A successfully downloaded model is not proof that it can respond
+        # within Lucia's actual inference deadline. Exercise the genuine
+        # Ollama binary once without any page content, then report only numeric
+        # timing metadata (not prompts, tokens, credentials, or model output).
+        $probeWatch=[Diagnostics.Stopwatch]::StartNew()
+        $probeBody=@{
+            model=$Model
+            prompt='Return one JSON object with action type scroll, delta_y 150 and no other text.'
+            format='json'
+            stream=$false
+            keep_alive='20m'
+            options=@{temperature=0;num_predict=48;num_ctx=3072}
+        } | ConvertTo-Json -Depth 6 -Compress
+        $probe=Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/generate' -Method Post -Body $probeBody -ContentType 'application/json' -TimeoutSec 120
+        $probeWatch.Stop()
+        if(-not $probe.done -or [string]::IsNullOrWhiteSpace([string]$probe.response)) {
+            throw 'Real Qwen preflight returned no completed model response; browser task repeatability cannot be measured.'
+        }
+        $metrics=[ordered]@{
+            wall_ms=[math]::Round($probeWatch.Elapsed.TotalMilliseconds,1)
+            model_load_ms=[math]::Round([double]$probe.load_duration/1000000,1)
+            prompt_eval_ms=[math]::Round([double]$probe.prompt_eval_duration/1000000,1)
+            generation_ms=[math]::Round([double]$probe.eval_duration/1000000,1)
+            prompt_tokens=[int]$probe.prompt_eval_count
+            generated_tokens=[int]$probe.eval_count
+            tokens_per_second=if($probe.eval_duration -gt 0){[math]::Round(([double]$probe.eval_count*1000000000)/[double]$probe.eval_duration,1)}else{$null}
+            done_reason=[string]$probe.done_reason
+        }
+        Write-Host ('REAL_QWEN_PREFLIGHT '+($metrics|ConvertTo-Json -Compress))
         Write-Host 'Running SIX genuinely model-driven tasks across two public unfamiliar documentation sites.'
         $resultPath=Join-Path $env:RUNNER_TEMP 'lucia-unfamiliar-evidence.json'
         & (Join-Path $root 'tests\e2e\run-lucia-unfamiliar-hosted.ps1') -ExecutablePath (Join-Path $root 'target\release\browsphere-core.exe') -Scenario all -Repetitions 3 -ActionModel $Model -SupervisorModel $Model -ReportPath $resultPath
