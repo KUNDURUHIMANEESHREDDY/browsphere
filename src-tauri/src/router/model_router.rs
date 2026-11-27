@@ -1532,6 +1532,15 @@ User text: <text>{}</text>"#,
         }
     }
 
+    // Reuse Lucia's existing schema-constrained, native-DOM-bound action lane
+    // for CPU Qwen 3B instead of asking it to generate a long generic action.
+    // Stagehand remains a separately permissioned upstream research provider;
+    // no external browser is allowed to execute actions in the user profile.
+    fn bounded_local_action_model(model: &str) -> bool {
+        model == "qwen2.5:3b-instruct" || model == "qwen3.5:0.8b"
+            || model == "lfm3" || model.starts_with("lfm3:")
+    }
+
     /// One specialist's actual LLM action proposal, executed by the existing policy-gated runtime.
     pub async fn propose_specialist_action(
         &self,
@@ -1560,7 +1569,7 @@ User text: <text>{}</text>"#,
                 &crate::lucia_prompts::action_system_prompt(specialist_instructions),
                 voice_mode,
             );
-            let tiny = if self.config.ollama_model == "qwen3.5:0.8b" || self.config.ollama_model == "lfm3" || self.config.ollama_model.starts_with("lfm3:") || prompt_payload.lines().any(|line| line.starts_with("Supervisor directive:") || line.strip_prefix("Original user goal: ").is_some_and(|g|crate::agent::policy::requested_music_entry_url(g).is_some())) {
+            let tiny = if Self::bounded_local_action_model(&self.config.ollama_model) || prompt_payload.lines().any(|line| line.starts_with("Supervisor directive:") || line.strip_prefix("Original user goal: ").is_some_and(|g|crate::agent::policy::requested_music_entry_url(g).is_some())) {
                 Some(Self::tiny_action_context(prompt_payload))
             } else { None };
             let concise = tiny.as_ref().map(|(prompt,_,_)| prompt.clone())
@@ -1593,11 +1602,33 @@ User text: <text>{}</text>"#,
                     || self.config.ollama_model == "lfm3" || self.config.ollama_model.starts_with("lfm3:") {
                     body["think"] = json!(false);
                 }
+                let inference_started = Instant::now();
                 let resp = self.client.post(&url).json(&body).send().await
                     .map_err(|e| anyhow::anyhow!("Local Ollama is unavailable; start the server and check Settings > AI & ML: {e}"))?
                     .error_for_status().map_err(|e|
                         anyhow::anyhow!("Local Ollama model '{}' could not be used: {e}", self.config.ollama_model))?;
                 let val = resp.json::<serde_json::Value>().await?;
+                // Reuse official Ollama /api/generate counters (nanoseconds).
+                // Only bounded numeric metadata is logged: no prompts, URLs,
+                // page text, model output, credentials, or personal information.
+                let duration_ms = |field: &str| val.get(field).and_then(|v| v.as_u64()).map(|ns| ns / 1_000_000);
+                tracing::info!(
+                    target: "lucia_inference",
+                    model = %self.config.ollama_model,
+                    attempt = attempt + 1,
+                    schema_constrained = tiny.is_some(),
+                    wall_ms = inference_started.elapsed().as_millis() as u64,
+                    prompt_bytes = prompt.len(),
+                    system_bytes = system_prompt.len(),
+                    prompt_tokens = ?val.get("prompt_eval_count").and_then(|v| v.as_u64()),
+                    cached_prompt_tokens = ?val.get("prompt_eval_cached_count").and_then(|v| v.as_u64()),
+                    generated_tokens = ?val.get("eval_count").and_then(|v| v.as_u64()),
+                    load_ms = ?duration_ms("load_duration"),
+                    prompt_eval_ms = ?duration_ms("prompt_eval_duration"),
+                    generation_ms = ?duration_ms("eval_duration"),
+                    total_ms = ?duration_ms("total_duration"),
+                    "ollama_action_inference"
+                );
                 let raw = val.get("response").and_then(|v| v.as_str()).unwrap_or("");
                 rejection = if raw.trim().is_empty() {
                     "Empty action response"
@@ -2246,6 +2277,10 @@ mod tests {
         let unchanged = ModelRouter::local_action_generation_options("lfm3:1.7b");
         assert_eq!(unchanged["num_predict"],384);
         assert_eq!(unchanged["num_ctx"],4096);
+        assert!(ModelRouter::bounded_local_action_model("qwen2.5:3b-instruct"));
+        assert!(ModelRouter::bounded_local_action_model("qwen3.5:0.8b"));
+        assert!(ModelRouter::bounded_local_action_model("lfm3:1.7b"));
+        assert!(!ModelRouter::bounded_local_action_model("arbitrary:unreviewed"));
     }
 
     use super::*;
