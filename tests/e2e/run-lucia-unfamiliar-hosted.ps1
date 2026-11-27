@@ -25,7 +25,7 @@ $workingDirectory=(Split-Path -Parent $ExecutablePath)
 $policyPath='HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
 $policyName=[IO.Path]::GetFileName($ExecutablePath)
 $priorEnvironment=@{}
-foreach($name in @('APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_GOAL','LUCIA_EXPECTED_HOSTS','LUCIA_EXPECTED_SOURCE_URL','LUCIA_TEST_ACTION_MODEL','LUCIA_TEST_SUPERVISOR_MODEL','LUCIA_REQUIRE_RECOVERY','LUCIA_TEST_ATTEMPT_TIMEOUT_MS')){
+foreach($name in @('APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_GOAL','LUCIA_EXPECTED_HOSTS','LUCIA_EXPECTED_SOURCE_URL','LUCIA_TEST_ACTION_MODEL','LUCIA_TEST_SUPERVISOR_MODEL','LUCIA_REQUIRE_RECOVERY','LUCIA_TEST_ATTEMPT_TIMEOUT_MS','LUCIA_TEST_RESEARCH_DIAGNOSTIC')){
     $priorEnvironment[$name]=[Environment]::GetEnvironmentVariable($name,'Process')
 }
 if(-not $ReportPath){$ReportPath=Join-Path $root 'logs\lucia-unfamiliar-reliability.json'}
@@ -101,6 +101,7 @@ foreach($case in $cases){
       $env:LUCIA_TEST_SUPERVISOR_MODEL=$SupervisorModel
       $env:LUCIA_REQUIRE_RECOVERY=if($RequireRecovery){'1'}else{'0'}
       $env:LUCIA_TEST_ATTEMPT_TIMEOUT_MS="$($AttemptBudgetSeconds*1000)"
+      $env:LUCIA_TEST_RESEARCH_DIAGNOSTIC='1'
       # An elevated hosted runner needs a per-executable WebView2 CDP policy.
       # Create only if absent; never overwrite an administrator's existing rule.
       New-Item -Path $policyPath -Force | Out-Null
@@ -149,7 +150,7 @@ foreach($case in $cases){
         }
       }
       if($createdPolicy){Remove-ItemProperty -Path $policyPath -Name $policyName -ErrorAction SilentlyContinue}
-      foreach($name in 'APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_GOAL','LUCIA_EXPECTED_HOSTS','LUCIA_EXPECTED_SOURCE_URL','LUCIA_TEST_ACTION_MODEL','LUCIA_TEST_SUPERVISOR_MODEL','LUCIA_REQUIRE_RECOVERY','LUCIA_TEST_ATTEMPT_TIMEOUT_MS'){
+      foreach($name in 'APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_GOAL','LUCIA_EXPECTED_HOSTS','LUCIA_EXPECTED_SOURCE_URL','LUCIA_TEST_ACTION_MODEL','LUCIA_TEST_SUPERVISOR_MODEL','LUCIA_REQUIRE_RECOVERY','LUCIA_TEST_ATTEMPT_TIMEOUT_MS','LUCIA_TEST_RESEARCH_DIAGNOSTIC'){
         [Environment]::SetEnvironmentVariable($name,$priorEnvironment[$name],'Process')
       }
       # The disposable profile is never re-used; cleanup is best-effort.

@@ -4456,6 +4456,39 @@ async fn run_browser_loop(
         // Preserve the actual native URL, including canonical redirects.
         // A dispatched target is never substituted for observed evidence.
 
+        // On disposable CI only, expose fixed diagnostic classifications so a
+        // source-verification denial can be repaired without printing untrusted
+        // page content, source URLs, prompts, or model-generated claims.
+        if std::env::var("LUCIA_TEST_RESEARCH_DIAGNOSTIC").as_deref()==Ok("1")
+            && crate::agent::policy::requested_compound_page_entry_url(&goal).is_some()
+        {
+            let reason_code=match &decision {
+                PolicyDecision::Deny{reason} if reason.starts_with("Specialist evidence verification failed:")=>"source_or_stage_gate",
+                PolicyDecision::Deny{reason} if reason.starts_with("Requested result was not opened:")=>"search_result_gate",
+                PolicyDecision::Deny{reason} if reason.starts_with("Independent evidence verification failed:")=>"fact_verifier",
+                PolicyDecision::Deny{reason} if reason.starts_with("Requirement verification failed:")=>"requirement_verifier",
+                PolicyDecision::Deny{reason} if reason.starts_with("Stage completion requires")=>"fresh_observation",
+                PolicyDecision::Deny{reason} if reason.starts_with("Cannot confirm completion after")=>"previous_failed_action",
+                PolicyDecision::Deny{reason} if reason.contains("cannot perform this action")=>"specialist_permissions",
+                PolicyDecision::Deny{reason} if reason.starts_with("Objective gate:")=>"objective_policy",
+                PolicyDecision::Deny{reason} if reason.starts_with("Skill phase gate:")=>"skill_phase",
+                PolicyDecision::Deny{reason} if reason.starts_with("Navigation leaves the exact")=>"source_path",
+                PolicyDecision::Deny{..}=>"other_policy",
+                PolicyDecision::RequireApproval{..}=>"approval_required",
+                PolicyDecision::Allow=>"allowed",
+            };
+            let source_current=crate::agent::evidence_verifier::compound_research_source(
+                &goal,&orchestrator.evidence).is_some_and(|e|e.url==snapshot.origin);
+            let _=app.emit("agent:research_gate",serde_json::json!({
+                "run_id":run_id,"step_index":step,
+                "specialist":orchestrator.specialist().label(),"action":action_kind,
+                "reason_code":reason_code,"exact_source_observed":source_current,
+                "captured_sources":orchestrator.evidence.len(),
+                "previous_action_failed":last_action_failed,
+                "freshly_observed":freshly_observed,
+                "verification_recoveries":verification_recoveries
+            }));
+        }
         let action_for_summary = action.clone();
         let entry = TraceEntry {
             trace_id,

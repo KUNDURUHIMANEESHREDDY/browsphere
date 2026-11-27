@@ -68,7 +68,7 @@ async function main(){
        const entry={goal:args[0],tab:args[3],runId:null};window.__orchestratorProbe.launches.push(entry);
        return Promise.resolve(original.apply(this,args)).then(runId=>{entry.runId=runId;return runId},error=>{entry.error=String(error);throw error});
      };
-     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan','agent:verification_recovery','agent:fact_dependencies','agent:document_artifact','agent:supervisor','agent:stage','agent:orchestration','agent:model_performance'])
+     for(const kind of ['agent:trace','agent:run_error','agent:run_status','agent:verification_report','agent:goal_progress','agent:objective_replan','agent:verification_recovery','agent:fact_dependencies','agent:document_artifact','agent:supervisor','agent:stage','agent:orchestration','agent:model_performance','agent:research_gate'])
        await window.__TAURI__.event.listen(kind,event=>
          window.__orchestratorProbe.events.push({kind,payload:event.payload}));
      const config=await window.__TAURI__.core.invoke('get_router_config');
@@ -89,7 +89,7 @@ async function main(){
      return true;
    })()`);
    const started=Date.now();
-   let runId=null,finalStatus=null,lastCount=0,lastHeartbeat=0;
+   let runId=null,finalStatus=null,lastCount=0,lastHeartbeat=0,lastGateCount=0;
    while(Date.now()-started<attemptBudgetMs){
      await sleep(1100);
      const d=await evaluate('({launches:window.__orchestratorProbe.launches,events:window.__orchestratorProbe.events.slice(-160)})');
@@ -110,9 +110,18 @@ async function main(){
        }));
      }
      if(traces.length>lastCount){
-       lastCount=traces.length;const e=traces.at(-1).payload;
-       console.log('LIVE_ACTION',JSON.stringify({at:now(),action:e.action?.type,outcome:e.outcome,decision:e.decision,route:e.model_route}).slice(0,730));
+       for(const item of traces.slice(lastCount)){
+         const e=item.payload;
+         console.log('LIVE_ACTION',JSON.stringify({at:now(),action:e.action?.type,outcome:e.outcome,decision:e.decision,route:e.model_route}).slice(0,730));
+       }
+       lastCount=traces.length;
      }
+     const gates=evs.filter(e=>e.kind==='agent:research_gate');
+     for(const item of gates.slice(lastGateCount)){
+       const e=item.payload;
+       console.log('RESEARCH_GATE',JSON.stringify({step:e.step_index,stage:e.specialist,action:e.action,reason:e.reason_code,exact:e.exact_source_observed,sources:e.captured_sources,fresh:e.freshly_observed,previous_failed:e.previous_action_failed,recoveries:e.verification_recoveries}));
+     }
+     lastGateCount=gates.length;
      // Match statuses actually returned by the Rust loop_runner/main.rs.
      // In particular "unverified", "halted" and "max_steps" are FINISHED
      // failures, not live tasks; previously every such trial idled until its
