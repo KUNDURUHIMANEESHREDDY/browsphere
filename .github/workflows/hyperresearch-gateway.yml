@@ -16,6 +16,10 @@ on:
       - 'tests/run_hyperresearch_rust_ci.py'
       - 'src-tauri/src/agent/mcp.rs'
 
+concurrency:
+  group: hyperresearch-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
