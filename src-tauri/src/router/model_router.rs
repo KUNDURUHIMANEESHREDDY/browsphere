@@ -1023,7 +1023,21 @@ User text: <text>{}</text>"#,
         &self,goal:&str,origin:&str,creds:&CredentialStore,
         page:&crate::agent::dom_extractor::DomSnapshot
     )->anyhow::Result<crate::agent::orchestrator::TaskPlan>{
-        let native_state=native_planner_observation(page);
+        self.plan_for_origin_with_page_and_upstream(goal,origin,creds,page,None).await
+    }
+
+    /// Optional upstream Playwright MCP is only a structural cross-check.
+    /// It cannot add objectives, authorize actions, or count as source proof.
+    pub async fn plan_for_origin_with_page_and_upstream(
+        &self,goal:&str,origin:&str,creds:&CredentialStore,
+        page:&crate::agent::dom_extractor::DomSnapshot,
+        upstream:Option<&crate::agent::mcp::PlaywrightPageHints>
+    )->anyhow::Result<crate::agent::orchestrator::TaskPlan>{
+        let mut native:serde_json::Value=serde_json::from_str(&native_planner_observation(page))?;
+        if let Some(hints)=upstream {
+            native["upstream_playwright_accessibility"]=serde_json::to_value(hints)?;
+        }
+        let native_state=native.to_string();
         self.plan_for_origin_observed(goal,origin,creds,Some(&native_state)).await
     }
 
