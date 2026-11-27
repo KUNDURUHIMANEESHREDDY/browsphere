@@ -5,6 +5,7 @@
 param(
   [ValidateSet('all','webdev','w3c')][string]$Scenario='all',
   [ValidateRange(1,10)][int]$Repetitions=2,
+  [ValidateRange(60,280)][int]$AttemptBudgetSeconds=175,
   [int]$BaseCdpPort=9740,
   [string]$ActionModel='qwen2.5:3b-instruct',
   [string]$SupervisorModel='lfm3:1.7b',
@@ -24,7 +25,7 @@ $workingDirectory=(Split-Path -Parent $ExecutablePath)
 $policyPath='HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
 $policyName=[IO.Path]::GetFileName($ExecutablePath)
 $priorEnvironment=@{}
-foreach($name in @('APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_GOAL','LUCIA_EXPECTED_HOSTS','LUCIA_EXPECTED_SOURCE_URL','LUCIA_TEST_ACTION_MODEL','LUCIA_TEST_SUPERVISOR_MODEL','LUCIA_REQUIRE_RECOVERY')){
+foreach($name in @('APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_GOAL','LUCIA_EXPECTED_HOSTS','LUCIA_EXPECTED_SOURCE_URL','LUCIA_TEST_ACTION_MODEL','LUCIA_TEST_SUPERVISOR_MODEL','LUCIA_REQUIRE_RECOVERY','LUCIA_TEST_ATTEMPT_TIMEOUT_MS')){
     $priorEnvironment[$name]=[Environment]::GetEnvironmentVariable($name,'Process')
 }
 if(-not $ReportPath){$ReportPath=Join-Path $root 'logs\lucia-unfamiliar-reliability.json'}
@@ -34,6 +35,31 @@ $cases=@(
 )
 if($Scenario -ne 'all'){$cases=@($cases | Where-Object {$_.name -eq $Scenario})}
 $records=[System.Collections.Generic.List[object]]::new()
+# Persist partial evidence after EVERY run. A CI deadline must not destroy
+# earlier trial verdicts just because the sixth task was interrupted.
+function Save-InterimReport {
+  $passedCount=@($records | Where-Object {$_.passed}).Count
+  $resourceBlocked=@($records | Where-Object {$_.final_status -eq 'resource_blocked'}).Count
+  $report=[ordered]@{
+    generated_utc=(Get-Date).ToUniversalTime().ToString('o')
+    branch=(git -C $root rev-parse --abbrev-ref HEAD)
+    commit=(git -C $root rev-parse --short HEAD)
+    requested=($cases.Count*$Repetitions)
+    total=$records.Count
+    executed=($records.Count-$resourceBlocked)
+    resource_blocked=$resourceBlocked
+    passed=$passedCount
+    failed=($records.Count-$resourceBlocked-$passedCount)
+    all_passed=($records.Count -eq ($cases.Count*$Repetitions) -and
+      $passedCount -eq $records.Count -and $resourceBlocked -eq 0)
+    qualification='Incomplete or timed-out attempts are never successful. Only independently evidence-checked genuine-model browser tasks pass.'
+    runs=@($records)
+  }
+  New-Item -ItemType Directory -Force (Split-Path -Parent $ReportPath) | Out-Null
+  $report | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 $ReportPath
+  return $report
+}
+$null=Save-InterimReport
 $counter=0
 foreach($case in $cases){
   for($run=1;$run -le $Repetitions;$run++){
@@ -45,6 +71,7 @@ foreach($case in $cases){
     if($availableMiB -lt $requiredLaunchMiB){
       $message="Insufficient browser + model headroom: $availableMiB MiB free before launch, $requiredLaunchMiB MiB needed for 2048 MiB native minimum plus browser startup"
       $records.Add([ordered]@{case=$case.name;run=$run;passed=$false;exit_code=2;seconds=0;final_status='resource_blocked';actions=0;errors=@($message);log=''})
+      $null=Save-InterimReport
       Write-Output ("$($case.name) #$run SKIPPED: $message")
       continue
     }
@@ -72,6 +99,7 @@ foreach($case in $cases){
       $env:LUCIA_TEST_ACTION_MODEL=$ActionModel
       $env:LUCIA_TEST_SUPERVISOR_MODEL=$SupervisorModel
       $env:LUCIA_REQUIRE_RECOVERY=if($RequireRecovery){'1'}else{'0'}
+      $env:LUCIA_TEST_ATTEMPT_TIMEOUT_MS="$($AttemptBudgetSeconds*1000)"
       # An elevated hosted runner needs a per-executable WebView2 CDP policy.
       # Create only if absent; never overwrite an administrator's existing rule.
       New-Item -Path $policyPath -Force | Out-Null
@@ -113,7 +141,7 @@ foreach($case in $cases){
         }
       }
       if($createdPolicy){Remove-ItemProperty -Path $policyPath -Name $policyName -ErrorAction SilentlyContinue}
-      foreach($name in 'APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_GOAL','LUCIA_EXPECTED_HOSTS','LUCIA_EXPECTED_SOURCE_URL','LUCIA_TEST_ACTION_MODEL','LUCIA_TEST_SUPERVISOR_MODEL','LUCIA_REQUIRE_RECOVERY'){
+      foreach($name in 'APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT','LUCIA_TEST_GOAL','LUCIA_EXPECTED_HOSTS','LUCIA_EXPECTED_SOURCE_URL','LUCIA_TEST_ACTION_MODEL','LUCIA_TEST_SUPERVISOR_MODEL','LUCIA_REQUIRE_RECOVERY','LUCIA_TEST_ATTEMPT_TIMEOUT_MS'){
         [Environment]::SetEnvironmentVariable($name,$priorEnvironment[$name],'Process')
       }
       # The disposable profile is never re-used; cleanup is best-effort.
@@ -137,24 +165,15 @@ foreach($case in $cases){
       log=$logFile
     }
     $records.Add($record)
+    $null=Save-InterimReport
+    # Show only bounded metadata from the public CI documentation tasks.
+    $last=@($raw -split "\r?\n" | Where-Object {
+      $_ -match '^(LIVE_HEARTBEAT|LIVE_ACTION|ORCHESTRATOR_RESULT|ORCHESTRATOR_LIVE_FAIL)'
+    } | Select-Object -Last 5)
+    foreach($item in $last){Write-Host ($item.Substring(0,[math]::Min(900,$item.Length)))}
     Write-Output ("{0} #{1}: {2}, status={3}, actions={4}" -f $case.name,$run,$(if($passed){'PASS'}else{'FAIL'}),$record.final_status,$record.actions)
   }
 }
-$passedCount=@($records | Where-Object {$_.passed}).Count
-$resourceBlocked=@($records | Where-Object {$_.final_status -eq 'resource_blocked'}).Count
-$executed=$records.Count-$resourceBlocked
-$failed=$executed-$passedCount
-$report=[ordered]@{
-  generated_utc=(Get-Date).ToUniversalTime().ToString('o')
-  branch=(git -C $root rev-parse --abbrev-ref HEAD)
-  commit=(git -C $root rev-parse --short HEAD)
-  total=$records.Count;executed=$executed;resource_blocked=$resourceBlocked
-  passed=$passedCount;failed=$failed
-  all_passed=($passedCount -eq $records.Count -and $resourceBlocked -eq 0)
-  qualification='Resource-blocked attempts never reached task execution; they do not count as passed or failed model-driven trials. A real pass needs independent source evidence and final task verification.'
-  runs=@($records)
-}
-New-Item -ItemType Directory -Force (Split-Path -Parent $ReportPath)|Out-Null
-$report | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 $ReportPath
+$report=Save-InterimReport
 Write-Output "REPORT: $ReportPath"
 if(-not $report.all_passed){exit 1}
