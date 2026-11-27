@@ -25,8 +25,9 @@ latest sampled frame only when an already permitted vision decision is due.
 - The module limits each frame to 3 million encoded characters; the cache
   has at most eight tab slots and one latest frame per active tab.
 - The upstream WebView2 screencast is requested at JPEG quality 45 and
-  maximum 960x640, every fifteenth rendering frame. This is a limit, not
-  a claimed constant FPS.
+  maximum 960x640. The first available rendered frame is requested,
+  including static pages; there is no claimed fixed frame rate. The native
+  store keeps one recent frame, with no unbounded frame queue.
 - The stream stops on successful observation, timeout, error, or tab closure.
   Successful observations await the stop acknowledgment.
 - Existing VisionBudget gating blocks private mode and sensitive/non-public
