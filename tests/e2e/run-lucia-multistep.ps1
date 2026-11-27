@@ -7,7 +7,8 @@ param(
     [int]$ModelPort = 18766,
     [int]$FixturePort = 18764,
     [string]$PerfReportPath = "",
-    [switch]$PlaywrightInterop
+    [switch]$PlaywrightInterop,
+    [switch]$UpstreamMcpInterop
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,7 +34,8 @@ $executableWorkingDirectory = (Split-Path -Parent $ExecutablePath)
 $profileEnv = @{}
 foreach ($key in @('APPDATA','LOCALAPPDATA','WEBVIEW2_USER_DATA_FOLDER',
     'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','LUCIA_CDP_PORT',
-    'LUCIA_MODEL_PORT','LUCIA_FIXTURE_PORT')) {
+    'LUCIA_MODEL_PORT','LUCIA_FIXTURE_PORT',
+    'BROWSPHERE_STAGEHAND_ENABLE','BROWSPHERE_STAGEHAND_CI_FIXTURE','BROWSPHERE_STAGEHAND_MCP_PORT')) {
     $profileEnv[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
 }
 
@@ -48,6 +50,7 @@ $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$CdpPort -
 New-Item -ItemType Directory -Force $env:APPDATA, $env:LOCALAPPDATA, $env:WEBVIEW2_USER_DATA_FOLDER | Out-Null
 
 $modelProcess = $null
+$stagehandProcess = $null
 $appProcess = $null
 $startupMilliseconds = $null
 $startupWatch = $null
@@ -88,6 +91,33 @@ try {
 
     Wait-ForLoopback "http://127.0.0.1:$ModelPort/health"
     Wait-ForLoopback "http://127.0.0.1:$FixturePort/health"
+
+    if ($UpstreamMcpInterop) {
+        if ($env:GITHUB_ACTIONS -ne 'true') {
+            throw 'Upstream MCP experimental integration requires disposable Windows CI'
+        }
+        $configDir=Join-Path $env:LOCALAPPDATA 'BrowsphereAI'
+        New-Item -ItemType Directory -Force $configDir | Out-Null
+        @{stagehand=@{
+            url='http://127.0.0.1:18888/mcp'
+            read_only_tools=@('stagehand_inspect','stagehand_observe','stagehand_extract')
+        }} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $configDir 'mcp-servers.json') -Encoding UTF8
+        $env:BROWSPHERE_STAGEHAND_ENABLE='1'
+        $env:BROWSPHERE_STAGEHAND_CI_FIXTURE='1'
+        $env:BROWSPHERE_STAGEHAND_MCP_PORT='18888'
+        $stagehandScript=Join-Path $root 'integrations\stagehand-mcp\server.mjs'
+        $stagehandProcess=Start-Process -FilePath 'node' -ArgumentList @('"' + $stagehandScript + '"') -WorkingDirectory (Join-Path $root 'integrations\stagehand-mcp') -PassThru -RedirectStandardOutput (Join-Path $profile 'stagehand.out') -RedirectStandardError (Join-Path $profile 'stagehand.err')
+        $stagehandReady=$false
+        for($i=0;$i -lt 45;$i++){
+            try {
+                $tcp=[Net.Sockets.TcpClient]::new('127.0.0.1',18888)
+                $tcp.Dispose()
+                $stagehandReady=$true
+                break
+            }catch{Start-Sleep -Milliseconds 250}
+        }
+        if (-not $stagehandReady) { throw 'Official Stagehand MCP server did not bind on loopback' }
+    }
 
     Write-Host 'Starting isolated Browsphere native WebView2 fixture tests'
     $startupWatch=[Diagnostics.Stopwatch]::StartNew()
@@ -134,6 +164,14 @@ try {
         & node (Join-Path $root 'tests\interop\playwright-webview2-smoke.cjs')
         if ($LASTEXITCODE -ne 0) {
             throw 'Playwright WebView2 CDP interoperability failed after successful CDP startup.'
+        }
+    }
+
+    if ($UpstreamMcpInterop) {
+        Write-Host 'Checking official Stagehand MCP tools through actual installed Lucia chatbox'
+        & node (Join-Path $root 'tests\interop\upstream-stagehand-native.cjs')
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Native Lucia-to-upstream-Stagehand MCP end-to-end acceptance failed'
         }
     }
 
@@ -229,6 +267,7 @@ try {
         }
     }
     if ($appProcess) { Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue }
+    if ($stagehandProcess) { Stop-Process -Id $stagehandProcess.Id -Force -ErrorAction SilentlyContinue }
     if ($modelProcess) { Stop-Process -Id $modelProcess.Id -Force -ErrorAction SilentlyContinue }
     $env:LUCIA_E2E_CLOUD_COMPAT = $previousCloudMode
     if (Test-Path $serverOut) { Get-Content $serverOut -Tail 25 }
