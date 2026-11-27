@@ -4,6 +4,7 @@ param(
     [string]$ExecutablePath = "",
     [switch]$CloudCompat,
     [switch]$PlaywrightSmoke,
+    [switch]$LiveVisionSmoke,
     [int]$McpPort = 18931,
     [int]$CdpPort = 9272,
     [int]$ModelPort = 18766,
@@ -92,6 +93,19 @@ try {
         Write-Host "WebView2 processes observed: $($webviews.Count)"
         Write-Host 'Windows CI browser debugging port was not opened; this is a startup/CDP failure, not a passed agent test'
         throw
+    }
+
+    if ($LiveVisionSmoke) {
+        if ($env:GITHUB_ACTIONS -ne 'true') {
+            throw 'Live visual smoke is restricted to disposable Windows CI'
+        }
+        Write-Host 'LUCIA_LIVE_VISUAL_STREAM_START'
+        & node (Join-Path $root 'tests\e2e\lucia-live-vision.cjs')
+        if ($LASTEXITCODE -ne 0) {
+            throw "Native CDP screencast + BRPR live visual test failed ($LASTEXITCODE)"
+        }
+        Write-Host 'LUCIA_LIVE_VISUAL_STREAM_VERIFIED'
+        return
     }
 
     if ($PlaywrightSmoke) {
