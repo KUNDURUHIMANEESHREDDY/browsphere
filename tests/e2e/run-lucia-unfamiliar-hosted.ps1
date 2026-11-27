@@ -51,7 +51,9 @@ foreach($case in $cases){
     $counter++
     $port=$BaseCdpPort+$counter
     $profile=Join-Path $env:TEMP ('browsphere-unfamiliar-'+[guid]::NewGuid().ToString('N'))
-    $logFile=Join-Path $root ("logs\unfamiliar-$($case.name)-$run.log")
+    $logDirectory=Join-Path $env:RUNNER_TEMP 'lucia-real-unfamiliar'
+    New-Item -ItemType Directory -Force $logDirectory | Out-Null
+    $logFile=Join-Path $logDirectory ("unfamiliar-$($case.name)-$run.log")
     New-Item -ItemType Directory -Force (Join-Path $profile 'Roaming'),(Join-Path $profile 'Local'),(Join-Path $profile 'WebView2') | Out-Null
     $started=Get-Date
     $app=$null
@@ -89,7 +91,7 @@ foreach($case in $cases){
       if(-not $ready){throw 'No isolated native chatbox CDP target'}
       Push-Location $root
       try {
-        & node 'tests\e2e\lucia-orchestrator-unfamiliar-live.cjs' *> $logFile
+        & node 'tests\e2e\lucia-unfamiliar-source-acceptance.cjs' *> $logFile
         $exitCode=$LASTEXITCODE
       } finally {Pop-Location}
     } catch {
@@ -107,7 +109,8 @@ foreach($case in $cases){
     $resultLine=@($raw -split "\r?\n" | Where-Object {$_ -match '^ORCHESTRATOR_RESULT '}) | Select-Object -Last 1
     $result=$null
     if($resultLine){try{$result=($resultLine -replace '^ORCHESTRATOR_RESULT ','') | ConvertFrom-Json}catch{}}
-    $passed=$exitCode -eq 0 -and $null -ne $result -and $result.passed -eq $true -and $result.status -eq 'completed'
+    $passed=$exitCode -eq 0 -and $null -ne $result -and $result.passed -eq $true -and $result.status -eq 'completed' -and
+        $result.genuineModelUsed -eq $true -and $result.genuineModelActions -ge 1
     $record=[ordered]@{
       case=$case.name; run=$run; passed=$passed; exit_code=$exitCode
       seconds=[math]::Round(((Get-Date)-$started).TotalSeconds,1)
