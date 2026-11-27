@@ -89,13 +89,22 @@ class RealGatewayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="lucia-hpr-ci-") as temp:
             root = Path(temp)
             vault = Vault.init(root, platforms=())
-            write_note(vault.notes_dir, title="Browsphere research course evidence",
+            created = write_note(vault.notes_dir, title="Browsphere research course evidence",
                        body="EXPLICIT_UNTRUSTED_CONTENT: a cached example note, not a verified browser source.",
                        tags=["public", "test"], status="draft",
                        source="https://example.org/browsphere-research",
                        summary="Browsphere sample research note")
             plan = compute_sync_plan(vault)
             execute_sync(vault, plan)
+            # Source-cache presence is separate from note.source metadata:
+            # create a fixture source record, as a real fetch would do.
+            vault.db.execute(
+                "INSERT OR REPLACE INTO sources "
+                "(url,note_id,domain,fetched_at,provider,status) VALUES (?,?,?,?,?,?)",
+                ("https://example.org/browsphere-research", created.stem,
+                 "example.org", "2026-11-26T00:00:00Z", "fixture", "active"),
+            )
+            vault.db.commit()
             vault.close()
 
             proc = subprocess.Popen(
