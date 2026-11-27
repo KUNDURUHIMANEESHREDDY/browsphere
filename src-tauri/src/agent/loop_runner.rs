@@ -32,6 +32,17 @@ use crate::router::model_router::ModelRouter;
 use crate::storage::credentials::CredentialStore;
 use crate::storage::sqlite_wal::{BrowserDatabase, WorkflowMacro};
 
+/// A rejected verification is never repaired by reusing the same captured
+/// source passages. A later fresh WebView observation must contain new evidence
+/// before that stage may request another completion review.
+fn newer_original_source_evidence(
+    rejected: &[crate::agent::orchestrator::SourceEvidence],
+    observed: &[crate::agent::orchestrator::SourceEvidence],
+) -> bool {
+    observed.iter().any(|new| !rejected.iter().any(|old|
+        old.url == new.url && old.title == new.title && old.excerpt == new.excerpt))
+}
+
 pub struct ApprovalRequest {
     pub approval_id: Uuid,
     pub run_id: Uuid,
@@ -1631,6 +1642,10 @@ async fn run_browser_loop(
     for (i,s) in orchestrator.plan.stages.iter().enumerate(){graph.describe(stage_nodes[i],&s.objective,&s.success_criteria)?;}
     let mut recovery_node:Option<usize>=None;
     let mut verification_recoveries=0u8;
+    // Cached citations and identical live snippets cannot repair a rejected
+    // independent review. Kept only in memory for the current run.
+    let mut rejected_verification_sources:
+        Option<Vec<crate::agent::orchestrator::SourceEvidence>> = None;
     let mut recovery_observation:Option<usize>=None;
     let mut recovery_strategy:Option<crate::agent::replan::RecoveryPlan>=None;
     publish_graph!(&graph);
@@ -2515,6 +2530,12 @@ async fn run_browser_loop(
             }));
             final_status="unverified".into();
             break;
+        }
+        if rejected_verification_sources.as_ref().is_some_and(|prior|
+            newer_original_source_evidence(prior,&orchestrator.evidence)) {
+            // This is only permission to TRY verification again, not success.
+            // The same Rust quote/requirement/semantic gates still apply.
+            rejected_verification_sources = None;
         }
         let completion_gate = if !freshly_observed || last_action_failed {
             "blocked - fresh successful observation required".to_string()
@@ -3413,6 +3434,52 @@ async fn run_browser_loop(
                 }
             }
         }
+        if rejected_verification_sources.is_some()
+            && orchestrator.specialist()!=Specialist::Verification
+            && matches!(action,BrowserAction::Complete{..})
+        {
+            // A model might confidently repeat "complete" even after Rust
+            // rejected its evidence. Only a different observed, read-only
+            // browser action may help; never replay a submission or infer
+            // verification from an unchanged page.
+            let candidate = replacement.next_for_stage(
+                &goal,&semantic_focus,&snapshot,&objectives,&route_ledger
+            ).filter(|a| !matches!(a,
+                BrowserAction::Complete{..}|BrowserAction::Download{..}|
+                BrowserAction::Click{is_submit:true,..}|
+                BrowserAction::TypeText{is_sensitive:true,..})
+                && !run_core.failed_before(a,&snapshot,orchestrator.current)
+                && orchestrator.specialist().allows_on_page(a,&snapshot)
+                && crate::agent::objective_gate::check(
+                    &goal,&initial_origin,&snapshot,&objectives,a).is_ok());
+            if let Some(mut alternative)=candidate {
+                if bind_action_to_live_dom(&mut alternative,&snapshot,true).is_ok() {
+                    action=alternative;
+                    action_binding_error=None;
+                    thought="Reobserve and acquire new source evidence after rejected independent verification".into();
+                    model_route="recovery:missing_verifier_evidence".into();
+                    let _=app.emit("agent:recovery",serde_json::json!({
+                        "run_id":run_id,"step_index":step,
+                        "reason":"verifier_rejected_unchanged_evidence",
+                        "strategy":"different_observed_action"
+                    }));
+                } else {
+                    let _=app.emit("agent:run_error",serde_json::json!({
+                        "run_id":run_id,
+                        "message":"Independent verification rejected the captured evidence; no safely bound alternative control was observed. Task remains unverified."
+                    }));
+                    final_status="unverified".into();
+                    break;
+                }
+            } else {
+                let _=app.emit("agent:run_error",serde_json::json!({
+                    "run_id":run_id,
+                    "message":"Independent verification rejected the current source evidence. Reobserved page offers no distinct, safe action; no repeated completion attempted."
+                }));
+                final_status="unverified".into();
+                break;
+            }
+        }
         let before_effect=snapshot.clone();
         let semantic_attempt=run_core.prepare(&action,&snapshot,orchestrator.current);
         let signature = action_state_signature(orchestrator.current, &action, &snapshot);
@@ -4242,7 +4309,9 @@ async fn run_browser_loop(
                 !crate::agent::recovery::authentication_gate(&snapshot)&&!crate::agent::deliberation::error_page(&snapshot) {
                 let verifier=stage_nodes[orchestrator.current];
                 if let Ok(id)=graph.insert_verification_research(verifier){
+                    let rejected_sources=orchestrator.evidence.clone();
                     if orchestrator.reopen_research(){
+                        rejected_verification_sources=Some(rejected_sources);
                         checkpoint_proof=None;
                         stage_nodes[orchestrator.current]=id;verification_recoveries+=1;last_action_failed=false;advisory=None;
                         recent_outcomes.push("Independent factual review found insufficient evidence. Locate the missing requested facts on relevant public source pages. Do not reuse the rejected summary.".into());
@@ -4404,6 +4473,29 @@ async fn run_browser_loop(
 #[cfg(test)]
 mod production_safety_tests {
     use super::*;
+
+    #[test]
+    fn rejected_verification_needs_genuinely_new_observed_source() {
+        use crate::agent::orchestrator::SourceEvidence;
+        let cached=vec![SourceEvidence{
+            url:"https://docs.example.org/api".into(),
+            title:"API Reference".into(),
+            excerpt:"Cached claim unsupported by actual source.".into()
+        }];
+        assert!(!newer_original_source_evidence(&cached,&cached));
+        // Capturing the same text again is NOT evidence recovery.
+        assert!(!newer_original_source_evidence(&cached,&cached.clone()));
+        let mut new=cached.clone();
+        new[0].excerpt="New live original-source passage describing the API.".into();
+        assert!(newer_original_source_evidence(&cached,&new));
+        new=cached.clone();
+        new.push(SourceEvidence{
+            url:"https://docs.example.org/guide".into(),
+            title:"Guide".into(),
+            excerpt:"Fresh independent source collected.".into()
+        });
+        assert!(newer_original_source_evidence(&cached,&new));
+    }
 
     #[test]
     fn search_submit_needs_matching_new_article_and_native_source_evidence() {
