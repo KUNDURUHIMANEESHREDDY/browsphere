@@ -6,14 +6,18 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const port=Number(process.env.LUCIA_CDP_PORT||9290);
 async function main(){
   assert.equal(process.env.GITHUB_ACTIONS,'true','Live vision test requires disposable Windows CI');
-  let targets;
-  for(let i=0;i<50;i++){
-    try {targets=await(await fetch('http://127.0.0.1:'+port+'/json')).json();break}
-    catch {await sleep(350)}
+  let targets,shell;
+  // The WebView2 CDP port can open before the Tauri app shell navigates.
+  // Wait for the actual app target, not merely the /json listener.
+  for(let i=0;i<80;i++){
+    try {
+      targets=await(await fetch('http://127.0.0.1:'+port+'/json')).json();
+      shell=targets.find(t=>t.type==='page'&&t.url?.includes('tauri.localhost')&&t.title?.includes('Browsphere'))
+          ||targets.find(t=>t.type==='page'&&t.url?.includes('tauri.localhost'));
+      if(shell?.webSocketDebuggerUrl)break;
+    }catch{}
+    await sleep(350);
   }
-  assert.ok(targets,'Native WebView2 CDP endpoint missing');
-  const shell=targets.find(t=>t.type==='page'&&t.url?.includes('tauri.localhost')&&t.title?.includes('Browsphere'))
-      ||targets.find(t=>t.type==='page'&&t.url?.includes('tauri.localhost'));
   assert.ok(shell?.webSocketDebuggerUrl,'Native Browsphere app shell missing');
   const ws=new WebSocket(shell.webSocketDebuggerUrl);
   await new Promise((resolve,reject)=>{ws.onopen=resolve;ws.onerror=reject});
