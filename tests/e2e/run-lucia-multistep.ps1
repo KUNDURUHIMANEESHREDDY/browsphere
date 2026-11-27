@@ -50,6 +50,7 @@ $modelProcess = $null
 $appProcess = $null
 $startupMilliseconds = $null
 $startupWatch = $null
+$treeSampler = $null
 # WebView2 150+ ignores CDP environment flags in elevated host processes.
 # GitHub Windows runners are elevated, so set a temporary machine-level
 # policy for this one executable in the ephemeral CI worker only.
@@ -92,6 +93,23 @@ try {
     # The app must start from its installation directory, not the source tree.
     # Otherwise an unpackaged file could accidentally mask a broken bundle.
     $appProcess = Start-Process -FilePath $ExecutablePath -WorkingDirectory $executableWorkingDirectory -PassThru
+    if (-not [string]::IsNullOrWhiteSpace($PerfReportPath) -and $env:GITHUB_ACTIONS -eq 'true') {
+        # Sampling runs concurrently with the actual browser task. Collect
+        # descendants of this exact PID only; never touch unrelated processes.
+        $samplerPath = Join-Path $PSScriptRoot 'process-tree-metrics.ps1'
+        $treeSampler = Start-Job -ArgumentList @([int]$appProcess.Id,$samplerPath) -ScriptBlock {
+            param([int]$nativePid, [string]$library)
+            . $library
+            while ($true) {
+                try {
+                    $rows = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,WorkingSetSize,PrivatePageCount -ErrorAction Stop)
+                    $sample = Get-BrowserProcessTreeSample -RootProcessId $nativePid -ProcessRows $rows
+                    if ($null -ne $sample) { $sample | ConvertTo-Json -Compress }
+                } catch { }
+                Start-Sleep -Milliseconds 1200
+            }
+        }
+    }
     try {
         Wait-ForLoopback "http://127.0.0.1:$CdpPort/json" 55
         $startupWatch.Stop()
@@ -154,18 +172,39 @@ try {
     }
     Write-Host 'PASS: multi-step native browsing, recovery, tab closure, and evidence checks'
 } finally {
+    $processTreeSamples = @()
+    if ($treeSampler) {
+        Stop-Job -Job $treeSampler -ErrorAction SilentlyContinue
+        $sampleLines = @(Receive-Job -Job $treeSampler -ErrorAction SilentlyContinue)
+        $processTreeSamples = @($sampleLines | ForEach-Object {
+            try { $_ | ConvertFrom-Json -ErrorAction Stop } catch { }
+        } | Where-Object { $null -ne $_ -and $_.process_count -ge 1 })
+        Remove-Job -Job $treeSampler -Force -ErrorAction SilentlyContinue
+    }
     if (-not [string]::IsNullOrWhiteSpace($PerfReportPath)) {
         # Performance is a measured CI baseline, NOT an arbitrary marketing
         # latency claim or aggregate of unrelated system WebView processes.
         try {
             $hostProcess=if ($appProcess) { Get-Process -Id $appProcess.Id -ErrorAction SilentlyContinue } else { $null }
             $mb=1MB
+            # Helper is dot-sourced for testability, then used only on
+            # numeric observations (no command-lines or page content).
+            . (Join-Path $PSScriptRoot 'process-tree-metrics.ps1')
             $data=[ordered]@{
                 cdp_ready_ms=$startupMilliseconds
                 native_host_working_set_mb=if($hostProcess){[math]::Round($hostProcess.WorkingSet64/$mb,1)}else{$null}
                 native_host_peak_working_set_mb=if($hostProcess){[math]::Round($hostProcess.PeakWorkingSet64/$mb,1)}else{$null}
                 native_host_private_bytes_mb=if($hostProcess){[math]::Round($hostProcess.PrivateMemorySize64/$mb,1)}else{$null}
-                sample="single host-process sample after scenario; WebView2 child memory excluded"
+                sample="host process point-in-time; owned native host + child processes sampled concurrently during task"
+                process_tree_sample_count=$processTreeSamples.Count
+                webview2_child_count_peak=if($processTreeSamples.Count){($processTreeSamples | Measure-Object -Property webview2_child_count -Maximum).Maximum}else{0}
+                process_tree_working_set_mb_p50=if($processTreeSamples.Count){Get-NearestRankPercentile -Values @($processTreeSamples | ForEach-Object {[double]$_.process_tree_working_set_mb}) -Quantile 0.50}else{$null}
+                process_tree_working_set_mb_p95=if($processTreeSamples.Count){Get-NearestRankPercentile -Values @($processTreeSamples | ForEach-Object {[double]$_.process_tree_working_set_mb}) -Quantile 0.95}else{$null}
+                process_tree_working_set_mb_p99=if($processTreeSamples.Count){Get-NearestRankPercentile -Values @($processTreeSamples | ForEach-Object {[double]$_.process_tree_working_set_mb}) -Quantile 0.99}else{$null}
+                process_tree_working_set_mb_peak=if($processTreeSamples.Count){($processTreeSamples | Measure-Object -Property process_tree_working_set_mb -Maximum).Maximum}else{$null}
+                webview2_working_set_mb_peak=if($processTreeSamples.Count){($processTreeSamples | Measure-Object -Property webview2_working_set_mb -Maximum).Maximum}else{$null}
+                process_tree_private_bytes_mb_peak=if($processTreeSamples.Count){($processTreeSamples | Measure-Object -Property process_tree_private_bytes_mb -Maximum).Maximum}else{$null}
+                process_tree_ownership="Only descendants of launched browsphere-core PID. Excludes standalone Ollama and unrelated WebView2."
                 ci_run=$env:GITHUB_RUN_ID
                 commit=$env:GITHUB_SHA
                 model_mode=if($CloudCompat){"mock-cloud"}else{"mock-local"}
