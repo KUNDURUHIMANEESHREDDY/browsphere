@@ -1,0 +1,44 @@
+name: Browsphere release integrity controls (unsigned CI)
+
+on:
+  push:
+    branches: [fix/browsphere-release-integrity-20261127]
+    paths:
+      - 'src-tauri/tauri.conf.json'
+      - 'src-tauri/capabilities/default.json'
+      - '.github/workflows/release-signed-windows.yml'
+      - '.github/workflows/release-integrity.yml'
+      - 'tests/release/**'
+  pull_request:
+    paths:
+      - 'src-tauri/tauri.conf.json'
+      - 'src-tauri/capabilities/default.json'
+      - '.github/workflows/release-signed-windows.yml'
+      - 'tests/release/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-guards:
+    name: Check unsigned and protected release boundaries
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate source release integrity invariants
+        run: node --test tests/release/release-integrity.test.cjs

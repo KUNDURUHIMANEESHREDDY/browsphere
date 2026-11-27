@@ -39,7 +39,8 @@
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
-      }
+      },
+      "allowDowngrades": false
     }
   }
 }
