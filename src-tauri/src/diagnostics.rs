@@ -69,7 +69,10 @@ fn guarded_fields(input: Value) -> Value {
                 "component" | "run_id" | "trace_id" | "step" | "action" |
                 "status" | "risk" | "decision" | "model_route" | "latency_ms" |
                 "duration_ms" | "blocked_trackers" | "error_kind" | "level" |
-                "private" | "stage" | "count" | "kind" | "outcome" | "source" | "line"
+                "private" | "stage" | "count" | "kind" | "outcome" | "source" | "line" |
+                "prompt_tokens" | "cached_prompt_tokens" | "generated_tokens" |
+                "model_load_ms" | "prompt_eval_ms" | "generation_ms" | "total_ms" |
+                "prompt_bytes" | "system_bytes" | "schema_constrained"
             ) { continue; }
             match value {
                 Value::Bool(_) | Value::Number(_) | Value::Null => { fields.insert(key, value); }
@@ -180,6 +183,25 @@ mod tests {
         assert!(fields.get("goal").is_none());
         assert_eq!(fields["model_route"], "[redacted]");
         assert_eq!(fields["action"], "navigate");
+        let numeric = guarded_fields(json!({
+            "model_route":"ollama:qwen2.5:3b-instruct",
+            "prompt_tokens":1250,
+            "cached_prompt_tokens":200,
+            "generated_tokens":42,
+            "model_load_ms":20,
+            "prompt_eval_ms":345,
+            "generation_ms":643,
+            "total_ms":1012,
+            "prompt_bytes":5422,
+            "system_bytes":312,
+            "schema_constrained":true,
+            "prompt":"SECRET NEVER WRITE",
+            "response":"SECRET NEVER WRITE"
+        }));
+        assert_eq!(numeric["prompt_tokens"], 1250);
+        assert_eq!(numeric["schema_constrained"], true);
+        assert!(numeric.get("prompt").is_none());
+        assert!(numeric.get("response").is_none());
     }
 }
 
