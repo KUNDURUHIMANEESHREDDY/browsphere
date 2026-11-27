@@ -31,6 +31,12 @@ enum Request {
     List(String),
     Call(String, String, Value),
 }
+
+/// A successful tool dispatch is not a completed factual research task.
+/// Only catalog listing finishes a discovery objective without source readback.
+pub fn unverified_tool_result(goal: &str) -> bool {
+    matches!(parse(goal), Ok(Request::Call(..)))
+}
 fn parse(goal: &str) -> Result<Request> {
     let goal = goal.trim();
     if let Some(server) = goal.strip_prefix("mcp list ") {
@@ -294,6 +300,16 @@ mod tests {
         let result = crate::agent::evidence_verifier::check_model_verification(
             &fabricated.to_string(), &[], false);
         assert!(result.is_err(), "Cached MCP claims must not substitute for live WebView evidence");
+    }
+    #[test] fn cached_tool_call_never_counts_as_verified_task_completion() {
+        assert!(unverified_tool_result(
+            r#"mcp call hyperresearch/search_notes {"query":"browsphere"}"#
+        ));
+        assert!(unverified_tool_result(
+            r#"mcp call hyperresearch/read_note {"note_id_value":"example"}"#
+        ));
+        assert!(!unverified_tool_result("mcp list hyperresearch"));
+        assert!(!unverified_tool_result("Open a verified webpage"));
     }
     #[test] fn endpoint_policy() {
         assert!(endpoint("http://127.0.0.1:9999/mcp").is_ok());
