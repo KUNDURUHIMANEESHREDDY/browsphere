@@ -189,10 +189,11 @@ impl Drop for Session<'_>{
 pub async fn sample(app:&tauri::AppHandle,label:&str)->Result<String,String>{
     let epoch=begin(label)?;
     let mut session=Session{app,label,epoch,started:false};
-    // Max ~2 FPS on changing pages. The browser produces frames; the host
-    // keeps only the latest, applying backpressure instead of queuing video.
+    // Ask for the first available frame even on an otherwise static page.
+    // EveryNthFrame=15 can suppress every frame on a low-redraw page.
+    // The host keeps only the latest compressed frame (no frame queue).
     cdp(app,label,"Page.startScreencast",
-        r#"{"format":"jpeg","quality":45,"maxWidth":960,"maxHeight":640,"everyNthFrame":15}"#).await?;
+        r#"{"format":"jpeg","quality":45,"maxWidth":960,"maxHeight":640,"everyNthFrame":1}"#).await?;
     session.started=true;
     let deadline=tokio::time::Instant::now()+STREAM_WAIT;
     loop {
