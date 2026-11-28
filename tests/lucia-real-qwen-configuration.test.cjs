@@ -19,3 +19,15 @@ test('workflow dispatch uses the real-model runner in unfamiliar-site mode',()=>
   assert.match(script,/run-lucia-unfamiliar-hosted\.ps1/);
   assert.match(script,/\$probe\.done/);
 });
+
+test('genuine Qwen JSON preflight disables thinking and budgets response tokens',()=>{
+  const probe=script;
+  assert.match(probe,/think=\$false/);
+  const budget=Number(probe.match(/num_predict=(\d+);num_ctx=3072/)?.[1]);
+  assert.ok(budget>=96,'Preflight must reserve enough tokens for a complete answer');
+  assert.match(probe,/format='json'/);
+  assert.match(probe,/IsNullOrWhiteSpace\(\[string\]\$probe\.response\)/);
+  assert.match(probe,/ConvertFrom-Json -ErrorAction Stop/);
+  assert.match(probe,/\$preflightAction\.type -ne 'scroll'/);
+  assert.match(probe,/\$preflightAction\.delta_y -ne 150/);
+});

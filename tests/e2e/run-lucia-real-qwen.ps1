@@ -71,16 +71,27 @@ try {
         $probeWatch=[Diagnostics.Stopwatch]::StartNew()
         $probeBody=@{
             model=$Model
-            prompt='Return one JSON object with action type scroll, delta_y 150 and no other text.'
+            prompt='Return exactly this JSON object and nothing else: {"type":"scroll","delta_y":150}'
             format='json'
+            # Preflight must test a completed JSON answer, not spend the
+            # short generation budget on hidden reasoning tokens.
+            think=$false
             stream=$false
             keep_alive='20m'
-            options=@{temperature=0;num_predict=48;num_ctx=3072}
+            options=@{temperature=0;num_predict=120;num_ctx=3072}
         } | ConvertTo-Json -Depth 6 -Compress
         $probe=Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/generate' -Method Post -Body $probeBody -ContentType 'application/json' -TimeoutSec 120
         $probeWatch.Stop()
         if(-not $probe.done -or [string]::IsNullOrWhiteSpace([string]$probe.response)) {
             throw 'Real Qwen preflight returned no completed model response; browser task repeatability cannot be measured.'
+        }
+        try {
+            $preflightAction=([string]$probe.response) | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            throw 'Real Qwen preflight returned invalid JSON; real-site task acceptance is blocked.'
+        }
+        if ($preflightAction.type -ne 'scroll' -or $preflightAction.delta_y -ne 150) {
+            throw 'Real Qwen preflight did not follow the requested action schema.'
         }
         $metrics=[ordered]@{
             wall_ms=[math]::Round($probeWatch.Elapsed.TotalMilliseconds,1)
