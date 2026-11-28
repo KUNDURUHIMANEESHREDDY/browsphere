@@ -1627,6 +1627,7 @@ async fn run_browser_loop(
     let mut run_core=crate::agent::semantic_core::RunCore::default();
     let mut goal_progress=crate::agent::goal_progress::Tracker::default();
     let mut route_ledger=crate::agent::semantic_core::RouteLedger::default();
+    let mut exact_source_routes=crate::agent::semantic_core::ExactSourceRouteBudget::default();
     let mut review_budget=4u8;
     let mut last_review_step=0u32;
     let mut used_reviewer=false;
@@ -3818,6 +3819,23 @@ async fn run_browser_loop(
                     "run_id":run_id,"step_index":step,"decision":"alternative_after_repeated_action"}));
             }
         }
+        // An exact quoted-source task is not an invitation to browse endless
+        // descendants after the requested page was already observed. URL
+        // changes do not establish a source-backed answer. Give the model a
+        // bounded chance to inspect nearby pages, then fail closed while
+        // preserving all independent verification requirements.
+        if !exact_source_routes.permits(&goal,&snapshot.origin,&action) {
+            let _=app.emit("agent:run_error",serde_json::json!({
+                "run_id":run_id,
+                "message":"The requested source was reached, but subsequent navigation did not produce verified evidence. Lucia stopped the navigation loop; the research answer remains unverified."
+            }));
+            let _=app.emit("agent:source_navigation_guard",serde_json::json!({
+                "run_id":run_id,"step_index":step,
+                "reason":"exact_source_navigation_budget"
+            }));
+            final_status="unverified".into();
+            break;
+        }
         let before_effect=snapshot.clone();
         let semantic_attempt=run_core.prepare(&action,&snapshot,orchestrator.current);
         let signature = action_state_signature(orchestrator.current, &action, &snapshot);
@@ -4592,6 +4610,7 @@ async fn run_browser_loop(
             }
         }
 
+        exact_source_routes.record(&goal,&before_effect,&action,ok);
         orchestrator.action_outcome(&action, ok);
         if ok {
             if let Some(receipt)=observed_form_receipt.take(){

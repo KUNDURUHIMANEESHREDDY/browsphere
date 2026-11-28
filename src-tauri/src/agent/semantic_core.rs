@@ -190,6 +190,38 @@ fn route_digest(raw:&str)->Option<u64>{
     let mut h=std::collections::hash_map::DefaultHasher::new();
     u.as_str().hash(&mut h);Some(h.finish())
 }
+/// A narrow quoted-source task cannot treat an endless tour of sibling
+/// pages as progress. This run-local budget begins only after the requested
+/// deep source is visible and limits subsequent navigations until independent
+/// verification. It never grants navigation permission or fabricates evidence.
+#[derive(Default)]
+pub struct ExactSourceRouteBudget { navigations_from_source: u8 }
+pub fn within_cited_source(goal: &str, origin: &str) -> bool {
+    let lower = goal.to_ascii_lowercase();
+    if !["cite", "citing", "citation", "quote", "quoted", "passage"]
+        .iter().any(|word| lower.contains(word)) { return false; }
+    let Some(expected) = super::policy::requested_compound_page_entry_url(goal)
+        .filter(|u| u.path() != "/") else { return false; };
+    let Ok(actual) = url::Url::parse(origin) else { return false; };
+    if actual.origin() != expected.origin() || actual.scheme() != "https" { return false; }
+    let source = expected.path().trim_end_matches('/');
+    let path = actual.path().trim_end_matches('/');
+    path == source || path.strip_prefix(source)
+        .is_some_and(|suffix| suffix.starts_with('/'))
+}
+impl ExactSourceRouteBudget {
+    pub fn permits(&self, goal: &str, origin: &str, action: &BrowserAction) -> bool {
+        !matches!(action, BrowserAction::Navigate{..})
+            || !within_cited_source(goal, origin)
+            || self.navigations_from_source < 2
+    }
+    pub fn record(&mut self, goal: &str, before: &DomSnapshot, action: &BrowserAction, dispatched: bool) {
+        if dispatched && matches!(action, BrowserAction::Navigate{..})
+            && within_cited_source(goal, &before.origin) {
+            self.navigations_from_source = self.navigations_from_source.saturating_add(1);
+        }
+    }
+}
 impl RouteLedger{
     pub fn observe(&mut self,stage:usize,origin:&str){
         if self.stage!=Some(stage){
@@ -322,6 +354,31 @@ mod tests{
   let ranked=rank_for_stage(&p,goal,"Enter event venue",1);
   assert_eq!(ranked[0].node_id,"venue",
    "active stage controls must outrank completed-stage fields");
+ }
+ #[test]fn exact_cited_source_budget_blocks_endless_distinct_navigation_not_reading(){
+  let goal="Visit https://www.w3.org/WAI/tutorials/images/ and report one recommendation, citing a supporting passage from the exact source.";
+  let root="https://www.w3.org/WAI/tutorials/images/";
+  let first=BrowserAction::Navigate{url:root.into()};
+  let child=BrowserAction::Navigate{url:format!("{root}informative/")};
+  let deeper=BrowserAction::Navigate{url:format!("{root}decorative/")};
+  let third=BrowserAction::Navigate{url:format!("{root}functional/")};
+  let mut budget=ExactSourceRouteBudget::default();
+  assert!(!within_cited_source(goal,"https://www.w3.org/WAI/tutorials/"));
+  assert!(!within_cited_source(goal,"https://www.w3.org.evil.test/WAI/tutorials/images/"));
+  assert!(within_cited_source(goal,root));
+  assert!(within_cited_source(goal,&format!("{root}informative/")));
+  assert!(budget.permits(goal,"about:blank",&first));
+  budget.record(goal,&page(vec![]),&first,true);
+  assert!(budget.permits(goal,root,&child));
+  let mut before=page(vec![]);before.origin=root.into();
+  budget.record(goal,&before,&child,true);
+  assert!(budget.permits(goal,&format!("{root}informative/"),&deeper));
+  before.origin=format!("{root}informative/");
+  budget.record(goal,&before,&deeper,true);
+  assert!(!budget.permits(goal,&format!("{root}decorative/"),&third));
+  assert!(budget.permits(goal,&format!("{root}decorative/"),&BrowserAction::Scroll{delta_y:400}));
+  assert!(budget.permits(goal,&format!("{root}decorative/"),&BrowserAction::Complete{summary:"Require evidence".into()}));
+  assert!(budget.permits("Explore unrelated public docs",root,&third));
  }
  #[test]fn route_ledger_bounds_revisits_and_failed_transitions_without_blocking_new_pages(){
   let mut ledger=RouteLedger::default();

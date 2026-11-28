@@ -433,6 +433,14 @@ pub fn effect_observed(
         BrowserAction::Navigate{..}=>{
             if before.origin==after.origin && before.title==after.title
                 && before.text_excerpt==after.text_excerpt{return false;}
+            // For exact, quoted-source research, a different descendant
+            // URL is not goal progress. Require an independently observed
+            // improvement in objective-relevant content, rather than treating
+            // each sibling/child page as a successful research step.
+            if semantic_core::within_cited_source(goal,&before.origin) {
+                return semantic_core::within_cited_source(goal,&after.origin)
+                    && visible_topic_advanced(goal,stage,before,after);
+            }
             // Changes to the URL alone are not sufficient if the resulting
             // page is an unrelated utility or account destination.
             if unrelated_control(goal,&after.title){return false;}
@@ -640,6 +648,27 @@ mod tests{
         assert!(!irrelevant_control("play any song",&p,&click("play")));
         assert!(!irrelevant_control("Purchase music and download the album",&p,&click("download")),
             "A clearly transactional request stays under the existing approval policy");
+    }
+    #[test]
+    fn exact_source_descendant_url_change_alone_is_not_research_progress(){
+        let goal="Visit https://www.w3.org/WAI/tutorials/images/ and report one recommendation, citing a supporting passage from the exact source.";
+        let before=DomSnapshot{
+            origin:"https://www.w3.org/WAI/tutorials/images/".into(),
+            title:"W3C Images guide".into(),
+            text_excerpt:"Images accessibility recommendation".into(),
+            ..page(vec![])
+        };
+        let mut after=DomSnapshot{
+            origin:"https://www.w3.org/WAI/tutorials/images/informative/".into(),
+            title:before.title.clone(),text_excerpt:before.text_excerpt.clone(),
+            ..before.clone()
+        };
+        let action=BrowserAction::Navigate{url:after.origin.clone()};
+        assert!(!effect_observed(goal,"Review official image guidance",&before,&after,&action),
+            "A changed URL with identical topical evidence is not research progress");
+        after.text_excerpt.push_str(" supporting passage");
+        assert!(effect_observed(goal,"Review official image guidance",&before,&after,&action),
+            "Genuinely more relevant rendered evidence remains progress");
     }
     #[test]
     fn acknowledged_action_without_observed_change_is_not_progress(){
