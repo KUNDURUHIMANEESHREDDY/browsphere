@@ -76,6 +76,10 @@ async function main(){
      config.ollama_url='http://127.0.0.1:11434';
      config.ollama_model=${JSON.stringify(actionModel)};
      config.planner_model=${JSON.stringify(actionModel)};
+     // The bundled/default writer tag may not be installed on the isolated
+     // runner. The evidence passage selector must use this genuinely
+     // installed, explicitly tested model, not a phantom alternate role.
+     config.writer_model=${JSON.stringify(actionModel)};
      config.supervisor_model=${JSON.stringify(supervisorModel)};
      await window.__TAURI__.core.invoke('update_router_config',{config});
      return true;

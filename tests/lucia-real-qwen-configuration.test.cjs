@@ -6,6 +6,7 @@ const path=require('node:path');
 const root=path.resolve(__dirname,'..');
 const script=fs.readFileSync(path.join(root,'tests/e2e/run-lucia-real-qwen.ps1'),'utf8');
 const workflow=fs.readFileSync(path.join(root,'.github/workflows/lucia-real-qwen.yml'),'utf8');
+const realSiteHarness=fs.readFileSync(path.join(root,'tests/e2e/lucia-unfamiliar-source-acceptance.cjs'),'utf8');
 
 test('real-site runner default is a model the admission gate actually allows',()=>{
   const model=script.match(/\[string\]\$Model\s*=\s*'([^']+)'/)?.[1];
@@ -34,4 +35,12 @@ test('genuine Qwen JSON preflight disables thinking and budgets response tokens'
   assert.match(probe,/ConvertFrom-Json -ErrorAction Stop/);
   assert.match(probe,/\$preflightAction\.type -ne 'scroll'/);
   assert.match(probe,/\$preflightAction\.delta_y -ne 150/);
+});
+
+test('real-site evidence selector uses the installed action model, not an unrelated default writer',()=>{
+  assert.match(realSiteHarness,/config\.ollama_model=\$\{JSON\.stringify\(actionModel\)\}/);
+  assert.match(realSiteHarness,/config\.planner_model=\$\{JSON\.stringify\(actionModel\)\}/);
+  assert.match(realSiteHarness,/config\.writer_model=\$\{JSON\.stringify\(actionModel\)\}/);
+  assert.match(realSiteHarness,/config\.supervisor_model=\$\{JSON\.stringify\(supervisorModel\)\}/);
+  assert.match(realSiteHarness,/genuineResearchSelections\.length>0/);
 });

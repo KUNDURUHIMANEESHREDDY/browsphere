@@ -43,6 +43,15 @@ fn newer_original_source_evidence(
         old.url == new.url && old.title == new.title && old.excerpt == new.excerpt))
 }
 
+/// A quoted passage from one user-specified article is single-source
+/// research, not a two-source comparison. Keep explicit multi-source goals
+/// and comparison specialist plans on the stricter comparison verifier.
+/// This classification changes which independent verifier runs, never the
+/// evidence requirements, source restrictions or model action permissions.
+fn needs_comparison_verifier(goal: &str, comparison_stage: bool) -> bool {
+    comparison_stage || crate::agent::deliberation::explicit_research_sources(goal).len() >= 2
+}
+
 // A bounded extension for CPU-only Qwen 3B, while preserving immediate
 // cancellation and native verifier gates. This is an inference deadline,
 // not a way to mark an unresponsive model or browser task successful.
@@ -4087,9 +4096,11 @@ async fn run_browser_loop(
                         reason: "No fresh DOM capture for final verification".into(),
                     };
                 } else {
-                    let is_comparison = orchestrator.plan.stages.iter()
-                        .any(|stage| stage.specialist == Specialist::Comparison)
-                        || !crate::agent::deliberation::explicit_research_sources(&goal).is_empty();
+                    let is_comparison = needs_comparison_verifier(
+                        &goal,
+                        orchestrator.plan.stages.iter()
+                            .any(|stage| stage.specialist == Specialist::Comparison),
+                    );
                     let result = if orchestrator.plan.stages.iter().any(|stage|
                         stage.specialist==Specialist::Form){
                         // Form verification is read-only, deterministic and
@@ -5010,6 +5021,20 @@ async fn run_browser_loop(
 #[cfg(test)]
 mod production_safety_tests {
     use super::*;
+
+    #[test]
+    fn exact_source_article_uses_one_source_verifier_but_comparisons_keep_two_source_gate() {
+        let w3c="Visit https://www.w3.org/WAI/tutorials/images/ and report one specific accessibility recommendation for informative images, citing the observed official W3C source.";
+        let webdev="Visit https://web.dev/learn/accessibility and report one specific recommendation from the official Learn Accessibility guide, citing a supporting passage from that exact website.";
+        assert_eq!(crate::agent::deliberation::explicit_research_sources(w3c).len(),1);
+        assert!(!needs_comparison_verifier(w3c,false));
+        assert!(!needs_comparison_verifier(webdev,false));
+        let two="Compare https://docs.python.org/3/ and https://developer.mozilla.org/en-US/ for accessibility and cite each source.";
+        assert!(needs_comparison_verifier(two,false));
+        assert!(needs_comparison_verifier(w3c,true),
+            "An explicitly assigned comparison specialist still requires comparison review");
+        assert!(!needs_comparison_verifier("Open the first documentation result",false));
+    }
 
     #[test]
     fn slow_qwen_cpu_action_deadline_is_bounded_and_no_cloud_change() {
