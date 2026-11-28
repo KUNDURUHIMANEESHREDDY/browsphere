@@ -1793,10 +1793,31 @@ async fn run_live_visual_smoke(
     let before_signals=state.perception.status(&label).signal_count;
     // Mutate ONLY our throwaway local fixture, and verify a new native
     // BRPR signal as well as a distinct subsequent streamed image frame.
+    // A CSS background on body/html alone is not guaranteed to be visible:
+    // a painted child can cover it. Add an unmistakable fixed overlay to this
+    // CI-only localhost fixture and wait for the compositor to paint it before
+    // reading another CDP frame. Never manufacture a successful frame receipt.
     agent::native_eval::eval_json(&app,&label,
-        "(()=>{document.body.style.backgroundColor='rgb(24, 90, 175)'; \
-            document.documentElement.style.backgroundColor='rgb(24, 90, 175)'; \
-            return true;})()".into(),2000).await?;
+        r#"(()=>{const overlay=document.createElement('div');
+            overlay.id='lucia-live-visual-smoke-overlay';
+            Object.assign(overlay.style,{
+                position:'fixed',inset:'0',backgroundColor:'rgb(24, 90, 175)',
+                zIndex:'2147483647',pointerEvents:'none'
+            });
+            document.body.appendChild(overlay);
+            window.__luciaLiveVisualPainted=false;
+            requestAnimationFrame(()=>requestAnimationFrame(()=>{
+                window.__luciaLiveVisualPainted=true;
+            }));
+            return true;})()"#.into(),2000).await?;
+    let mut painted=false;
+    for _ in 0..30 {
+        if agent::native_eval::eval_json(&app,&label,
+            "window.__luciaLiveVisualPainted === true".into(),1000).await.ok()
+            .and_then(|v|v.as_bool())==Some(true) {painted=true;break;}
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    if !painted{return Err("Isolated fixture did not paint its visual change".into());}
     let signaled=tokio::time::timeout(std::time::Duration::from_secs(2),async {
         loop {
             if state.perception.status(&label).signal_count>before_signals {break true;}
@@ -1805,7 +1826,15 @@ async fn run_live_visual_smoke(
     }).await.unwrap_or(false);
     if !signaled{return Err("BRPR did not signal the isolated visual change".into());}
     let start=std::time::Instant::now();
-    let second=agent::live_visual::sample(&app,&label).await?;
+    let mut second=agent::live_visual::sample(&app,&label).await?;
+    // CDP can deliver an already queued pre-paint frame immediately after
+    // restarting a stream. Do not count it as an observed visual change:
+    // retry with a strictly bounded number of *new real screencasts*.
+    for _ in 0..2 {
+        if Sha256::digest(first.as_bytes())!=Sha256::digest(second.as_bytes()){break;}
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        second=agent::live_visual::sample(&app,&label).await?;
+    }
     let second_frame_ms=start.elapsed().as_millis() as u64;
     let second_frame_chars=second.len();
     let changed=Sha256::digest(first.as_bytes())!=Sha256::digest(second.as_bytes());
