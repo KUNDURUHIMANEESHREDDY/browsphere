@@ -1,7 +1,7 @@
-# Genuine Qwen 2.5 native Windows test using pinned Ollama portable binaries.
+# Genuine Qwen3.5 0.8B native Windows test using pinned Ollama portable binaries.
 # Model and browser run only on a temporary GitHub-hosted Windows worker.
 param(
-  [string]$Model = 'qwen2.5:3b-instruct',
+  [string]$Model = 'qwen3.5:0.8b',
   [switch]$UnfamiliarSites,
   [ValidateSet('all','webdev','w3c')][string]$Scenario='all',
   [ValidateRange(1,3)][int]$Repetitions=3
