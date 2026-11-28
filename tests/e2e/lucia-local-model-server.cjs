@@ -121,7 +121,11 @@ function decideAction(prompt) {
       return reply({type:'complete',summary:'Observed dialog closed after Escape'});
     const keyboardEscape=escapeObservedKeyboardDialog(page,nodes);
     if (keyboardEscape) return reply(keyboardEscape);
-    if (page.includes('Keyboard dialog not opened') && has('Open keyboard dialog'))
+    // A bounded page excerpt may omit the dialog-status output. The visible,
+    // observed opener is sufficient to propose a click, but an active modal
+    // must be handled through its own live dialog node, never reopened.
+    if (has('Open keyboard dialog') &&
+        !/(?:active dialog:|keyboard dialog is open)/i.test(page))
       return reply({type:'click',node_id:has('Open keyboard dialog').node_id,
         element_label:'Open keyboard dialog',is_submit:false});
     return reply({type:'scroll',delta_y:0});
