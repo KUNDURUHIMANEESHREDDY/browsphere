@@ -87,6 +87,14 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build:css
 
+      - name: Install pinned upstream Playwright for native real-site checks
+        shell: pwsh
+        run: |
+          npm ci --prefix tests/interop --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install pinned Playwright CDP test library' }
+          npm test --prefix tests/interop
+          if ($LASTEXITCODE -ne 0) { throw 'Playwright loopback-only safety checks failed' }
+
       - name: Validate genuine-Qwen acceptance scripts
         shell: pwsh
         run: |
