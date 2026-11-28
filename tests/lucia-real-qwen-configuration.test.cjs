@@ -17,6 +17,8 @@ test('workflow dispatch uses the real-model runner in unfamiliar-site mode',()=>
   assert.match(workflow,/workflow_dispatch:/);
   assert.match(workflow,/npm ci --prefix tests\/interop --ignore-scripts/);
   assert.match(workflow,/npm test --prefix tests\/interop/);
+  assert.match(workflow,/inputs\.scenario/);
+  assert.match(workflow,/inputs\.repetitions/);
   assert.match(workflow,/run-lucia-real-qwen\.ps1\s+-UnfamiliarSites/);
   assert.match(script,/run-lucia-unfamiliar-hosted\.ps1/);
   assert.match(script,/\$probe\.done/);

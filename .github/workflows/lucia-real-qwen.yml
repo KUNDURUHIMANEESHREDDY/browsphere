@@ -110,7 +110,7 @@ jobs:
       - name: Build release Browsphere executable
         run: cargo build --manifest-path src-tauri/Cargo.toml --locked --release
 
-      - name: Run actual Qwen 2.5 through native Windows WebView2
+      - name: Run actual Qwen 3.5 0.8B through native Windows WebView2
         shell: pwsh
         timeout-minutes: 30
         run: |
@@ -119,8 +119,11 @@ jobs:
             # Per-change evidence: ONE trial on each unfamiliar site. Even if
             # both pass, this is not the six-run release acceptance gate.
             ./tests/e2e/run-lucia-real-qwen.ps1 -UnfamiliarSites -Scenario all -Repetitions 1
-          } elseif ('${{ github.event_name }}' -eq 'push' -or '${{ inputs.unfamiliar_sites }}' -eq 'true') {
-            # Full release acceptance retains three independent attempts/site.
+          } elseif ('${{ github.event_name }}' -eq 'workflow_dispatch' -and '${{ inputs.unfamiliar_sites }}' -eq 'true') {
+            # The limited diagnostic must honor the requested site and repeat count;
+            # one site trial cannot be reported as full 6/6 acceptance.
+            ./tests/e2e/run-lucia-real-qwen.ps1 -UnfamiliarSites -Scenario '${{ inputs.scenario }}' -Repetitions ([int]'${{ inputs.repetitions }}')
+          } elseif ('${{ github.event_name }}' -eq 'push') {
             ./tests/e2e/run-lucia-real-qwen.ps1 -UnfamiliarSites -Scenario all -Repetitions 3
           } else {
             ./tests/e2e/run-lucia-real-qwen.ps1
