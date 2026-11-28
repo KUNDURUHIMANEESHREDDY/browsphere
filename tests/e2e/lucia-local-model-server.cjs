@@ -142,8 +142,15 @@ function decideAction(prompt) {
   }
   const detailsClose=closeObservedDetailsDialog(page,nodes);
   if (detailsClose) return reply(detailsClose);
+  // The compact model prompt can end before the later dialog-status text.
+  // Do not require a clipped "Dialog not opened" marker: the currently
+  // observed, uniquely aliased Open details control is the action authority.
+  // The independent native binding and final page evidence still decide
+  // whether the click actually succeeded.
   if (page.includes('Advanced is enabled') &&
-      page.includes('Dialog not opened') && has('Open details')) {
+      has('Open details') &&
+      !page.includes('Dialog is open') &&
+      !page.includes('Dialog closed successfully')) {
     return reply({type:'click',node_id:has('Open details').node_id,
       element_label:'Open details',is_submit:false});
   }
